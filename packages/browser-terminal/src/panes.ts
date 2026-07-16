@@ -5,7 +5,7 @@
  */
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
-import type { Effects, EngineEvent, LayoutSnapshot } from './events.js';
+import type { DividerInfo, Effects, EngineEvent, LayoutSnapshot } from './events.js';
 
 /** Split very large single writes into slices this big. */
 const CHUNK_SIZE = 64 * 1024;
@@ -65,6 +65,7 @@ export class PaneManager {
   /** Output that arrived before its pane's xterm existed (events precede
    * the layout snapshot that creates panes). */
   private pendingOutput = new Map<number, string[]>();
+  private dividerEls: HTMLElement[] = [];
   private activePane = -1;
   private prefixArmed = false;
   private disposed = false;
@@ -101,8 +102,17 @@ export class PaneManager {
       case 'prefixState':
         this.setPrefixArmed(event.active);
         break;
+      case 'paneClosed': {
+        // Really gone (kill-pane) — panes merely absent from a snapshot
+        // (background sessions/windows) are hidden, keeping their scrollback.
+        const handle = this.panes.get(event.pane);
+        if (handle) {
+          this.destroyPane(event.pane, handle);
+        }
+        this.pendingOutput.delete(event.pane);
+        break;
+      }
       case 'paneOpened':
-      case 'paneClosed':
       case 'sessionClosed':
         // The accompanying layoutChanged snapshot is authoritative.
         break;
@@ -123,14 +133,17 @@ export class PaneManager {
   applySnapshot(snapshot: LayoutSnapshot): void {
     const wanted = new Map(snapshot.panes.map((p) => [p.pane, p]));
 
-    for (const [id, handle] of [...this.panes]) {
+    // Panes not in this snapshot belong to background windows/sessions:
+    // hide them (scrollback survives); paneClosed events destroy for real.
+    for (const [id, handle] of this.panes) {
       if (!wanted.has(id)) {
-        this.destroyPane(id, handle);
+        handle.el.style.display = 'none';
       }
     }
 
     for (const info of snapshot.panes) {
       const handle = this.panes.get(info.pane) ?? this.createPane(info.pane);
+      handle.el.style.display = '';
       const { x, y, w, h } = info.rect;
       handle.el.style.left = `${x * 100}%`;
       handle.el.style.top = `${y * 100}%`;
@@ -144,25 +157,19 @@ export class PaneManager {
     }
 
     this.activePane = snapshot.active_pane;
+    this.renderDividers(snapshot.dividers);
 
     // Fit after the DOM settles, then hand real cols/rows back to Rust.
     requestAnimationFrame(() => {
       if (this.disposed) return;
-      for (const [id, handle] of this.panes) {
-        try {
-          handle.fit.fit();
-          this.hooks.resize(id, handle.term.cols, handle.term.rows);
-        } catch {
-          // A pane mid-teardown can throw during fit; snapshot churn will
-          // reconcile it.
-        }
-      }
+      this.fitAll();
       this.panes.get(this.activePane)?.term.focus();
     });
   }
 
   fitAll(): void {
     for (const [id, handle] of this.panes) {
+      if (handle.el.style.display === 'none') continue;
       try {
         handle.fit.fit();
         this.hooks.resize(id, handle.term.cols, handle.term.rows);
@@ -189,6 +196,58 @@ export class PaneManager {
     this.disposed = true;
     for (const [id, handle] of [...this.panes]) {
       this.destroyPane(id, handle);
+    }
+    for (const el of this.dividerEls) {
+      el.remove();
+    }
+    this.dividerEls = [];
+  }
+
+  /** Divider drag: Rust stays authoritative — every pointer move dispatches
+   * a resizeSplit and the resulting snapshot re-lays panes out live. */
+  private renderDividers(dividers: DividerInfo[]): void {
+    for (const el of this.dividerEls) {
+      el.remove();
+    }
+    this.dividerEls = [];
+    for (const d of dividers) {
+      const el = document.createElement('div');
+      const horizontal = d.dir === 'row';
+      el.style.cssText = [
+        'position:absolute',
+        'z-index:10',
+        `left:${d.rect.x * 100}%`,
+        `top:${d.rect.y * 100}%`,
+        horizontal
+          ? `width:7px;height:${d.rect.h * 100}%;transform:translateX(-3.5px);cursor:col-resize`
+          : `height:7px;width:${d.rect.w * 100}%;transform:translateY(-3.5px);cursor:row-resize`,
+      ].join(';');
+      el.addEventListener('pointerdown', (ev: PointerEvent) => {
+        ev.preventDefault();
+        el.setPointerCapture(ev.pointerId);
+        let pending: number | null = null;
+        const move = (mv: PointerEvent) => {
+          const box = this.container.getBoundingClientRect();
+          const pointerFrac = horizontal
+            ? (mv.clientX - box.left) / box.width
+            : (mv.clientY - box.top) / box.height;
+          const fraction = (pointerFrac - d.span_start) / d.span_size - d.before;
+          if (pending === null) {
+            pending = requestAnimationFrame(() => {
+              pending = null;
+              this.hooks.dispatch({ type: 'resizeSplit', path: d.path, fraction });
+            });
+          }
+        };
+        const up = () => {
+          el.removeEventListener('pointermove', move);
+          el.removeEventListener('pointerup', up);
+        };
+        el.addEventListener('pointermove', move);
+        el.addEventListener('pointerup', up);
+      });
+      this.container.appendChild(el);
+      this.dividerEls.push(el);
     }
   }
 

@@ -10,6 +10,7 @@ packages/demo/dist/
 
 # Generated wasm-bindgen output
 packages/browser-terminal/src/wasm/
+packages/browser-terminal/src/generated/
 
 # Editors / OS
 .DS_Store

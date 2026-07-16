@@ -4,14 +4,17 @@
  * A floating panel hosting a tmux-style multiplexer: the Rust/WASM engine
  * owns sessions, windows, the layout tree, the shell language, and the
  * command registry; this wrapper owns pixels (xterm panes positioned from
- * fractional snapshots) and the prefix chord.
+ * fractional snapshots), the prefix chord, and the panel chrome (Shadow
+ * DOM: drag, resize, tabs, session pills).
  */
 import init, { BtermCore } from './wasm/bterm_wasm.js';
 import { PaneManager } from './panes.js';
-import type { Effects, EngineEvent, LayoutSnapshot } from './events.js';
+import { PanelHost } from './panels.js';
+import type { Effects, EngineEvent, HostMsg, LayoutSnapshot } from './events.js';
 import type { CommandFn, CommandSpec, Value } from './types.js';
 
 export type {
+  DividerInfo,
   Effects,
   EngineEvent,
   HostMsg,
@@ -33,22 +36,30 @@ export type {
 } from './types.js';
 
 export interface CreateOptions {
-  /** Element to mount the terminal panel into; a bottom-docked panel is created if omitted. */
+  /**
+   * Element to mount panes into. When provided, the floating panel chrome
+   * is skipped — you own the container. Omit for the default draggable
+   * bottom panel.
+   */
   mount?: HTMLElement;
   /** Override the URL of the .wasm binary (for CDN / non-bundler setups). */
   wasmUrl?: string | URL;
+  /** Add a window-level Ctrl+` toggle for the panel (off by default — the
+   * library adds no global listeners unless asked). */
+  globalToggle?: boolean;
 }
 
 let instanceLive = false;
 
 export class BrowserTerminal {
   private lastSnapshot: LayoutSnapshot | null = null;
+  private globalToggleHandler: ((ev: KeyboardEvent) => void) | null = null;
 
   private constructor(
     private readonly core: BtermCore,
     private readonly paneManager: PaneManager,
+    private readonly panel: PanelHost | null,
     private readonly resizeObserver: ResizeObserver,
-    private readonly ownedMount: HTMLElement | null,
     private readonly mount: HTMLElement,
   ) {}
 
@@ -63,15 +74,21 @@ export class BrowserTerminal {
         opts.wasmUrl ?? new URL('./wasm/bterm_wasm_bg.wasm', import.meta.url),
     });
 
-    let ownedMount: HTMLElement | null = null;
-    let mount = opts.mount;
-    if (!mount) {
-      ownedMount = BrowserTerminal.createDefaultMount();
-      mount = ownedMount;
-    }
-
     let core!: BtermCore;
     let self!: BrowserTerminal;
+
+    let panel: PanelHost | null = null;
+    let mount = opts.mount;
+    if (!mount) {
+      panel = new PanelHost({
+        dispatch: (msg: HostMsg) => core.dispatch(msg),
+        runCommand: (cmd: string) => {
+          (self.run(cmd) as Promise<unknown>).catch(() => {});
+        },
+      });
+      mount = panel.contentEl;
+    }
+
     const paneManager = new PaneManager(mount, {
       feed: (pane, data) => core.feed(pane, data) as Effects | null,
       resize: (pane, cols, rows) => core.resize(pane, cols, rows),
@@ -79,11 +96,17 @@ export class BrowserTerminal {
     });
 
     core = new BtermCore((event: EngineEvent) => {
-      if (event.type === 'layoutChanged') {
-        self.lastSnapshot = event.snapshot;
-      }
-      if (event.type === 'hidePanel') {
-        self.hide();
+      switch (event.type) {
+        case 'layoutChanged':
+          self.lastSnapshot = event.snapshot;
+          panel?.applySnapshot(event.snapshot);
+          break;
+        case 'prefixState':
+          panel?.setPrefix(event.active);
+          break;
+        case 'hidePanel':
+          self.hide();
+          break;
       }
       paneManager.handleEvent(event);
     });
@@ -92,12 +115,24 @@ export class BrowserTerminal {
     resizeObserver.observe(mount);
 
     instanceLive = true;
-    self = new BrowserTerminal(core, paneManager, resizeObserver, ownedMount, mount);
+    self = new BrowserTerminal(core, paneManager, panel, resizeObserver, mount);
+
+    if (opts.globalToggle) {
+      self.globalToggleHandler = (ev: KeyboardEvent) => {
+        if (ev.ctrlKey && ev.key === '`') {
+          ev.preventDefault();
+          self.toggle();
+        }
+      };
+      window.addEventListener('keydown', self.globalToggleHandler);
+    }
+
     // The constructor emitted banner/prompt/layout before `self` existed;
     // reconcile from a fresh snapshot.
     const snapshot = core.snapshot() as LayoutSnapshot | null;
     if (snapshot) {
       self.lastSnapshot = snapshot;
+      panel?.applySnapshot(snapshot);
       paneManager.applySnapshot(snapshot);
     }
     return self;
@@ -135,16 +170,27 @@ export class BrowserTerminal {
   }
 
   show(): void {
-    this.mount.style.display = '';
+    if (this.panel) {
+      this.panel.show();
+    } else {
+      this.mount.style.display = '';
+    }
     this.paneManager.fitAll();
   }
 
   hide(): void {
-    this.mount.style.display = 'none';
+    if (this.panel) {
+      this.panel.hide();
+    } else {
+      this.mount.style.display = 'none';
+    }
   }
 
   toggle(): void {
-    if (this.mount.style.display === 'none') {
+    const hidden = this.panel
+      ? this.panel.hostEl.style.display === 'none'
+      : this.mount.style.display === 'none';
+    if (hidden) {
       this.show();
     } else {
       this.hide();
@@ -152,29 +198,14 @@ export class BrowserTerminal {
   }
 
   dispose(): void {
+    if (this.globalToggleHandler) {
+      window.removeEventListener('keydown', this.globalToggleHandler);
+    }
     this.resizeObserver.disconnect();
     this.paneManager.dispose();
     this.core.dispose();
     this.core.free();
-    this.ownedMount?.remove();
+    this.panel?.dispose();
     instanceLive = false;
-  }
-
-  private static createDefaultMount(): HTMLElement {
-    const el = document.createElement('div');
-    el.style.cssText = [
-      'position:fixed',
-      'left:16px',
-      'right:16px',
-      'bottom:16px',
-      'height:340px',
-      'background:#181825',
-      'padding:6px',
-      'border-radius:8px',
-      'box-shadow:0 8px 32px rgba(0,0,0,.4)',
-      'z-index:2147483000',
-    ].join(';');
-    document.body.appendChild(el);
-    return el;
   }
 }

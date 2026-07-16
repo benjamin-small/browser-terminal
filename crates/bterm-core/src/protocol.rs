@@ -3,7 +3,7 @@
 //! `HostMsg`s through `dispatch`. Layout crosses as full snapshots — the
 //! tree is tiny; no diffing.
 
-use crate::mux::Rect;
+use crate::mux::{DividerInfo, Rect};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -35,6 +35,10 @@ pub enum HostMsg {
     Key { key: String },
     /// The user clicked into a pane.
     FocusPane { pane: u32 },
+    /// Status-bar window tab click.
+    FocusWindow { window: u32 },
+    /// Dock session pill click.
+    FocusSession { session: u32 },
     /// Divider drag: set the fraction of the child at `path` in the active
     /// window's split tree (its next sibling absorbs the difference).
     ResizeSplit { path: Vec<usize>, fraction: f32 },
@@ -70,6 +74,8 @@ pub struct LayoutSnapshot {
     pub windows: Vec<WindowInfo>,
     /// Panes of the active window with fractional rects.
     pub panes: Vec<PaneInfo>,
+    /// Draggable split boundaries of the active window.
+    pub dividers: Vec<DividerInfo>,
     /// The focused pane.
     pub active_pane: u32,
     pub zoomed: Option<u32>,

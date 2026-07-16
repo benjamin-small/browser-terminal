@@ -28,10 +28,20 @@ export interface PaneInfo {
   active: boolean;
 }
 
+export interface DividerInfo {
+  path: number[];
+  dir: 'row' | 'col';
+  rect: Rect;
+  span_start: number;
+  span_size: number;
+  before: number;
+}
+
 export interface LayoutSnapshot {
   sessions: SessionInfo[];
   windows: WindowInfo[];
   panes: PaneInfo[];
+  dividers: DividerInfo[];
   active_pane: number;
   zoomed: number | null;
 }
@@ -50,6 +60,8 @@ export type HostMsg =
   | { type: 'prefixKey' }
   | { type: 'key'; key: string }
   | { type: 'focusPane'; pane: number }
+  | { type: 'focusWindow'; window: number }
+  | { type: 'focusSession'; session: number }
   | { type: 'resizeSplit'; path: number[]; fraction: number };
 
 /** Result of feeding input to the engine's sync hot path. */

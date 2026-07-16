@@ -126,6 +126,7 @@ impl Engine {
                 .into_iter()
                 .map(|(pane, rect)| PaneInfo { pane, rect, active: pane == window.active_pane })
                 .collect(),
+            dividers: crate::mux::dividers(window, Rect::FULL),
             active_pane: window.active_pane,
             zoomed: window.zoomed,
         }
@@ -157,6 +158,16 @@ impl Engine {
                 let outcome = self.mux.focus_pane(pane);
                 self.apply_outcome(&outcome);
                 MsgResult { closed_panes: outcome.closed_panes, ..Default::default() }
+            }
+            HostMsg::FocusWindow { window } => {
+                let outcome = self.mux.focus_window(window);
+                self.apply_outcome(&outcome);
+                MsgResult::default()
+            }
+            HostMsg::FocusSession { session } => {
+                let outcome = self.mux.focus_session(session);
+                self.apply_outcome(&outcome);
+                MsgResult::default()
             }
             HostMsg::ResizeSplit { path, fraction } => {
                 let outcome = self.mux.resize_split(&path, fraction);

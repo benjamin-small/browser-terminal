@@ -407,6 +407,28 @@ impl Mux {
         MuxOutcome { layout_changed: true, ..Default::default() }
     }
 
+    /// Focus a window by id in the active session (status-bar tab click).
+    pub fn focus_window(&mut self, window: WindowId) -> MuxOutcome {
+        let session = self
+            .sessions
+            .get_mut(&self.active_session)
+            .expect("active session");
+        if session.windows.contains_key(&window) && session.active_window != window {
+            session.active_window = window;
+            return MuxOutcome { layout_changed: true, ..Default::default() };
+        }
+        MuxOutcome::default()
+    }
+
+    /// Focus a session by id (dock pill click).
+    pub fn focus_session(&mut self, session: SessionId) -> MuxOutcome {
+        if self.sessions.contains_key(&session) && self.active_session != session {
+            self.active_session = session;
+            return MuxOutcome { layout_changed: true, ..Default::default() };
+        }
+        MuxOutcome::default()
+    }
+
     pub fn switch_session(&mut self, name: &str) -> Result<MuxOutcome, String> {
         match self.sessions.values().find(|s| s.name == name) {
             Some(s) => {
@@ -451,6 +473,84 @@ fn dist2(a: (f32, f32), b: (f32, f32)) -> f32 {
     let dx = a.0 - b.0;
     let dy = a.1 - b.1;
     dx * dx + dy * dy
+}
+
+/// A draggable boundary between two adjacent split children. `path` walks
+/// Split children from the window root and names the left/top child of the
+/// pair; `span_*`/`before` give TS everything needed to turn a pointer
+/// position into the child's new fraction without re-deriving the tree.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct DividerInfo {
+    pub path: Vec<usize>,
+    pub dir: Dir,
+    /// Zero-thickness strip at the boundary (TS gives it a hit area).
+    pub rect: Rect,
+    /// The split's start along its axis, in container fractions.
+    pub span_start: f32,
+    /// The split's size along its axis, in container fractions.
+    pub span_size: f32,
+    /// Cumulative fraction of siblings before the left/top child.
+    pub before: f32,
+}
+
+/// Compute divider strips for a layout (empty when zoomed).
+pub fn dividers(window: &Window, rect: Rect) -> Vec<DividerInfo> {
+    if window.zoomed.is_some() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    collect_dividers(&window.layout, rect, &mut Vec::new(), &mut out);
+    out
+}
+
+fn collect_dividers(
+    node: &LayoutNode,
+    rect: Rect,
+    path: &mut Vec<usize>,
+    out: &mut Vec<DividerInfo>,
+) {
+    let LayoutNode::Split { dir, children } = node else {
+        return;
+    };
+    let total: f32 = children.iter().map(|(f, _)| f).sum();
+    let total = if total <= 0.0 { 1.0 } else { total };
+    let mut offset = 0.0f32;
+    for (i, (fraction, child)) in children.iter().enumerate() {
+        let share = fraction / total;
+        let sub = match dir {
+            Dir::Row => Rect { x: rect.x + rect.w * offset, y: rect.y, w: rect.w * share, h: rect.h },
+            Dir::Col => Rect { x: rect.x, y: rect.y + rect.h * offset, w: rect.w, h: rect.h * share },
+        };
+        if i + 1 < children.len() {
+            let boundary = offset + share;
+            let (strip, span_start, span_size) = match dir {
+                Dir::Row => (
+                    Rect { x: rect.x + rect.w * boundary, y: rect.y, w: 0.0, h: rect.h },
+                    rect.x,
+                    rect.w,
+                ),
+                Dir::Col => (
+                    Rect { x: rect.x, y: rect.y + rect.h * boundary, w: rect.w, h: 0.0 },
+                    rect.y,
+                    rect.h,
+                ),
+            };
+            let mut divider_path = path.clone();
+            divider_path.push(i);
+            out.push(DividerInfo {
+                path: divider_path,
+                dir: *dir,
+                rect: strip,
+                span_start,
+                span_size,
+                before: offset,
+            });
+        }
+        path.push(i);
+        collect_dividers(child, sub, path, out);
+        path.pop();
+        offset += share;
+    }
 }
 
 /// All pane ids in DFS (visual) order.
