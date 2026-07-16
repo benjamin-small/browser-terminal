@@ -184,8 +184,18 @@ impl BtermCore {
         if !engine_alive() {
             return Err(JsValue::from_str("browser-terminal: engine is disposed"));
         }
-        let sig: Signature = serde_wasm_bindgen::from_value(sig)
-            .map_err(|e| JsValue::from_str(&format!("invalid command signature: {e}")))?;
+        // Through JSON text, not serde_wasm_bindgen::from_value:
+        // serde-wasm-bindgen reads struct fields by direct property lookup,
+        // which silently ignores unknown fields — a TS author's typo
+        // (`flag` vs `flags`) must error loudly instead.
+        let sig_json = js_sys::JSON::stringify(&sig)
+            .map_err(|_| JsValue::from_str("invalid command signature: not JSON-serializable"))?;
+        let sig: Signature = serde_json::from_str(
+            &sig_json
+                .as_string()
+                .ok_or_else(|| JsValue::from_str("invalid command signature"))?,
+        )
+        .map_err(|e| JsValue::from_str(&format!("invalid command signature: {e}")))?;
         if sig.name.trim().is_empty() {
             return Err(JsValue::from_str("command name must not be empty"));
         }
@@ -252,8 +262,16 @@ impl BtermCore {
     /// Tear down the engine: abort all in-flight work, drop state, detach
     /// the event callback. Subsequent calls on this handle are no-ops.
     pub fn dispose(&self) {
-        tasks::abort_all();
-        ON_EVENT.with(|c| *c.borrow_mut() = None);
-        ENGINE.with(|c| *c.borrow_mut() = None);
+        dispose_engine();
     }
+}
+
+/// Idempotent global teardown — same effect as `BtermCore::dispose()`.
+/// Useful when a hot-reload cycle lost the handle but the singleton engine
+/// is still alive.
+#[wasm_bindgen]
+pub fn dispose_engine() {
+    tasks::abort_all();
+    ON_EVENT.with(|c| *c.borrow_mut() = None);
+    ENGINE.with(|c| *c.borrow_mut() = None);
 }
