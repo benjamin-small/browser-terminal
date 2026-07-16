@@ -1,0 +1,19 @@
+# Rust
+/target
+Cargo.lock.orig
+
+# Node
+node_modules/
+packages/*/dist/
+packages/demo/dist/
+*.tsbuildinfo
+
+# Editors / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Test artifacts
+packages/demo/test-results/
+packages/demo/playwright-report/
