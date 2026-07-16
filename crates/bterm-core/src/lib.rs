@@ -3,17 +3,18 @@
 //!
 //! This crate has zero wasm dependencies and is tested natively.
 
-/// Milestone-1 placeholder for the input hot path: transform raw input into
-/// the bytes to echo back to the terminal (CR becomes CRLF so Enter starts a
-/// new line). Replaced by the real `LineEditor` in milestone 3.
-pub fn echo_transform(input: &str) -> String {
-    input.replace('\r', "\r\n")
-}
+pub mod ast;
+pub mod builtins;
+pub mod error;
+pub mod eval;
+pub mod lex;
+pub mod parse;
+pub mod registry;
+pub mod render;
+pub mod signature;
+pub mod value;
 
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn cr_becomes_crlf() {
-        assert_eq!(super::echo_transform("hi\r"), "hi\r\n");
-    }
-}
+pub use error::{ErrorKind, ShellError, Span};
+pub use registry::{Command, CommandRegistry, ExecContext, HostHooks, PipelineData};
+pub use signature::{BoundCall, Scope, Shape, Signature};
+pub use value::Value;

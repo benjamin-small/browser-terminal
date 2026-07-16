@@ -17,7 +17,8 @@ impl BtermCore {
     }
 
     /// Sync input hot path: raw terminal input in, echo bytes out, same tick.
+    /// M1 placeholder (plain echo, CR→CRLF); the real LineEditor arrives in M3.
     pub fn feed(&self, _pane: u32, data: &str) -> String {
-        bterm_core::echo_transform(data)
+        data.replace('\r', "\r\n")
     }
 }
