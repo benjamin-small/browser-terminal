@@ -3,11 +3,12 @@
 A terminal/tmux experience for any web page, powered by a Rust core compiled to
 WebAssembly.
 
-Floating terminal panels dock at the bottom of your page and run a shell-like
-language with **structured-value pipes** (nushell/PowerShell style). Commands can be
-built into the Rust core or registered from TypeScript in a few lines — so a
-terminal pane can query the DOM, call your app's APIs, and pipe the results through
-filters and tables:
+A floating terminal panel docks at the bottom of your page and runs a shell-like
+language with **structured-value pipes** (nushell/PowerShell style). Commands can
+be built into the Rust core or registered from TypeScript in a few lines — so a
+terminal pane can query the DOM, call your app's APIs, and pipe the results
+through filters into box-drawn tables. `Ctrl-B %` splits panes, `session new`
+forks shells, tmux-style.
 
 ```ts
 import { BrowserTerminal } from 'browser-terminal';
@@ -25,35 +26,119 @@ Then, in the terminal panel:
 
 ```
 ❯ links --limit 20 | where text ne '' | first 5
+┌───────────────┬──────────────────────────────┐
+│ text          │ href                         │
+├───────────────┼──────────────────────────────┤
+│ Rust language │ https://www.rust-lang.org/   │
+│ …             │ …                            │
+└───────────────┴──────────────────────────────┘
 ```
 
-…and you get a box-drawn table. `Ctrl-B %` splits the pane, `session new` forks a
-fresh shell, tmux-style.
+And from host-page code, the terminal doubles as a scripting engine:
 
-## Status
+```ts
+const count = await bt.run("links | where text ne '' | length");  // → 5
+```
 
-Early development — building toward v1. See
-[docs/superpowers/specs/2026-07-16-browser-terminal-design.md](docs/superpowers/specs/2026-07-16-browser-terminal-design.md)
-for the full architecture design.
+## Features
+
+- **Structured pipes**: values (strings, numbers, lists, records) flow between
+  commands; tables render automatically at the end of a pipeline.
+- **Commands in Rust or TypeScript**: builtins (`where`, `sort-by`, `get`,
+  `first`, `to json`, …) plus `registerCommand` for page-side commands.
+  TS commands get an `AbortSignal` (Ctrl-C cancels in-flight `fetch`es) and an
+  `emit()` for progressive output.
+- **tmux surface**: `Ctrl-B` prefix — `%`/`"` split, `c`/`n`/`p` windows,
+  `x` kill, `o`/arrows focus, `z` zoom, `(`/`)`/`s` sessions, `d` hide.
+  Every keybinding is just a shell command (`mux split --right`, `session new`).
+- **Floating panel**: Shadow-DOM isolated (no CSS bleed either way), drag by
+  header, edge resize, divider drag, window tabs, session pill dock,
+  minimize-to-pill. No global listeners unless you opt into `globalToggle`.
+- **Real shell feel**: sync keystroke echo (no async hop), line editor with
+  history/cursor ops, caret diagnostics with did-you-mean, bracketed paste
+  (pasted newlines never auto-execute), red/green status prompt.
+
+## Install
+
+```sh
+npm install browser-terminal
+```
+
+Works out of the box with Vite / webpack 5 (the `.wasm` loads via
+`new URL(..., import.meta.url)`).
+
+**No bundler?** Load from a CDN and point at the wasm explicitly:
+
+```html
+<script type="module">
+  import { BrowserTerminal } from 'https://esm.sh/browser-terminal';
+  const bt = await BrowserTerminal.create({
+    wasmUrl: 'https://esm.sh/browser-terminal/dist/wasm/bterm_wasm_bg.wasm',
+  });
+</script>
+```
+
+This library requires a browser (no SSR/Jest); guard imports accordingly.
+One instance per page in v1 — `create()` throws if one is live; `dispose()`
+first.
+
+## API sketch
+
+```ts
+const bt = await BrowserTerminal.create({
+  mount?: HTMLElement;        // bring your own container (skips panel chrome)
+  wasmUrl?: string | URL;     // custom .wasm location
+  globalToggle?: boolean;     // opt-in Ctrl+` show/hide
+});
+
+bt.registerCommand(spec, (args, input, ctx) => value | Promise<value>);
+//  spec: { name, summary?, required?, optional?, rest?, flags? }
+//  args: { positionals: Value[], flags: Record<string, Value> }
+//  ctx:  { signal: AbortSignal, emit(line: string): void }
+//  throw { message, help? } for rich diagnostics
+bt.unregisterCommand(name);
+bt.run(line): Promise<Value>;  // programmatic execution, typed result
+bt.snapshot;                   // sessions/windows/pane rects
+bt.show(); bt.hide(); bt.toggle(); bt.dispose();
+```
+
+## The shell language (v1)
+
+`;`-separated pipelines; multi-word commands (`str upcase`); flags
+(`--limit 5`, `--limit=5`, `-l 5`); `'raw'` and `"interpolated $var"` strings;
+`#` comments. `where` uses word operators so everything parses cleanly:
+`where text ne ''`, `where n gt 4`, `where href starts-with https`.
+Operators: `eq ne gt lt ge le contains starts-with ends-with`.
+`( ) { } && || > <` are reserved for v2 (closures, operators, redirects).
+
+Run `help` in the panel for the full command list; `help <command>` /
+`<command> --help` for usage.
 
 ## Layout
 
-- `crates/bterm-core` — the engine: shell language, structured values, pipeline
-  evaluation, line editor, renderer, multiplexer state. Zero WASM deps; tested
-  natively.
+- `crates/bterm-core` — the engine: language, values, eval, line editor,
+  renderer, multiplexer. Zero wasm deps; ~120 native tests.
 - `crates/bterm-cli` — native REPL over the core (dev harness).
-- `crates/bterm-wasm` — the wasm-bindgen boundary crate.
+- `crates/bterm-wasm` — the wasm-bindgen boundary (+8 boundary tests).
 - `packages/browser-terminal` — the npm package: TS wrapper, xterm.js panes,
-  floating panel manager.
-- `packages/demo` — Vite demo app.
+  Shadow-DOM panel.
+- `packages/demo` — Vite demo + Playwright smoke suite (`npx playwright test`).
+
+Architecture spec:
+[docs/superpowers/specs/2026-07-16-browser-terminal-design.md](docs/superpowers/specs/2026-07-16-browser-terminal-design.md)
 
 ## Development
 
-Requires: Rust (with `wasm32-unknown-unknown` target), Node 20+, `just`,
-`wasm-bindgen-cli`, `binaryen` (wasm-opt).
+Requires: Rust (`wasm32-unknown-unknown` target), Node 20+, `just`,
+`wasm-bindgen-cli` (matching the pinned crate version), `binaryen`.
 
 ```sh
-just test     # native Rust tests
-just wasm     # build the WASM artifact into packages/browser-terminal/dist/wasm
-just demo     # run the Vite demo
+just test       # native Rust tests (fast, the bulk)
+just test-wasm  # wasm-bindgen boundary tests under Node
+just build      # wasm + TS package build
+just demo       # run the Vite demo
+just test-e2e   # Playwright smoke suite
+just pack       # npm pack dry-run
 ```
+
+Current wasm size: ~392 KB raw, ~174 KB gzipped.

@@ -54,6 +54,7 @@ let instanceLive = false;
 export class BrowserTerminal {
   private lastSnapshot: LayoutSnapshot | null = null;
   private globalToggleHandler: ((ev: KeyboardEvent) => void) | null = null;
+  private disposed = false;
 
   private constructor(
     private readonly core: BtermCore,
@@ -146,11 +147,13 @@ export class BrowserTerminal {
    * replaces it (hot-reload friendly).
    */
   registerCommand(spec: CommandSpec, fn: CommandFn): void {
+    this.assertLive();
     this.core.register_command(spec, fn as (...args: unknown[]) => unknown);
   }
 
   /** Remove a TS-registered command (builtins are not removable). */
   unregisterCommand(name: string): void {
+    this.assertLive();
     this.core.unregister_command(name);
   }
 
@@ -160,6 +163,9 @@ export class BrowserTerminal {
    * host page.
    */
   run(line: string): Promise<Value> {
+    if (this.disposed) {
+      return Promise.reject(new Error('browser-terminal: instance is disposed'));
+    }
     const pane = this.lastSnapshot?.active_pane ?? 0;
     return this.core.run(pane, line) as Promise<Value>;
   }
@@ -198,6 +204,8 @@ export class BrowserTerminal {
   }
 
   dispose(): void {
+    if (this.disposed) return;
+    this.disposed = true;
     if (this.globalToggleHandler) {
       window.removeEventListener('keydown', this.globalToggleHandler);
     }
@@ -207,5 +215,11 @@ export class BrowserTerminal {
     this.core.free();
     this.panel?.dispose();
     instanceLive = false;
+  }
+
+  private assertLive(): void {
+    if (this.disposed) {
+      throw new Error('browser-terminal: instance is disposed');
+    }
   }
 }
