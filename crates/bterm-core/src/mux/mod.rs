@@ -632,9 +632,8 @@ fn remove_leaf(node: &LayoutNode, target: PaneId) -> Option<LayoutNode> {
         LayoutNode::Split { dir, children } => {
             let mut kept: Vec<(f32, LayoutNode)> = Vec::new();
             for (fraction, child) in children {
-                match remove_leaf(child, target) {
-                    Some(sub) => kept.push((*fraction, sub)),
-                    None => {}
+                if let Some(sub) = remove_leaf(child, target) {
+                    kept.push((*fraction, sub));
                 }
             }
             match kept.len() {
