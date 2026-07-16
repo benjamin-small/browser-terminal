@@ -198,9 +198,19 @@ impl<A: EngineAccess> HostHooks for EngineHost<A> {
     }
 }
 
+fn make_ctx<A: EngineAccess>(access: &A, pane: u32, run_id: u64) -> ExecContext {
+    let cols = access.with(|e| e.pane(pane).map(|p| p.cols).unwrap_or(80));
+    ExecContext {
+        host: Rc::new(EngineHost { access: access.clone(), pane }),
+        width: cols,
+        pane,
+        run_id,
+    }
+}
+
 /// Evaluate one submitted line in a pane: parse → eval → render → prompt.
 /// The single shared execution path for native tests and the browser.
-pub async fn execute_line<A: EngineAccess>(access: A, pane: u32, line: String) {
+pub async fn execute_line<A: EngineAccess>(access: A, pane: u32, line: String, run_id: u64) {
     let parsed = parse(&line);
     if !parsed.errors.is_empty() {
         access.with(|e| {
@@ -213,16 +223,9 @@ pub async fn execute_line<A: EngineAccess>(access: A, pane: u32, line: String) {
         return;
     }
 
-    let (cols, scope) = access.with(|e| {
-        (
-            e.pane(pane).map(|p| p.cols).unwrap_or(80),
-            e.scope.clone(),
-        )
-    });
-    let ctx = ExecContext {
-        host: Rc::new(EngineHost { access: access.clone(), pane }),
-        width: cols,
-    };
+    let ctx = make_ctx(&access, pane, run_id);
+    let cols = ctx.width;
+    let scope = access.with(|e| e.scope.clone());
     let source = EngineCommands(access.clone());
 
     let result = eval_line(&parsed.line, &source, &ctx, &scope).await;
@@ -245,6 +248,31 @@ pub async fn execute_line<A: EngineAccess>(access: A, pane: u32, line: String) {
         }
     });
     access.events_ready();
+}
+
+/// Programmatic execution (the TS `run()` API): parse and evaluate a line,
+/// returning the final pipeline's value without touching the pane's prompt
+/// or rendering anything. Commands' `ctx.emit` output still reaches the
+/// pane.
+pub async fn eval_to_value<A: EngineAccess>(
+    access: A,
+    pane: u32,
+    line: String,
+    run_id: u64,
+) -> Result<crate::value::Value, ShellError> {
+    let parsed = parse(&line);
+    if let Some(err) = parsed.errors.into_iter().next() {
+        return Err(err);
+    }
+    let ctx = make_ctx(&access, pane, run_id);
+    let scope = access.with(|e| e.scope.clone());
+    let source = EngineCommands(access.clone());
+    let results = eval_line(&parsed.line, &source, &ctx, &scope).await?;
+    Ok(results
+        .into_iter()
+        .last()
+        .map(PipelineData::into_value)
+        .unwrap_or(crate::value::Value::Null))
 }
 
 /// Mark the pane idle, color the prompt by status, and print it.
@@ -274,7 +302,7 @@ mod tests {
     fn feed_and_run(access: &Rc<RefCell<Engine>>, input: &str) -> Vec<EngineEvent> {
         let fx = access.with(|e| e.feed(0, input));
         for line in fx.submitted {
-            block_on(execute_line(access.clone(), 0, line));
+            block_on(execute_line(access.clone(), 0, line, 0));
         }
         access.with(|e| e.drain_events())
     }

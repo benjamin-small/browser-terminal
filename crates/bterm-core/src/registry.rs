@@ -60,6 +60,11 @@ pub struct ExecContext {
     pub host: Rc<dyn HostHooks>,
     /// Render width (pane cols / terminal width).
     pub width: u16,
+    /// Pane the pipeline is running in (0 for the CLI).
+    pub pane: u32,
+    /// Unique id of this pipeline run; the wasm layer keys AbortControllers
+    /// by it so TS commands receive the right AbortSignal.
+    pub run_id: u64,
 }
 
 pub trait Command {

@@ -128,7 +128,7 @@ mod tests {
     }
 
     fn ctx() -> ExecContext {
-        ExecContext { host: Rc::new(NullHost), width: 80 }
+        ExecContext { host: Rc::new(NullHost), width: 80, pane: 0, run_id: 0 }
     }
 
     /// Fake command: `emit <n>` produces Int(n); `double` doubles its input.

@@ -3,6 +3,7 @@
 //!
 //! This crate has zero wasm dependencies and is tested natively.
 
+pub mod abort;
 pub mod ast;
 pub mod builtins;
 pub mod editor;

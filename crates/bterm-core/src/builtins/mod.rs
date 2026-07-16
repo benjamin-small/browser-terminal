@@ -409,7 +409,7 @@ mod tests {
     fn eval(src: &str) -> Result<Value, ShellError> {
         let mut registry = CommandRegistry::new();
         register_all(&mut registry);
-        let ctx = ExecContext { host: Rc::new(TestHost), width: 80 };
+        let ctx = ExecContext { host: Rc::new(TestHost), width: 80, pane: 0, run_id: 0 };
         let out = parse(src);
         assert!(out.errors.is_empty(), "{:?}", out.errors);
         let mut results = block_on(eval_line(&out.line, &registry, &ctx, &Scope::new()))?;

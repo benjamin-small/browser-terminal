@@ -11,8 +11,19 @@ import { FitAddon } from '@xterm/addon-fit';
 import init, { BtermCore } from './wasm/bterm_wasm.js';
 import { PaneWriter } from './panes.js';
 import type { Effects, EngineEvent } from './events.js';
+import type { CommandFn, CommandSpec, Value } from './types.js';
 
 export type { Effects, EngineEvent } from './events.js';
+export type {
+  CommandArgs,
+  CommandCtx,
+  CommandFn,
+  CommandSpec,
+  FlagSpec,
+  PosArg,
+  Shape,
+  Value,
+} from './types.js';
 
 /** Enables bracketed paste so multi-line pastes can never auto-execute. */
 const ENABLE_BRACKETED_PASTE = '\x1b[?2004h';
@@ -94,6 +105,30 @@ export class BrowserTerminal {
 
     instanceLive = true;
     return new BrowserTerminal(core, term, writer, resizeObserver, ownedMount);
+  }
+
+  /**
+   * Register a shell command implemented in TypeScript. The function
+   * receives `({ positionals, flags }, input, { signal, emit })`; plain
+   * return values auto-convert (arrays of objects render as tables).
+   * Throws if the name collides with a builtin; re-registering a TS command
+   * replaces it (hot-reload friendly).
+   */
+  registerCommand(spec: CommandSpec, fn: CommandFn): void {
+    this.core.register_command(spec, fn as (...args: unknown[]) => unknown);
+  }
+
+  /** Remove a TS-registered command (builtins are not removable). */
+  unregisterCommand(name: string): void {
+    this.core.unregister_command(name);
+  }
+
+  /**
+   * Run a line programmatically and get the final structured value —
+   * the terminal as a scripting engine for the host page.
+   */
+  run(line: string): Promise<Value> {
+    return this.core.run(0, line) as Promise<Value>;
   }
 
   dispose(): void {

@@ -66,7 +66,7 @@ fn main() {
         registry: registry.clone(),
         history: RefCell::new(Vec::new()),
     });
-    let ctx = ExecContext { host: host.clone(), width: terminal_width() };
+    let ctx = ExecContext { host: host.clone(), width: terminal_width(), pane: 0, run_id: 0 };
     let scope = Scope::new();
 
     let mut editor = match DefaultEditor::new() {
