@@ -50,6 +50,12 @@ impl EngineAccess for WasmAccess {
     fn events_ready(&self) {
         flush_events();
     }
+
+    fn panes_closed(&self, panes: &[u32]) {
+        // Runs with no engine borrow held: AbortController listeners may
+        // synchronously call back into the engine.
+        tasks::abort_panes(panes);
+    }
 }
 
 /// Drain queued events and invoke the JS callback with no engine borrow
@@ -125,17 +131,52 @@ impl BtermCore {
         ON_EVENT.with(|c| *c.borrow_mut() = Some(on_event));
         ENGINE.with(|c| {
             let mut engine = Engine::new();
-            let pane = engine.create_pane(80, 24);
+            let pane = engine.mux.active_pane();
             engine.emit_output(
                 pane,
-                "\x1b[1mbrowser-terminal\x1b[0m — structured shell. Type \x1b[36mhelp\x1b[0m to explore.\n",
+                "\x1b[1mbrowser-terminal\x1b[0m — structured shell. Type \x1b[36mhelp\x1b[0m to explore, \x1b[36mCtrl-B %\x1b[0m to split.\n",
             );
             let prompt = engine.prompt_line(pane);
             engine.emit_output(pane, &prompt);
+            let snapshot = engine.snapshot();
+            engine.emit(bterm_core::protocol::EngineEvent::LayoutChanged { snapshot });
             *c.borrow_mut() = Some(engine);
         });
         flush_events();
         Ok(BtermCore {})
+    }
+
+    /// Host → engine control messages: prefix chord, post-prefix keys, pane
+    /// clicks, divider drags. Message shape is `HostMsg` as tagged JSON.
+    pub fn dispatch(&self, msg: JsValue) -> Result<(), JsValue> {
+        if !engine_alive() {
+            return Ok(());
+        }
+        let json = js_sys::JSON::stringify(&msg)
+            .map_err(|_| JsValue::from_str("invalid HostMsg: not JSON-serializable"))?;
+        let msg: bterm_core::protocol::HostMsg = serde_json::from_str(
+            &json.as_string().ok_or_else(|| JsValue::from_str("invalid HostMsg"))?,
+        )
+        .map_err(|e| JsValue::from_str(&format!("invalid HostMsg: {e}")))?;
+
+        let result = WasmAccess.with(|e| e.handle_msg(msg));
+        if !result.closed_panes.is_empty() {
+            tasks::abort_panes(&result.closed_panes);
+        }
+        if let Some((pane, cmd)) = result.run {
+            spawn_pipeline(pane, cmd);
+        }
+        flush_events();
+        Ok(())
+    }
+
+    /// Current layout snapshot (sessions, windows, pane rects).
+    pub fn snapshot(&self) -> JsValue {
+        if !engine_alive() {
+            return JsValue::NULL;
+        }
+        let snapshot = WasmAccess.with(|e| e.snapshot());
+        to_js(&snapshot)
     }
 
     /// Sync input hot path: raw terminal input in, echo effects out, same

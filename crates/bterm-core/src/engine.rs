@@ -1,5 +1,5 @@
-//! The engine: panes (a full mux tree in M5), the command registry, session
-//! scope, and the outgoing event queue.
+//! The engine: the mux tree (sessions → windows → panes), the command
+//! registry, and the outgoing event queue.
 //!
 //! Concurrency contract (enforced structurally in the wasm layer): all
 //! engine access goes through `EngineAccess::with`, a synchronous closure —
@@ -8,33 +8,32 @@
 //! `execute_line` is the one shared async path, used verbatim by native
 //! protocol tests and the browser.
 
-use crate::editor::{Effects, LineEditor};
+use crate::editor::Effects;
 use crate::error::ShellError;
 use crate::eval::{eval_line, CommandSource};
+use crate::mux::{keys, layout_window, Dir, FocusDir, Mux, PaneShell, Rect};
 use crate::parse::parse;
-use crate::protocol::EngineEvent;
-use crate::registry::{Command, CommandRegistry, ExecContext, HostHooks, PipelineData};
+use crate::protocol::{EngineEvent, HostMsg, LayoutSnapshot, PaneInfo, SessionInfo, WindowInfo};
+use crate::registry::{Command, CommandRegistry, ExecContext, HostHooks, MuxAction, PipelineData};
 use crate::render::render;
-use crate::signature::Scope;
+use crate::value::Value;
 use std::collections::VecDeque;
 use std::rc::Rc;
 
-use indexmap::IndexMap;
-
-pub struct PaneShell {
-    pub editor: LineEditor,
-    pub cols: u16,
-    pub rows: u16,
-    /// A pipeline task is in flight. (The abort handle lives host-side.)
-    pub running: bool,
-}
-
 pub struct Engine {
     pub registry: CommandRegistry,
-    pub scope: Scope,
-    panes: IndexMap<u32, PaneShell>,
-    next_pane_id: u32,
+    pub mux: Mux,
+    prefix_armed: bool,
     events: VecDeque<EngineEvent>,
+}
+
+/// What `handle_msg` wants the host to do after the borrow closes.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct MsgResult {
+    /// Evaluate this command line in this pane (prefix keymap hit).
+    pub run: Option<(u32, String)>,
+    /// Abort any in-flight tasks for these panes (they closed).
+    pub closed_panes: Vec<u32>,
 }
 
 impl Default for Engine {
@@ -49,41 +48,30 @@ impl Engine {
         crate::builtins::register_all(&mut registry);
         Engine {
             registry,
-            scope: Scope::new(),
-            panes: IndexMap::new(),
-            next_pane_id: 0,
+            mux: Mux::new(),
+            prefix_armed: false,
             events: VecDeque::new(),
         }
     }
 
-    pub fn create_pane(&mut self, cols: u16, rows: u16) -> u32 {
-        let id = self.next_pane_id;
-        self.next_pane_id += 1;
-        self.panes.insert(
-            id,
-            PaneShell { editor: LineEditor::new(), cols, rows, running: false },
-        );
-        id
-    }
-
     pub fn pane(&self, id: u32) -> Option<&PaneShell> {
-        self.panes.get(&id)
+        self.mux.pane(id)
     }
 
     pub fn pane_mut(&mut self, id: u32) -> Option<&mut PaneShell> {
-        self.panes.get_mut(&id)
+        self.mux.pane_mut(id)
     }
 
     /// Sync input hot path: feed raw input to the pane's editor.
     pub fn feed(&mut self, pane: u32, data: &str) -> Effects {
-        match self.panes.get_mut(&pane) {
+        match self.mux.pane_mut(pane) {
             Some(p) => p.editor.feed(data),
             None => Effects::default(),
         }
     }
 
     pub fn resize(&mut self, pane: u32, cols: u16, rows: u16) {
-        if let Some(p) = self.panes.get_mut(&pane) {
+        if let Some(p) = self.mux.pane_mut(pane) {
             p.cols = cols;
             p.rows = rows;
         }
@@ -103,16 +91,184 @@ impl Engine {
         self.events.drain(..).collect()
     }
 
-    pub fn has_events(&self) -> bool {
-        !self.events.is_empty()
-    }
-
     /// Fresh prompt line for a pane (used after output settles).
     pub fn prompt_line(&self, pane: u32) -> String {
-        self.panes
-            .get(&pane)
+        self.mux
+            .pane(pane)
             .map(|p| p.editor.prompt_line())
             .unwrap_or_default()
+    }
+
+    pub fn snapshot(&self) -> LayoutSnapshot {
+        let session = self.mux.active_session();
+        let window = self.mux.active_window();
+        LayoutSnapshot {
+            sessions: self
+                .mux
+                .sessions
+                .values()
+                .map(|s| SessionInfo {
+                    id: s.id,
+                    name: s.name.clone(),
+                    active: s.id == self.mux.active_session,
+                })
+                .collect(),
+            windows: session
+                .windows
+                .values()
+                .map(|w| WindowInfo {
+                    id: w.id,
+                    name: w.name.clone(),
+                    active: w.id == session.active_window,
+                })
+                .collect(),
+            panes: layout_window(window, Rect::FULL)
+                .into_iter()
+                .map(|(pane, rect)| PaneInfo { pane, rect, active: pane == window.active_pane })
+                .collect(),
+            active_pane: window.active_pane,
+            zoomed: window.zoomed,
+        }
+    }
+
+    /// Host control messages (prefix chord, clicks, divider drags).
+    pub fn handle_msg(&mut self, msg: HostMsg) -> MsgResult {
+        match msg {
+            HostMsg::PrefixKey => {
+                self.prefix_armed = true;
+                self.emit(EngineEvent::PrefixState { active: true });
+                MsgResult::default()
+            }
+            HostMsg::Key { key } => {
+                let was_armed = self.prefix_armed;
+                self.prefix_armed = false;
+                self.emit(EngineEvent::PrefixState { active: false });
+                if was_armed {
+                    if let Some(cmd) = keys::keymap(&key) {
+                        return MsgResult {
+                            run: Some((self.mux.active_pane(), cmd.to_string())),
+                            ..Default::default()
+                        };
+                    }
+                }
+                MsgResult::default()
+            }
+            HostMsg::FocusPane { pane } => {
+                let outcome = self.mux.focus_pane(pane);
+                self.apply_outcome(&outcome);
+                MsgResult { closed_panes: outcome.closed_panes, ..Default::default() }
+            }
+            HostMsg::ResizeSplit { path, fraction } => {
+                let outcome = self.mux.resize_split(&path, fraction);
+                self.apply_outcome(&outcome);
+                MsgResult::default()
+            }
+        }
+    }
+
+    /// Apply a mux mutation from a shell command (`mux …` / `session …`).
+    /// Returns the command's value plus the pane ids whose tasks must be
+    /// aborted by the host.
+    pub fn mux_apply(&mut self, action: MuxAction) -> (Result<Value, ShellError>, Vec<u32>) {
+        use MuxAction::*;
+        let (value, outcome) = match action {
+            SplitRight => {
+                let (_, o) = self.mux.split(Dir::Row);
+                (Ok(Value::Null), o)
+            }
+            SplitDown => {
+                let (_, o) = self.mux.split(Dir::Col);
+                (Ok(Value::Null), o)
+            }
+            WindowNew => {
+                let (_, o) = self.mux.new_window();
+                (Ok(Value::Null), o)
+            }
+            WindowNext => (Ok(Value::Null), self.mux.cycle_window(true)),
+            WindowPrev => (Ok(Value::Null), self.mux.cycle_window(false)),
+            KillPane => {
+                let o = self.mux.kill_active_pane();
+                (Ok(Value::Null), o)
+            }
+            Focus(dir) => {
+                let dir = match dir.as_str() {
+                    "next" => FocusDir::Next,
+                    "left" => FocusDir::Left,
+                    "right" => FocusDir::Right,
+                    "up" => FocusDir::Up,
+                    "down" => FocusDir::Down,
+                    other => {
+                        return (
+                            Err(ShellError::runtime(format!("unknown focus direction `{other}`"))
+                                .with_help("use next, left, right, up or down")),
+                            Vec::new(),
+                        )
+                    }
+                };
+                (Ok(Value::Null), self.mux.focus(dir))
+            }
+            Zoom => (Ok(Value::Null), self.mux.toggle_zoom()),
+            Hide => {
+                self.emit(EngineEvent::HidePanel);
+                (Ok(Value::Null), Default::default())
+            }
+            SessionNew { name } => {
+                let (_, o) = self.mux.new_session(name);
+                (Ok(Value::Null), o)
+            }
+            SessionNext => (Ok(Value::Null), self.mux.cycle_session(true)),
+            SessionPrev => (Ok(Value::Null), self.mux.cycle_session(false)),
+            SessionSwitch { name } => match self.mux.switch_session(&name) {
+                Ok(o) => (Ok(Value::Null), o),
+                Err(msg) => {
+                    return (
+                        Err(ShellError::runtime(msg)
+                            .with_help("run `session list` to see sessions")),
+                        Vec::new(),
+                    )
+                }
+            },
+            SessionList => {
+                let rows: Vec<Value> = self
+                    .mux
+                    .sessions
+                    .values()
+                    .map(|s| {
+                        Value::record([
+                            ("name".to_string(), Value::Str(s.name.clone())),
+                            ("windows".to_string(), Value::Int(s.windows.len() as i64)),
+                            (
+                                "active".to_string(),
+                                Value::Bool(s.id == self.mux.active_session),
+                            ),
+                        ])
+                    })
+                    .collect();
+                (Ok(Value::List(rows)), Default::default())
+            }
+        };
+        let closed = outcome.closed_panes.clone();
+        self.apply_outcome(&outcome);
+        (value, closed)
+    }
+
+    fn apply_outcome(&mut self, outcome: &crate::mux::MuxOutcome) {
+        for pane in &outcome.opened_panes {
+            self.emit(EngineEvent::PaneOpened { pane: *pane });
+            // The new xterm needs a prompt to be usable.
+            let prompt = self.prompt_line(*pane);
+            self.emit(EngineEvent::PaneOutput { pane: *pane, data: prompt });
+        }
+        for pane in &outcome.closed_panes {
+            self.emit(EngineEvent::PaneClosed { pane: *pane });
+        }
+        for session in &outcome.closed_sessions {
+            self.emit(EngineEvent::SessionClosed { session: *session });
+        }
+        if outcome.layout_changed {
+            let snapshot = self.snapshot();
+            self.emit(EngineEvent::LayoutChanged { snapshot });
+        }
     }
 }
 
@@ -130,6 +286,9 @@ pub trait EngineAccess: Clone + 'static {
     /// Called after a `with` scope that queued events; the wasm layer
     /// flushes the queue to the JS callback here (no borrow held).
     fn events_ready(&self);
+    /// Panes closed by a mux mutation — the wasm layer aborts their
+    /// in-flight tasks here (JS AbortControllers fire outside any borrow).
+    fn panes_closed(&self, _panes: &[u32]) {}
 }
 
 impl EngineAccess for Rc<std::cell::RefCell<Engine>> {
@@ -196,6 +355,15 @@ impl<A: EngineAccess> HostHooks for EngineHost<A> {
         self.access
             .with(|e| e.registry.get(name).map(|cmd| cmd.signature().render_help()))
     }
+
+    fn mux_action(&self, action: MuxAction) -> Result<Value, ShellError> {
+        let (result, closed) = self.access.with(|e| e.mux_apply(action));
+        if !closed.is_empty() {
+            self.access.panes_closed(&closed);
+        }
+        self.access.events_ready();
+        result
+    }
 }
 
 fn make_ctx<A: EngineAccess>(access: &A, pane: u32, run_id: u64) -> ExecContext {
@@ -206,6 +374,16 @@ fn make_ctx<A: EngineAccess>(access: &A, pane: u32, run_id: u64) -> ExecContext 
         pane,
         run_id,
     }
+}
+
+fn scope_for_pane<A: EngineAccess>(access: &A, pane: u32) -> crate::signature::Scope {
+    access.with(|e| {
+        e.mux
+            .session_of_pane(pane)
+            .and_then(|sid| e.mux.sessions.get(&sid))
+            .map(|s| s.vars.clone())
+            .unwrap_or_default()
+    })
 }
 
 /// Evaluate one submitted line in a pane: parse → eval → render → prompt.
@@ -225,7 +403,7 @@ pub async fn execute_line<A: EngineAccess>(access: A, pane: u32, line: String, r
 
     let ctx = make_ctx(&access, pane, run_id);
     let cols = ctx.width;
-    let scope = access.with(|e| e.scope.clone());
+    let scope = scope_for_pane(&access, pane);
     let source = EngineCommands(access.clone());
 
     let (results, error) = eval_line(&parsed.line, &source, &ctx, &scope).await;
@@ -258,13 +436,13 @@ pub async fn eval_to_value<A: EngineAccess>(
     pane: u32,
     line: String,
     run_id: u64,
-) -> Result<crate::value::Value, ShellError> {
+) -> Result<Value, ShellError> {
     let parsed = parse(&line);
     if let Some(err) = parsed.errors.into_iter().next() {
         return Err(err);
     }
     let ctx = make_ctx(&access, pane, run_id);
-    let scope = access.with(|e| e.scope.clone());
+    let scope = scope_for_pane(&access, pane);
     let source = EngineCommands(access.clone());
     let (results, error) = eval_line(&parsed.line, &source, &ctx, &scope).await;
     if let Some(err) = error {
@@ -274,10 +452,12 @@ pub async fn eval_to_value<A: EngineAccess>(
         .into_iter()
         .last()
         .map(PipelineData::into_value)
-        .unwrap_or(crate::value::Value::Null))
+        .unwrap_or(Value::Null))
 }
 
-/// Mark the pane idle, color the prompt by status, and print it.
+/// Mark the pane idle, color the prompt by status, and print it. A pane
+/// that was closed mid-run (kill-pane while a task was in flight) simply
+/// produces no prompt.
 fn finish_pane(e: &mut Engine, pane: u32, ok: bool) {
     if let Some(p) = e.pane_mut(pane) {
         p.running = false;
@@ -296,15 +476,18 @@ mod tests {
     use std::cell::RefCell;
 
     fn engine() -> Rc<RefCell<Engine>> {
-        let mut e = Engine::new();
-        e.create_pane(80, 24);
-        Rc::new(RefCell::new(e))
+        Rc::new(RefCell::new(Engine::new()))
+    }
+
+    fn active_pane(access: &Rc<RefCell<Engine>>) -> u32 {
+        access.with(|e| e.mux.active_pane())
     }
 
     fn feed_and_run(access: &Rc<RefCell<Engine>>, input: &str) -> Vec<EngineEvent> {
-        let fx = access.with(|e| e.feed(0, input));
+        let pane = active_pane(access);
+        let fx = access.with(|e| e.feed(pane, input));
         for line in fx.submitted {
-            block_on(execute_line(access.clone(), 0, line, 0));
+            block_on(execute_line(access.clone(), pane, line, 0));
         }
         access.with(|e| e.drain_events())
     }
@@ -357,22 +540,132 @@ mod tests {
         assert!(out.contains("echo one"), "output: {out:?}");
     }
 
+    // --- protocol tests: HostMsg sequences → EngineEvent stream ---
+
     #[test]
-    fn emit_line_interleaves_before_final_render() {
-        // `clear` uses request_clear → an event mid-execution.
+    fn prefix_percent_splits_and_snapshots() {
         let access = engine();
-        let events = feed_and_run(&access, "clear\r");
-        let out = output_text(&events);
-        assert!(out.contains("\x1b[2J"));
+        let first = active_pane(&access);
+
+        let result = access.with(|e| {
+            e.handle_msg(HostMsg::PrefixKey);
+            e.handle_msg(HostMsg::Key { key: "%".to_string() })
+        });
+        let (pane, cmd) = result.run.expect("keymap resolves");
+        assert_eq!(pane, first);
+        assert_eq!(cmd, "mux split --right");
+        block_on(execute_line(access.clone(), pane, cmd, 0));
+
+        let events = access.with(|e| e.drain_events());
+        assert!(events.iter().any(|e| matches!(e, EngineEvent::PrefixState { active: true })));
+        assert!(events.iter().any(|e| matches!(e, EngineEvent::PaneOpened { .. })));
+        let snapshot = events
+            .iter()
+            .rev()
+            .find_map(|e| match e {
+                EngineEvent::LayoutChanged { snapshot } => Some(snapshot.clone()),
+                _ => None,
+            })
+            .expect("layout event");
+        assert_eq!(snapshot.panes.len(), 2);
+        assert!((snapshot.panes[0].rect.w - 0.5).abs() < 1e-4);
+        assert_ne!(snapshot.active_pane, first, "new pane focused");
     }
 
     #[test]
-    fn events_never_emitted_while_borrowed() {
-        // EngineAccess::with is a sync closure; this test asserts the
-        // execute path completes without RefCell double-borrow panics even
-        // when commands touch host hooks that re-enter the engine.
+    fn kill_pane_refocuses_and_closes() {
         let access = engine();
-        let events = feed_and_run(&access, "help | first 3\r");
-        assert!(!events.is_empty());
+        let first = active_pane(&access);
+        block_on(execute_line(access.clone(), first, "mux split --right".into(), 0));
+        let second = active_pane(&access);
+        block_on(execute_line(access.clone(), second, "mux kill-pane".into(), 0));
+
+        let events = access.with(|e| e.drain_events());
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, EngineEvent::PaneClosed { pane } if *pane == second)));
+        assert_eq!(active_pane(&access), first);
+        let snapshot = access.with(|e| e.snapshot());
+        assert_eq!(snapshot.panes.len(), 1);
+    }
+
+    #[test]
+    fn session_fork_switch_via_commands() {
+        let access = engine();
+        let pane_main = active_pane(&access);
+        block_on(execute_line(access.clone(), pane_main, "session new work".into(), 0));
+        let pane_work = active_pane(&access);
+        assert_ne!(pane_main, pane_work);
+
+        let snapshot = access.with(|e| e.snapshot());
+        assert_eq!(snapshot.sessions.len(), 2);
+        assert!(snapshot.sessions.iter().any(|s| s.name == "work" && s.active));
+
+        block_on(execute_line(access.clone(), pane_work, "session switch main".into(), 0));
+        assert_eq!(active_pane(&access), pane_main);
+
+        // Each pane keeps its own shell: histories are separate.
+        feed_and_run(&access, "echo in-main\r");
+        let hist_main = access.with(|e| e.pane(pane_main).map(|p| p.editor.history().to_vec()));
+        let hist_work = access.with(|e| e.pane(pane_work).map(|p| p.editor.history().to_vec()));
+        assert!(hist_main.unwrap_or_default().contains(&"echo in-main".to_string()));
+        assert!(hist_work.unwrap_or_default().is_empty());
+    }
+
+    #[test]
+    fn session_list_prints_table() {
+        let access = engine();
+        let events = feed_and_run(&access, "session list\r");
+        let out = output_text(&events);
+        assert!(out.contains("main"), "output: {out:?}");
+        assert!(out.contains("windows"), "table header: {out:?}");
+    }
+
+    #[test]
+    fn unarmed_key_does_nothing() {
+        let access = engine();
+        let result = access.with(|e| e.handle_msg(HostMsg::Key { key: "%".to_string() }));
+        assert_eq!(result.run, None, "no keymap without prefix");
+    }
+
+    #[test]
+    fn focus_pane_msg_switches_focus() {
+        let access = engine();
+        let first = active_pane(&access);
+        block_on(execute_line(access.clone(), first, "mux split --right".into(), 0));
+        let second = active_pane(&access);
+        assert_ne!(first, second);
+        access.with(|e| e.handle_msg(HostMsg::FocusPane { pane: first }));
+        assert_eq!(active_pane(&access), first);
+    }
+
+    #[test]
+    fn resize_split_msg_updates_snapshot() {
+        let access = engine();
+        let first = active_pane(&access);
+        block_on(execute_line(access.clone(), first, "mux split --right".into(), 0));
+        access.with(|e| {
+            e.handle_msg(HostMsg::ResizeSplit { path: vec![0], fraction: 0.7 })
+        });
+        let snapshot = access.with(|e| e.snapshot());
+        assert!((snapshot.panes[0].rect.w - 0.7).abs() < 1e-4, "{:?}", snapshot.panes);
+    }
+
+    #[test]
+    fn hide_command_emits_event() {
+        let access = engine();
+        let events = feed_and_run(&access, "mux hide\r");
+        assert!(events.iter().any(|e| matches!(e, EngineEvent::HidePanel)));
+    }
+
+    #[test]
+    fn mux_zoom_roundtrip_via_prefix() {
+        let access = engine();
+        let pane = active_pane(&access);
+        block_on(execute_line(access.clone(), pane, "mux split --down".into(), 0));
+        block_on(execute_line(access.clone(), active_pane(&access), "mux zoom".into(), 0));
+        let snapshot = access.with(|e| e.snapshot());
+        assert_eq!(snapshot.panes.len(), 1, "zoomed pane fills the window");
+        assert!(snapshot.zoomed.is_some());
     }
 }

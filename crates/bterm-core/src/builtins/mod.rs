@@ -105,6 +105,104 @@ pub fn register_all(registry: &mut CommandRegistry) {
         history,
     ));
     registry.register_builtin(cmd(Signature::build("clear", "Clear the screen"), clear));
+
+    // Multiplexer commands — everything the prefix keymap does is one of
+    // these, so `:`-style scripting gets the full tmux surface for free.
+    registry.register_builtin(cmd(
+        Signature::build("mux split", "Split the active pane")
+            .flag("right", Some('r'), None, "split side-by-side (default)")
+            .flag("down", Some('d'), None, "split stacked"),
+        mux_split,
+    ));
+    registry.register_builtin(cmd(
+        Signature::build("mux window new", "Open a new window in this session"),
+        |ctx, _c, _i| mux_do(ctx, MuxAction::WindowNew),
+    ));
+    registry.register_builtin(cmd(
+        Signature::build("mux window next", "Focus the next window"),
+        |ctx, _c, _i| mux_do(ctx, MuxAction::WindowNext),
+    ));
+    registry.register_builtin(cmd(
+        Signature::build("mux window prev", "Focus the previous window"),
+        |ctx, _c, _i| mux_do(ctx, MuxAction::WindowPrev),
+    ));
+    registry.register_builtin(cmd(
+        Signature::build("mux kill-pane", "Close the active pane"),
+        |ctx, _c, _i| mux_do(ctx, MuxAction::KillPane),
+    ));
+    registry.register_builtin(cmd(
+        Signature::build("mux focus", "Move focus between panes")
+            .required_arg("direction", Shape::Str, "next|left|right|up|down"),
+        mux_focus,
+    ));
+    registry.register_builtin(cmd(
+        Signature::build("mux zoom", "Toggle zoom on the active pane"),
+        |ctx, _c, _i| mux_do(ctx, MuxAction::Zoom),
+    ));
+    registry.register_builtin(cmd(
+        Signature::build("mux hide", "Hide the terminal panel"),
+        |ctx, _c, _i| mux_do(ctx, MuxAction::Hide),
+    ));
+    registry.register_builtin(cmd(
+        Signature::build("session new", "Fork a new shell session")
+            .optional_arg("name", Shape::Str, "session name"),
+        session_new,
+    ));
+    registry.register_builtin(cmd(
+        Signature::build("session list", "List sessions"),
+        |ctx, _c, _i| mux_do(ctx, MuxAction::SessionList),
+    ));
+    registry.register_builtin(cmd(
+        Signature::build("session switch", "Switch to a session by name")
+            .required_arg("name", Shape::Str, "session name"),
+        session_switch,
+    ));
+    registry.register_builtin(cmd(
+        Signature::build("session next", "Cycle to the next session"),
+        |ctx, _c, _i| mux_do(ctx, MuxAction::SessionNext),
+    ));
+    registry.register_builtin(cmd(
+        Signature::build("session prev", "Cycle to the previous session"),
+        |ctx, _c, _i| mux_do(ctx, MuxAction::SessionPrev),
+    ));
+}
+
+use crate::registry::MuxAction;
+
+fn mux_do(ctx: ExecContext, action: MuxAction) -> Result<PipelineData, ShellError> {
+    let value = ctx.host.mux_action(action)?;
+    Ok(match value {
+        Value::Null => PipelineData::Empty,
+        v => PipelineData::Value(v),
+    })
+}
+
+fn mux_split(ctx: ExecContext, call: BoundCall, _input: PipelineData) -> Result<PipelineData, ShellError> {
+    let action = if call.has_flag("down") {
+        MuxAction::SplitDown
+    } else {
+        MuxAction::SplitRight
+    };
+    mux_do(ctx, action)
+}
+
+fn mux_focus(ctx: ExecContext, call: BoundCall, _input: PipelineData) -> Result<PipelineData, ShellError> {
+    let dir = call.positionals[0].as_str().unwrap_or_default().to_string();
+    mux_do(ctx, MuxAction::Focus(dir))
+}
+
+fn session_new(ctx: ExecContext, call: BoundCall, _input: PipelineData) -> Result<PipelineData, ShellError> {
+    let name = call
+        .positionals
+        .first()
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    mux_do(ctx, MuxAction::SessionNew { name })
+}
+
+fn session_switch(ctx: ExecContext, call: BoundCall, _input: PipelineData) -> Result<PipelineData, ShellError> {
+    let name = call.positionals[0].as_str().unwrap_or_default().to_string();
+    mux_do(ctx, MuxAction::SessionSwitch { name })
 }
 
 fn type_err(cmd: &str, wanted: &str, got: &Value) -> ShellError {

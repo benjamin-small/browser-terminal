@@ -1,21 +1,56 @@
 /**
- * Engine → host events. Hand-written for now; replaced by generated
- * (tsify-derived) types when the full protocol lands with the TS-command
- * milestone.
+ * Engine ↔ host protocol types. These mirror `bterm-core/src/protocol.rs`
+ * exactly (tagged unions, camelCase tags).
  */
 
-export interface PaneOutputEvent {
-  type: 'paneOutput';
+export interface Rect {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+export interface SessionInfo {
+  id: number;
+  name: string;
+  active: boolean;
+}
+
+export interface WindowInfo {
+  id: number;
+  name: string;
+  active: boolean;
+}
+
+export interface PaneInfo {
   pane: number;
-  data: string;
+  rect: Rect;
+  active: boolean;
 }
 
-export interface FatalEvent {
-  type: 'fatal';
-  message: string;
+export interface LayoutSnapshot {
+  sessions: SessionInfo[];
+  windows: WindowInfo[];
+  panes: PaneInfo[];
+  active_pane: number;
+  zoomed: number | null;
 }
 
-export type EngineEvent = PaneOutputEvent | FatalEvent;
+export type EngineEvent =
+  | { type: 'paneOutput'; pane: number; data: string }
+  | { type: 'layoutChanged'; snapshot: LayoutSnapshot }
+  | { type: 'paneOpened'; pane: number }
+  | { type: 'paneClosed'; pane: number }
+  | { type: 'sessionClosed'; session: number }
+  | { type: 'prefixState'; active: boolean }
+  | { type: 'hidePanel' }
+  | { type: 'fatal'; message: string };
+
+export type HostMsg =
+  | { type: 'prefixKey' }
+  | { type: 'key'; key: string }
+  | { type: 'focusPane'; pane: number }
+  | { type: 'resizeSplit'; path: number[]; fraction: number };
 
 /** Result of feeding input to the engine's sync hot path. */
 export interface Effects {

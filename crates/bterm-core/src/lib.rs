@@ -11,6 +11,7 @@ pub mod engine;
 pub mod error;
 pub mod eval;
 pub mod lex;
+pub mod mux;
 pub mod parse;
 pub mod protocol;
 pub mod registry;

@@ -33,6 +33,27 @@ impl PipelineData {
     }
 }
 
+/// Multiplexer mutations requested by `mux …` / `session …` builtins. The
+/// engine host applies them; hosts without a multiplexer (the CLI) reject
+/// them.
+#[derive(Clone, Debug, PartialEq)]
+pub enum MuxAction {
+    SplitRight,
+    SplitDown,
+    WindowNew,
+    WindowNext,
+    WindowPrev,
+    KillPane,
+    Focus(String),
+    Zoom,
+    Hide,
+    SessionNew { name: Option<String> },
+    SessionList,
+    SessionSwitch { name: String },
+    SessionNext,
+    SessionPrev,
+}
+
 /// Host services a command may touch. Implemented by the CLI (stdout,
 /// readline history) and by the wasm engine (pane output, pane history).
 pub trait HostHooks {
@@ -51,6 +72,12 @@ pub trait HostHooks {
     /// `help <name>`: rendered help text for a command, if it exists.
     fn help_for(&self, _name: &str) -> Option<String> {
         None
+    }
+    /// Apply a multiplexer action (`mux split`, `session new`, …).
+    fn mux_action(&self, _action: MuxAction) -> Result<Value, ShellError> {
+        Err(ShellError::runtime(
+            "the multiplexer is not available in this host",
+        ))
     }
 }
 

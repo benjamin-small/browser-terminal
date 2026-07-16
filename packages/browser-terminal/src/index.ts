@@ -1,19 +1,26 @@
 /**
  * browser-terminal — public TypeScript API.
  *
- * Current milestone (M3): one floating panel with a full structured-shell
- * REPL pane backed by the Rust/WASM engine. Keystrokes take the sync hot
- * path (`feed` → echo, same tick); engine output arrives through a single
- * event callback and flows through a backpressured write queue.
+ * A floating panel hosting a tmux-style multiplexer: the Rust/WASM engine
+ * owns sessions, windows, the layout tree, the shell language, and the
+ * command registry; this wrapper owns pixels (xterm panes positioned from
+ * fractional snapshots) and the prefix chord.
  */
-import { Terminal } from '@xterm/xterm';
-import { FitAddon } from '@xterm/addon-fit';
 import init, { BtermCore } from './wasm/bterm_wasm.js';
-import { PaneWriter } from './panes.js';
-import type { Effects, EngineEvent } from './events.js';
+import { PaneManager } from './panes.js';
+import type { Effects, EngineEvent, LayoutSnapshot } from './events.js';
 import type { CommandFn, CommandSpec, Value } from './types.js';
 
-export type { Effects, EngineEvent } from './events.js';
+export type {
+  Effects,
+  EngineEvent,
+  HostMsg,
+  LayoutSnapshot,
+  PaneInfo,
+  Rect,
+  SessionInfo,
+  WindowInfo,
+} from './events.js';
 export type {
   CommandArgs,
   CommandCtx,
@@ -25,9 +32,6 @@ export type {
   Value,
 } from './types.js';
 
-/** Enables bracketed paste so multi-line pastes can never auto-execute. */
-const ENABLE_BRACKETED_PASTE = '\x1b[?2004h';
-
 export interface CreateOptions {
   /** Element to mount the terminal panel into; a bottom-docked panel is created if omitted. */
   mount?: HTMLElement;
@@ -38,12 +42,14 @@ export interface CreateOptions {
 let instanceLive = false;
 
 export class BrowserTerminal {
+  private lastSnapshot: LayoutSnapshot | null = null;
+
   private constructor(
     private readonly core: BtermCore,
-    private readonly term: Terminal,
-    private readonly writer: PaneWriter,
+    private readonly paneManager: PaneManager,
     private readonly resizeObserver: ResizeObserver,
     private readonly ownedMount: HTMLElement | null,
+    private readonly mount: HTMLElement,
   ) {}
 
   static async create(opts: CreateOptions = {}): Promise<BrowserTerminal> {
@@ -64,47 +70,37 @@ export class BrowserTerminal {
       mount = ownedMount;
     }
 
-    const term = new Terminal({
-      cursorBlink: true,
-      scrollback: 2000,
-      fontSize: 13,
-      theme: { background: '#181825' },
+    let core!: BtermCore;
+    let self!: BrowserTerminal;
+    const paneManager = new PaneManager(mount, {
+      feed: (pane, data) => core.feed(pane, data) as Effects | null,
+      resize: (pane, cols, rows) => core.resize(pane, cols, rows),
+      dispatch: (msg) => core.dispatch(msg),
     });
-    const fit = new FitAddon();
-    term.loadAddon(fit);
-    term.open(mount);
-    fit.fit();
-    term.write(ENABLE_BRACKETED_PASTE);
 
-    const writer = new PaneWriter(term);
-    const core = new BtermCore((event: EngineEvent) => {
-      switch (event.type) {
-        case 'paneOutput':
-          writer.write(event.data);
-          break;
-        case 'fatal':
-          writer.write(`\r\n\x1b[1;31mterminal crashed:\x1b[0m ${event.message}\r\n`);
-          break;
+    core = new BtermCore((event: EngineEvent) => {
+      if (event.type === 'layoutChanged') {
+        self.lastSnapshot = event.snapshot;
       }
-    });
-
-    core.resize(0, term.cols, term.rows);
-    term.onData((data) => {
-      // Sync hot path: input → WASM editor → echo bytes, same tick.
-      const effects = core.feed(0, data) as Effects | null;
-      if (effects && effects.echo) {
-        term.write(effects.echo);
+      if (event.type === 'hidePanel') {
+        self.hide();
       }
+      paneManager.handleEvent(event);
     });
 
-    const resizeObserver = new ResizeObserver(() => {
-      fit.fit();
-      core.resize(0, term.cols, term.rows);
-    });
+    const resizeObserver = new ResizeObserver(() => paneManager.fitAll());
     resizeObserver.observe(mount);
 
     instanceLive = true;
-    return new BrowserTerminal(core, term, writer, resizeObserver, ownedMount);
+    self = new BrowserTerminal(core, paneManager, resizeObserver, ownedMount, mount);
+    // The constructor emitted banner/prompt/layout before `self` existed;
+    // reconcile from a fresh snapshot.
+    const snapshot = core.snapshot() as LayoutSnapshot | null;
+    if (snapshot) {
+      self.lastSnapshot = snapshot;
+      paneManager.applySnapshot(snapshot);
+    }
+    return self;
   }
 
   /**
@@ -124,19 +120,42 @@ export class BrowserTerminal {
   }
 
   /**
-   * Run a line programmatically and get the final structured value —
-   * the terminal as a scripting engine for the host page.
+   * Run a line programmatically in the active pane's session and get the
+   * final structured value — the terminal as a scripting engine for the
+   * host page.
    */
   run(line: string): Promise<Value> {
-    return this.core.run(0, line) as Promise<Value>;
+    const pane = this.lastSnapshot?.active_pane ?? 0;
+    return this.core.run(pane, line) as Promise<Value>;
+  }
+
+  /** The latest layout snapshot (sessions, windows, pane rects). */
+  get snapshot(): LayoutSnapshot | null {
+    return this.lastSnapshot;
+  }
+
+  show(): void {
+    this.mount.style.display = '';
+    this.paneManager.fitAll();
+  }
+
+  hide(): void {
+    this.mount.style.display = 'none';
+  }
+
+  toggle(): void {
+    if (this.mount.style.display === 'none') {
+      this.show();
+    } else {
+      this.hide();
+    }
   }
 
   dispose(): void {
     this.resizeObserver.disconnect();
-    this.writer.dispose();
+    this.paneManager.dispose();
     this.core.dispose();
     this.core.free();
-    this.term.dispose();
     this.ownedMount?.remove();
     instanceLive = false;
   }
@@ -148,9 +167,9 @@ export class BrowserTerminal {
       'left:16px',
       'right:16px',
       'bottom:16px',
-      'height:320px',
+      'height:340px',
       'background:#181825',
-      'padding:8px',
+      'padding:6px',
       'border-radius:8px',
       'box-shadow:0 8px 32px rgba(0,0,0,.4)',
       'z-index:2147483000',

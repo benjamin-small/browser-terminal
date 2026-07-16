@@ -70,6 +70,13 @@ pub fn abort_pane(pane: u32) -> bool {
     any
 }
 
+/// Abort every run in each listed pane (panes closed by mux mutations).
+pub fn abort_panes(panes: &[u32]) {
+    for pane in panes {
+        abort_pane(*pane);
+    }
+}
+
 /// Abort everything (dispose).
 pub fn abort_all() {
     let victims: Vec<(AbortHandle, web_sys::AbortController)> = TASKS.with(|t| {
