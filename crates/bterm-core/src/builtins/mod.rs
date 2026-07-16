@@ -213,7 +213,9 @@ fn where_cmd(_ctx: ExecContext, call: BoundCall, input: PipelineData) -> Result<
 fn take_n(call: &BoundCall) -> Result<Option<usize>, ShellError> {
     match call.positionals.first() {
         None => Ok(None),
-        Some(Value::Int(n)) if *n >= 0 => Ok(Some(*n as usize)),
+        // try_from, not `as`: on wasm32 (32-bit usize) an as-cast truncates
+        // and `first 4294967296` would silently take 0 rows.
+        Some(Value::Int(n)) if *n >= 0 => Ok(Some(usize::try_from(*n).unwrap_or(usize::MAX))),
         Some(Value::Int(n)) => Err(ShellError::runtime(format!("`{n}` is negative")).with_span(call.head_span)),
         Some(other) => Err(type_err("first/last", "an int", other)),
     }
@@ -259,24 +261,29 @@ fn sort_by(_ctx: ExecContext, call: BoundCall, input: PipelineData) -> Result<Pi
         Value::List(rows) => rows,
         other => return Err(type_err("sort-by", "a table (list of records)", &other)),
     };
-    // Missing/incomparable cells sort last, stably.
+    // total_cmp_values keeps the comparator a genuine total order even on
+    // mixed-type columns (std's sort panics on intransitive comparators).
+    // --reverse flips the value order only: missing-column rows stay last,
+    // and the sort stays stable (no post-hoc rows.reverse()).
     rows.sort_by(|a, b| {
         let cell = |v: &Value| match v {
             Value::Record(map) => map.get(&column).cloned(),
             _ => None,
         };
         match (cell(a), cell(b)) {
-            (Some(ca), Some(cb)) => ca
-                .partial_cmp_values(&cb)
-                .unwrap_or(std::cmp::Ordering::Equal),
+            (Some(ca), Some(cb)) => {
+                let ord = ca.total_cmp_values(&cb);
+                if reverse {
+                    ord.reverse()
+                } else {
+                    ord
+                }
+            }
             (Some(_), None) => std::cmp::Ordering::Less,
             (None, Some(_)) => std::cmp::Ordering::Greater,
             (None, None) => std::cmp::Ordering::Equal,
         }
     });
-    if reverse {
-        rows.reverse();
-    }
     Ok(PipelineData::Value(Value::List(rows)))
 }
 
@@ -319,6 +326,13 @@ fn str_downcase(_ctx: ExecContext, call: BoundCall, input: PipelineData) -> Resu
 
 fn to_json(_ctx: ExecContext, call: BoundCall, input: PipelineData) -> Result<PipelineData, ShellError> {
     let value = input.into_value();
+    if value.has_non_finite() {
+        return Err(ShellError::runtime(
+            "cannot serialize NaN or Infinity to JSON",
+        )
+        .with_span(call.head_span)
+        .with_help("JSON has no representation for non-finite numbers"));
+    }
     let json = if call.has_flag("pretty") {
         serde_json::to_string_pretty(&value)
     } else {
@@ -412,7 +426,10 @@ mod tests {
         let ctx = ExecContext { host: Rc::new(TestHost), width: 80, pane: 0, run_id: 0 };
         let out = parse(src);
         assert!(out.errors.is_empty(), "{:?}", out.errors);
-        let mut results = block_on(eval_line(&out.line, &registry, &ctx, &Scope::new()))?;
+        let (mut results, error) = block_on(eval_line(&out.line, &registry, &ctx, &Scope::new()));
+        if let Some(e) = error {
+            return Err(e);
+        }
         Ok(results.pop().map(PipelineData::into_value).unwrap_or(Value::Null))
     }
 
@@ -517,5 +534,81 @@ mod tests {
     fn echo_multiple_makes_list() {
         let v = eval("echo a b").expect("eval");
         assert_eq!(v, Value::List(vec![Value::Str("a".into()), Value::Str("b".into())]));
+    }
+
+    // --- regression tests from the M2 adversarial review ---
+
+    #[test]
+    fn sort_by_mixed_type_column_never_panics() {
+        // 30 rows mixing ints and strings previously violated sort_by's
+        // total-order contract (std detects intransitivity and panics; under
+        // panic=abort that killed the whole WASM terminal).
+        let mut rows = Vec::new();
+        for i in 0..30 {
+            if i % 3 == 0 {
+                rows.push(format!("{{\"n\":\"s{:03}\"}}", (i * 37) % 1000));
+            } else {
+                rows.push(format!("{{\"n\":{}}}", (i * 251) % 1000));
+            }
+        }
+        let json = format!("[{}]", rows.join(","));
+        let v = eval(&format!("echo '{json}' | from json | sort-by n | get n")).expect("no panic");
+        // Deterministic: all numbers first (sorted), then all strings.
+        match v {
+            Value::List(items) => {
+                let first_str = items.iter().position(|x| matches!(x, Value::Str(_))).expect("has strings");
+                assert!(items[..first_str].iter().all(|x| matches!(x, Value::Int(_))));
+                assert!(items[first_str..].iter().all(|x| matches!(x, Value::Str(_))));
+            }
+            other => panic!("expected list, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sort_by_reverse_keeps_missing_last_and_is_stable() {
+        let json = r#"[{"n":1,"tag":"a"},{"tag":"missing"},{"n":3,"tag":"b"},{"n":3,"tag":"c"}]"#;
+        let v = eval(&format!("echo '{json}' | from json | sort-by n --reverse | get tag")).expect("eval");
+        assert_eq!(
+            v,
+            Value::List(vec![
+                Value::Str("b".into()), // 3 (first of the equal run — stable)
+                Value::Str("c".into()), // 3
+                Value::Str("a".into()), // 1
+                Value::Str("missing".into()), // missing column stays last
+            ])
+        );
+    }
+
+    #[test]
+    fn first_with_huge_n_returns_everything() {
+        // 2^32: on wasm32 an `as usize` cast truncated this to 0.
+        let v = eval("echo '[1,2,3]' | from json | first 4294967296 | length").expect("eval");
+        assert_eq!(v, Value::Int(3));
+    }
+
+    #[test]
+    fn to_json_refuses_non_finite() {
+        let call = BoundCall {
+            head_span: crate::error::Span::new(0, 0),
+            positionals: vec![],
+            flags: std::collections::HashMap::new(),
+        };
+        let ctx = ExecContext { host: Rc::new(TestHost), width: 80, pane: 0, run_id: 0 };
+        let err = to_json(ctx, call, PipelineData::Value(Value::Float(f64::NAN)))
+            .expect_err("NaN must not serialize");
+        assert!(err.msg.contains("NaN"));
+    }
+
+    #[test]
+    fn subcommand_typo_gets_did_you_mean() {
+        let err = eval("str upcsae hi").expect_err("typo");
+        assert!(err.msg.contains("unknown command `str upcsae`"), "{}", err.msg);
+        assert_eq!(err.help.as_deref(), Some("did you mean `str upcase`?"));
+    }
+
+    #[test]
+    fn quoted_true_stays_string_bareword_true_is_bool() {
+        assert_eq!(eval("echo 'true'").expect("eval"), Value::Str("true".into()));
+        assert_eq!(eval("echo true").expect("eval"), Value::Bool(true));
     }
 }

@@ -150,8 +150,8 @@ impl<A: EngineAccess> CommandSource for EngineCommands<A> {
         self.0.with(|e| e.registry.lookup(words))
     }
 
-    fn unknown_command_error(&self, word: &str, span: crate::error::Span) -> ShellError {
-        self.0.with(|e| e.registry.unknown_command_error(word, span))
+    fn unknown_command_error(&self, words: &[crate::ast::Spanned<String>]) -> ShellError {
+        self.0.with(|e| e.registry.unknown_command_error(words))
     }
 }
 
@@ -228,23 +228,22 @@ pub async fn execute_line<A: EngineAccess>(access: A, pane: u32, line: String, r
     let scope = access.with(|e| e.scope.clone());
     let source = EngineCommands(access.clone());
 
-    let result = eval_line(&parsed.line, &source, &ctx, &scope).await;
+    let (results, error) = eval_line(&parsed.line, &source, &ctx, &scope).await;
 
     access.with(|e| {
-        match &result {
-            Ok(results) => {
-                for data in results {
-                    if let PipelineData::Value(v) = data {
-                        let rendered = render(v, cols);
-                        e.emit_output(pane, &rendered);
-                    }
-                }
-                finish_pane(e, pane, true);
+        // Completed pipelines render even when a later one failed.
+        for data in &results {
+            if let PipelineData::Value(v) = data {
+                let rendered = render(v, cols);
+                e.emit_output(pane, &rendered);
             }
-            Err(err) => {
+        }
+        match &error {
+            Some(err) => {
                 e.emit_output(pane, &err.render(&line));
                 finish_pane(e, pane, false);
             }
+            None => finish_pane(e, pane, true),
         }
     });
     access.events_ready();
@@ -267,7 +266,10 @@ pub async fn eval_to_value<A: EngineAccess>(
     let ctx = make_ctx(&access, pane, run_id);
     let scope = access.with(|e| e.scope.clone());
     let source = EngineCommands(access.clone());
-    let results = eval_line(&parsed.line, &source, &ctx, &scope).await?;
+    let (results, error) = eval_line(&parsed.line, &source, &ctx, &scope).await;
+    if let Some(err) = error {
+        return Err(err);
+    }
     Ok(results
         .into_iter()
         .last()

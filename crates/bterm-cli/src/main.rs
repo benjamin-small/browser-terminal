@@ -97,19 +97,18 @@ fn main() {
                     last_ok = false;
                     continue;
                 }
-                match block_on(eval_line(&parsed.line, &*registry, &ctx, &scope)) {
-                    Ok(results) => {
-                        for data in results {
-                            if let PipelineData::Value(v) = data {
-                                print!("{}", render(&v, ctx.width));
-                            }
-                        }
-                        last_ok = true;
+                let (results, error) = block_on(eval_line(&parsed.line, &*registry, &ctx, &scope));
+                for data in results {
+                    if let PipelineData::Value(v) = data {
+                        print!("{}", render(&v, ctx.width));
                     }
-                    Err(err) => {
+                }
+                match error {
+                    Some(err) => {
                         print!("{}", err.render(&src));
                         last_ok = false;
                     }
+                    None => last_ok = true,
                 }
             }
             Err(ReadlineError::Interrupted) => continue,

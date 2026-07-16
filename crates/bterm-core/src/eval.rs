@@ -15,7 +15,7 @@ use std::rc::Rc;
 pub trait CommandSource {
     /// Longest-prefix resolution over leading barewords → (command, words consumed).
     fn lookup(&self, words: &[String]) -> Option<(Rc<dyn Command>, usize)>;
-    fn unknown_command_error(&self, word: &str, span: crate::error::Span) -> ShellError;
+    fn unknown_command_error(&self, words: &[crate::ast::Spanned<String>]) -> ShellError;
 }
 
 impl CommandSource for CommandRegistry {
@@ -23,8 +23,8 @@ impl CommandSource for CommandRegistry {
         CommandRegistry::lookup(self, words)
     }
 
-    fn unknown_command_error(&self, word: &str, span: crate::error::Span) -> ShellError {
-        CommandRegistry::unknown_command_error(self, word, span)
+    fn unknown_command_error(&self, words: &[crate::ast::Spanned<String>]) -> ShellError {
+        CommandRegistry::unknown_command_error(self, words)
     }
 }
 
@@ -35,24 +35,28 @@ impl CommandSource for std::cell::RefCell<CommandRegistry> {
         self.borrow().lookup(words)
     }
 
-    fn unknown_command_error(&self, word: &str, span: crate::error::Span) -> ShellError {
-        self.borrow().unknown_command_error(word, span)
+    fn unknown_command_error(&self, words: &[crate::ast::Spanned<String>]) -> ShellError {
+        self.borrow().unknown_command_error(words)
     }
 }
 
-/// Evaluate one submitted line. Returns one result per `;`-pipeline (each is
-/// rendered separately by the host).
+/// Evaluate one submitted line. Returns one result per completed
+/// `;`-pipeline plus the error that stopped a later pipeline, if any —
+/// earlier successful results are never discarded.
 pub async fn eval_line(
     line: &Line,
     source: &impl CommandSource,
     ctx: &ExecContext,
     scope: &Scope,
-) -> Result<Vec<PipelineData>, ShellError> {
+) -> (Vec<PipelineData>, Option<ShellError>) {
     let mut results = Vec::new();
     for pipeline in &line.pipelines {
-        results.push(eval_pipeline(pipeline, source, ctx, scope).await?);
+        match eval_pipeline(pipeline, source, ctx, scope).await {
+            Ok(data) => results.push(data),
+            Err(err) => return (results, Some(err)),
+        }
     }
-    Ok(results)
+    (results, None)
 }
 
 pub async fn eval_pipeline(
@@ -78,7 +82,7 @@ async fn eval_call(
     let words: Vec<String> = call.words.iter().map(|w| w.node.clone()).collect();
     let (cmd, consumed) = source
         .lookup(&words)
-        .ok_or_else(|| source.unknown_command_error(&words[0], call.words[0].span))?;
+        .ok_or_else(|| source.unknown_command_error(&call.words))?;
 
     // `--help` intercepted before binding, so a malformed call still gets help.
     if wants_help(call) {
@@ -181,7 +185,20 @@ mod tests {
     fn eval(src: &str) -> Result<Vec<PipelineData>, ShellError> {
         let out = crate::parse::parse(src);
         assert!(out.errors.is_empty(), "{:?}", out.errors);
-        block_on(eval_line(&out.line, &registry(), &ctx(), &Scope::new()))
+        let (results, error) = block_on(eval_line(&out.line, &registry(), &ctx(), &Scope::new()));
+        match error {
+            Some(e) => Err(e),
+            None => Ok(results),
+        }
+    }
+
+    #[test]
+    fn failing_pipeline_keeps_earlier_results() {
+        let out = crate::parse::parse("emit 1; nope; emit 3");
+        assert!(out.errors.is_empty());
+        let (results, error) = block_on(eval_line(&out.line, &registry(), &ctx(), &Scope::new()));
+        assert_eq!(results, vec![PipelineData::Value(Value::Int(1))]);
+        assert!(error.expect("second pipeline fails").msg.contains("unknown command"));
     }
 
     #[test]

@@ -42,8 +42,14 @@ fn is_bareword_char(c: char) -> bool {
     !c.is_whitespace() && !matches!(c, '|' | ';' | '#' | '\'' | '"' | '$' | '(' | ')' | '{' | '}' | '>' | '<' | '&' | '=')
 }
 
-fn is_var_char(c: char) -> bool {
+/// Flag names allow '-' (`--starts-with`); variable names do not, so `$a-b`
+/// reads as `$a` followed by bareword `-b`, matching interpolation.
+fn is_flag_char(c: char) -> bool {
     c.is_alphanumeric() || c == '_' || c == '-'
+}
+
+fn is_var_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
 }
 
 pub fn lex(src: &str) -> Result<Vec<Token>, ShellError> {
@@ -108,8 +114,8 @@ pub fn lex(src: &str) -> Result<Vec<Token>, ShellError> {
             }
             '-' => {
                 let after = rest[1..].chars().next();
-                if rest.starts_with("--") {
-                    let name: String = rest[2..].chars().take_while(|&ch| is_var_char(ch)).collect();
+                if let Some(after_dashes) = rest.strip_prefix("--") {
+                    let name: String = after_dashes.chars().take_while(|&ch| is_flag_char(ch)).collect();
                     if name.is_empty() {
                         return Err(ShellError::parse("expected a flag name after `--`", Span::new(start, start + 2)));
                     }
@@ -216,12 +222,19 @@ fn lex_number(rest: &str, start: u32) -> Result<(Token, usize), ShellError> {
         let f: f64 = text
             .parse()
             .map_err(|_| ShellError::parse(format!("invalid number `{text}`"), span))?;
+        if !f.is_finite() {
+            return Err(ShellError::parse(
+                format!("number `{text}` is too large to represent"),
+                span,
+            ));
+        }
         TokenKind::Float(f)
     } else {
         let n: i64 = text
             .parse()
             .map_err(|_| ShellError::parse(format!("integer `{text}` is out of range"), span))?;
-        if n.abs() > MAX_SAFE_INT {
+        // unsigned_abs: `.abs()` would overflow on i64::MIN.
+        if n.unsigned_abs() > MAX_SAFE_INT as u64 {
             return Err(ShellError::parse(
                 format!("integer `{text}` exceeds 2^53 and would lose precision in JavaScript"),
                 span,
@@ -275,7 +288,7 @@ fn lex_interp_string(rest: &str, start: u32) -> Result<(Vec<InterpPart>, usize),
             '$' => {
                 let name: String = rest[idx + 1..]
                     .chars()
-                    .take_while(|&c2| is_var_char(c2) && c2 != '-')
+                    .take_while(|&c2| is_var_char(c2))
                     .collect();
                 if name.is_empty() {
                     lit.push('$');
@@ -382,6 +395,34 @@ mod tests {
     fn huge_int_rejected() {
         assert!(lex("9007199254740993").is_err());
         assert!(lex("9007199254740992").is_ok());
+    }
+
+    #[test]
+    fn i64_min_rejected_not_panicking() {
+        // `.abs()` would overflow on i64::MIN (panic in debug, silent
+        // acceptance in release).
+        let err = lex("-9223372036854775808").expect_err("must reject");
+        assert!(err.msg.contains("2^53"));
+    }
+
+    #[test]
+    fn overflowing_float_literal_rejected() {
+        let huge = format!("1{}0.5", "0".repeat(400));
+        assert!(lex(&huge).is_err(), "non-finite float literal must be rejected");
+    }
+
+    #[test]
+    fn var_names_stop_at_dash_like_interpolation() {
+        let toks = kinds("$a-b");
+        assert_eq!(toks[0], TokenKind::Var("a".into()));
+        // And inside interpolation the same boundary applies.
+        assert_eq!(
+            kinds(r#""$a-b""#),
+            vec![TokenKind::StrInterp(vec![
+                InterpPart::Var("a".into()),
+                InterpPart::Lit("-b".into()),
+            ])]
+        );
     }
 
     #[test]

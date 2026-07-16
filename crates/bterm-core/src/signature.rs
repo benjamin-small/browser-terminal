@@ -19,6 +19,7 @@ pub enum Shape {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PosArg {
     pub name: String,
     #[serde(default = "default_shape")]
@@ -28,6 +29,7 @@ pub struct PosArg {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FlagSpec {
     pub long: String,
     #[serde(default)]
@@ -44,8 +46,11 @@ fn default_shape() -> Shape {
 }
 
 /// Nushell-shaped command signature. TS command authors supply the same
-/// structure (all collection fields optional there).
+/// structure (all collection fields optional there). Unknown fields are
+/// rejected so a TS author's typo (`flag` vs `flags`, `type` vs `shape`)
+/// errors loudly instead of silently degrading the command.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Signature {
     pub name: String,
     #[serde(default)]
@@ -183,6 +188,10 @@ pub fn wants_help(call: &Call) -> bool {
 pub fn eval_expr(expr: &Expr, scope: &Scope) -> Result<Value, ShellError> {
     match expr {
         Expr::Literal(v, _) => Ok(v.clone()),
+        // Bare `true`/`false` are boolean literals; quoted 'true' stays a
+        // string (a Str-shaped parameter turns the Bool back into text).
+        Expr::Bareword(w, _) if w == "true" => Ok(Value::Bool(true)),
+        Expr::Bareword(w, _) if w == "false" => Ok(Value::Bool(false)),
         Expr::Bareword(w, _) => Ok(Value::Str(w.clone())),
         Expr::Var(name, span) => scope.get(name).cloned().ok_or_else(|| {
             let e = ShellError::new(ErrorKind::Runtime, format!("unknown variable `${name}`")).with_span(*span);
@@ -235,11 +244,7 @@ fn coerce(value: Value, shape: Shape, at: Span, what: &str) -> Result<Value, She
         .with_span(at))
     };
     match shape {
-        Shape::Any => Ok(match value {
-            Value::Str(s) if s == "true" => Value::Bool(true),
-            Value::Str(s) if s == "false" => Value::Bool(false),
-            other => other,
-        }),
+        Shape::Any => Ok(value),
         Shape::Str => match value {
             Value::Str(s) => Ok(Value::Str(s)),
             Value::Int(n) => Ok(Value::Str(n.to_string())),
@@ -249,13 +254,22 @@ fn coerce(value: Value, shape: Shape, at: Span, what: &str) -> Result<Value, She
         },
         Shape::Int => match value {
             Value::Int(n) => Ok(Value::Int(n)),
-            Value::Str(s) => s
-                .parse::<i64>()
-                .map(Value::Int)
-                .map_err(|_| {
+            Value::Str(s) => {
+                let n = s.parse::<i64>().map_err(|_| {
                     ShellError::new(ErrorKind::Type, format!("{what} expects an int, found `{s}`"))
                         .with_span(at)
-                }),
+                })?;
+                // Same 2^53 gate as the lexer — coercion must not be a
+                // second door for precision-losing integers.
+                if n.unsigned_abs() > crate::value::MAX_SAFE_INT as u64 {
+                    return Err(ShellError::new(
+                        ErrorKind::Type,
+                        format!("{what}: `{s}` exceeds 2^53 and would lose precision in JavaScript"),
+                    )
+                    .with_span(at));
+                }
+                Ok(Value::Int(n))
+            }
             ref v => fail(v),
         },
         Shape::Float => match value {
@@ -305,7 +319,13 @@ pub fn bind(
     let mut flags: HashMap<String, Value> = HashMap::new();
 
     for w in leading_words {
-        positionals.push((Value::Str(w.node.clone()), w.span));
+        // Same bareword semantics as eval_expr: bare true/false are bools.
+        let v = match w.node.as_str() {
+            "true" => Value::Bool(true),
+            "false" => Value::Bool(false),
+            _ => Value::Str(w.node.clone()),
+        };
+        positionals.push((v, w.span));
     }
 
     let mut args = call.args.iter().peekable();

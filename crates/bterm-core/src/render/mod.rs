@@ -42,6 +42,23 @@ pub fn plain(value: &Value) -> String {
     }
 }
 
+/// Strip control characters from user-supplied text so a Str value cannot
+/// inject ANSI escapes into the terminal. Newlines and tabs survive in
+/// scalar display; table cells flatten them too (`cell_text`).
+fn sanitize(s: &str) -> String {
+    s.chars()
+        .filter(|c| !c.is_control() || *c == '\n' || *c == '\t')
+        .collect()
+}
+
+/// Single-line, escape-free cell/key text for tables and records.
+fn cell_text(s: &str) -> String {
+    s.chars()
+        .map(|c| if c == '\n' || c == '\t' || c == '\r' { ' ' } else { c })
+        .filter(|c| !c.is_control())
+        .collect()
+}
+
 fn format_float(f: f64) -> String {
     if f.fract() == 0.0 && f.abs() < 1e15 {
         format!("{f:.1}")
@@ -55,7 +72,7 @@ fn colored_scalar(value: &Value) -> String {
         Value::Null => format!("{DIM}null{RESET}"),
         Value::Bool(b) => format!("{YELLOW}{b}{RESET}"),
         Value::Int(_) | Value::Float(_) => format!("{CYAN}{}{RESET}", plain(value)),
-        Value::Str(s) => s.clone(),
+        Value::Str(s) => sanitize(s),
         other => plain(other),
     }
 }
@@ -76,9 +93,10 @@ fn render_record(map: &indexmap::IndexMap<String, Value>) -> String {
     if map.is_empty() {
         return format!("{DIM}(empty record){RESET}\n");
     }
-    let key_width = map.keys().map(|k| UnicodeWidthStr::width(k.as_str())).max().unwrap_or(0);
+    let keys: Vec<String> = map.keys().map(|k| cell_text(k)).collect();
+    let key_width = keys.iter().map(|k| UnicodeWidthStr::width(k.as_str())).max().unwrap_or(0);
     let mut out = String::new();
-    for (k, v) in map {
+    for (k, v) in keys.iter().zip(map.values()) {
         let pad = " ".repeat(key_width - UnicodeWidthStr::width(k.as_str()));
         out.push_str(&format!("{GREEN}{k}{RESET}{pad}  {}\n", colored_scalar(v)));
     }
@@ -98,24 +116,31 @@ fn render_table(rows: &[Value], width: u16) -> String {
         }
     }
     let columns: Vec<String> = columns.into_iter().collect();
+    if columns.is_empty() {
+        return format!("{DIM}({} empty records){RESET}\n", rows.len());
+    }
 
     let cell = |row: &Value, col: &str| -> (String, bool) {
         match row {
             Value::Record(map) => match map.get(col) {
-                Some(v) => (plain(v), matches!(v, Value::Int(_) | Value::Float(_))),
+                Some(v) => (cell_text(&plain(v)), matches!(v, Value::Int(_) | Value::Float(_))),
                 None => (String::new(), false),
             },
             _ => (String::new(), false),
         }
     };
 
+    // Display names are sanitized; `columns` keeps raw keys for cell lookup.
+    let headers: Vec<String> = columns.iter().map(|c| cell_text(c)).collect();
+
     // Natural widths.
     let mut widths: Vec<usize> = columns
         .iter()
-        .map(|c| {
+        .zip(&headers)
+        .map(|(c, h)| {
             rows.iter()
                 .map(|r| UnicodeWidthStr::width(cell(r, c).0.as_str()))
-                .chain([UnicodeWidthStr::width(c.as_str())])
+                .chain([UnicodeWidthStr::width(h.as_str())])
                 .max()
                 .unwrap_or(0)
         })
@@ -166,7 +191,7 @@ fn render_table(rows: &[Value], width: u16) -> String {
     let mut out = String::new();
     out.push_str(&rule("┌", "┬", "┐"));
     out.push('│');
-    for (c, w) in columns.iter().zip(&widths) {
+    for (c, w) in headers.iter().zip(&widths) {
         let text = truncate(c, *w);
         let pad = " ".repeat(w - UnicodeWidthStr::width(text.as_str()));
         out.push_str(&format!(" {BOLD}{text}{RESET}{pad} │"));
@@ -273,5 +298,38 @@ mod tests {
         assert_eq!(strip_ansi(&render(&Value::Int(42), 80)), "42\n");
         assert_eq!(strip_ansi(&render(&Value::Str("hi".into()), 80)), "hi\n");
         assert_eq!(strip_ansi(&render(&Value::Null, 80)), "null\n");
+    }
+
+    #[test]
+    fn escape_injection_is_stripped() {
+        // A Str value must not be able to inject ANSI into the terminal.
+        let v = Value::Str("evil\x1b[2Jwiped".into());
+        let out = render(&v, 80);
+        assert!(!out.contains("\x1b[2J"), "ESC must be stripped: {out:?}");
+        assert!(out.contains("evilwiped") || out.contains("evil"), "{out:?}");
+    }
+
+    #[test]
+    fn newlines_in_cells_do_not_break_table_geometry() {
+        let v = Value::List(vec![Value::record([
+            ("a".to_string(), Value::Str("line1\nline2".into())),
+            ("b".to_string(), Value::Int(1)),
+        ])]);
+        let out = strip_ansi(&render(&v, 80));
+        // Header + rules + exactly one data row.
+        let data_rows = out.lines().filter(|l| l.contains("line1")).count();
+        assert_eq!(data_rows, 1);
+        assert!(out.contains("line1 line2"), "newline flattened: {out}");
+    }
+
+    #[test]
+    fn empty_records_render_placeholder_not_degenerate_box() {
+        let v = Value::List(vec![
+            Value::Record(indexmap::IndexMap::new()),
+            Value::Record(indexmap::IndexMap::new()),
+        ]);
+        let out = strip_ansi(&render(&v, 80));
+        assert!(out.contains("(2 empty records)"), "{out}");
+        assert!(!out.contains('┌'));
     }
 }

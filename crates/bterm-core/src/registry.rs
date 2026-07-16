@@ -161,12 +161,30 @@ impl CommandRegistry {
         self.map.get(name).map(|e| e.command.clone())
     }
 
-    pub fn unknown_command_error(&self, word: &str, span: crate::error::Span) -> ShellError {
-        let e = ShellError::new(ErrorKind::UnknownCommand, format!("unknown command `{word}`")).with_span(span);
-        match did_you_mean(word, self.map.keys().map(|s| s.as_str())) {
-            Some(s) => e.with_help(format!("did you mean `{s}`?")),
-            None => e.with_help("run `help` to list commands"),
+    /// Unknown-command diagnostic. Tries did-you-mean against multi-word
+    /// prefixes first so `str upcsae` suggests `str upcase`, not nothing.
+    pub fn unknown_command_error(&self, words: &[crate::ast::Spanned<String>]) -> ShellError {
+        let max_k = words.len().min(3);
+        for take in (1..=max_k).rev() {
+            let target = words[..take]
+                .iter()
+                .map(|w| w.node.as_str())
+                .collect::<Vec<_>>()
+                .join(" ");
+            if let Some(suggestion) = did_you_mean(&target, self.map.keys().map(|s| s.as_str())) {
+                let span = words[0].span.merge(words[take - 1].span);
+                return ShellError::new(
+                    ErrorKind::UnknownCommand,
+                    format!("unknown command `{target}`"),
+                )
+                .with_span(span)
+                .with_help(format!("did you mean `{suggestion}`?"));
+            }
         }
+        let word = &words[0];
+        ShellError::new(ErrorKind::UnknownCommand, format!("unknown command `{}`", word.node))
+            .with_span(word.span)
+            .with_help("run `help` to list commands")
     }
 }
 

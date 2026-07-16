@@ -80,6 +80,50 @@ impl Value {
         }
     }
 
+    /// Total order for sorting: values group by type rank (numbers, then
+    /// strings, bools, null, lists, records) and compare within the rank;
+    /// numbers cross-compare Int/Float and NaN sorts after every other
+    /// number. Unlike `partial_cmp_values`, this never violates
+    /// `slice::sort_by`'s total-order contract on mixed-type columns.
+    pub fn total_cmp_values(&self, other: &Value) -> Ordering {
+        fn rank(v: &Value) -> u8 {
+            match v {
+                Value::Int(_) | Value::Float(_) => 0,
+                Value::Str(_) => 1,
+                Value::Bool(_) => 2,
+                Value::Null => 3,
+                Value::List(_) => 4,
+                Value::Record(_) => 5,
+            }
+        }
+        use Value::*;
+        match rank(self).cmp(&rank(other)) {
+            Ordering::Equal => match (self, other) {
+                (Int(a), Int(b)) => a.cmp(b),
+                (Int(a), Float(b)) => (*a as f64).total_cmp(b),
+                (Float(a), Int(b)) => a.total_cmp(&(*b as f64)),
+                (Float(a), Float(b)) => a.total_cmp(b),
+                (Str(a), Str(b)) => a.cmp(b),
+                (Bool(a), Bool(b)) => a.cmp(b),
+                (List(a), List(b)) => a.len().cmp(&b.len()),
+                (Record(a), Record(b)) => a.len().cmp(&b.len()),
+                _ => Ordering::Equal,
+            },
+            other_rank => other_rank,
+        }
+    }
+
+    /// Any NaN/Infinity anywhere in this value? (JSON cannot represent
+    /// them; `to json` refuses instead of silently writing `null`.)
+    pub fn has_non_finite(&self) -> bool {
+        match self {
+            Value::Float(f) => !f.is_finite(),
+            Value::List(items) => items.iter().any(Value::has_non_finite),
+            Value::Record(map) => map.values().any(Value::has_non_finite),
+            _ => false,
+        }
+    }
+
     /// Loose equality used by `where eq/ne`: same as PartialEq except numeric
     /// types compare across Int/Float.
     pub fn loose_eq(&self, other: &Value) -> bool {
