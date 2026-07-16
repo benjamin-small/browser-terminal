@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>browser-terminal demo</title>
+    <style>
+      body {
+        font-family: system-ui, sans-serif;
+        max-width: 720px;
+        margin: 2rem auto;
+        padding: 0 1rem 400px;
+        line-height: 1.6;
+      }
+      h1 { font-size: 1.6rem; }
+      a { color: #4f6ef7; }
+    </style>
+  </head>
+  <body>
+    <h1>browser-terminal demo host page</h1>
+    <p>
+      This is an ordinary web page. The floating panel at the bottom is a
+      terminal backed by a Rust/WASM core. Later milestones let you run
+      commands like <code>links | where text ne '' | first 5</code> against
+      this page's content.
+    </p>
+    <h2>Some links for the future <code>links</code> command</h2>
+    <ul>
+      <li><a href="https://www.rust-lang.org/">Rust language</a></li>
+      <li><a href="https://webassembly.org/">WebAssembly</a></li>
+      <li><a href="https://xtermjs.org/">xterm.js</a></li>
+      <li><a href="https://www.nushell.sh/">Nushell</a></li>
+      <li><a href="https://github.com/tmux/tmux">tmux</a></li>
+      <li><a href="https://example.com/"></a></li>
+    </ul>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

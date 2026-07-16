@@ -1,0 +1,12 @@
+[package]
+name = "bterm-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "bterm"
+path = "src/main.rs"
+
+[dependencies]
+bterm-core = { path = "../bterm-core" }

@@ -1,0 +1,7 @@
+{
+  "name": "browser-terminal-workspace",
+  "private": true,
+  "workspaces": [
+    "packages/*"
+  ]
+}

@@ -1,0 +1,16 @@
+[package]
+name = "bterm-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+indexmap = { version = "2", features = ["serde"] }
+unicode-width = "0.2"
+
+[dev-dependencies]
+insta = "1"
+
+[lints.clippy]
+unwrap_used = "deny"

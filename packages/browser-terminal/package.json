@@ -1,0 +1,27 @@
+{
+  "name": "browser-terminal",
+  "version": "0.1.0",
+  "description": "A terminal/tmux experience for any web page, powered by a Rust/WASM core with structured-value pipes.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json && rm -rf dist/wasm && cp -R src/wasm dist/wasm"
+  },
+  "dependencies": {
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/xterm": "^6.0.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.0"
+  }
+}
