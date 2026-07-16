@@ -5,10 +5,13 @@
 
 pub mod ast;
 pub mod builtins;
+pub mod editor;
+pub mod engine;
 pub mod error;
 pub mod eval;
 pub mod lex;
 pub mod parse;
+pub mod protocol;
 pub mod registry;
 pub mod render;
 pub mod signature;

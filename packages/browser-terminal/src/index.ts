@@ -1,14 +1,21 @@
 /**
  * browser-terminal — public TypeScript API.
  *
- * Milestone 1: mounts a single xterm.js terminal and round-trips every
- * keystroke through the Rust/WASM core (`feed` → echo, same tick). The full
- * BrowserTerminal surface (commands, sessions, panels) lands in later
- * milestones.
+ * Current milestone (M3): one floating panel with a full structured-shell
+ * REPL pane backed by the Rust/WASM engine. Keystrokes take the sync hot
+ * path (`feed` → echo, same tick); engine output arrives through a single
+ * event callback and flows through a backpressured write queue.
  */
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import init, { BtermCore } from './wasm/bterm_wasm.js';
+import { PaneWriter } from './panes.js';
+import type { Effects, EngineEvent } from './events.js';
+
+export type { Effects, EngineEvent } from './events.js';
+
+/** Enables bracketed paste so multi-line pastes can never auto-execute. */
+const ENABLE_BRACKETED_PASTE = '\x1b[?2004h';
 
 export interface CreateOptions {
   /** Element to mount the terminal panel into; a bottom-docked panel is created if omitted. */
@@ -23,6 +30,7 @@ export class BrowserTerminal {
   private constructor(
     private readonly core: BtermCore,
     private readonly term: Terminal,
+    private readonly writer: PaneWriter,
     private readonly resizeObserver: ResizeObserver,
     private readonly ownedMount: HTMLElement | null,
   ) {}
@@ -37,7 +45,6 @@ export class BrowserTerminal {
       module_or_path:
         opts.wasmUrl ?? new URL('./wasm/bterm_wasm_bg.wasm', import.meta.url),
     });
-    const core = new BtermCore();
 
     let ownedMount: HTMLElement | null = null;
     let mount = opts.mount;
@@ -46,30 +53,56 @@ export class BrowserTerminal {
       mount = ownedMount;
     }
 
-    const term = new Terminal({ cursorBlink: true, scrollback: 2000 });
+    const term = new Terminal({
+      cursorBlink: true,
+      scrollback: 2000,
+      fontSize: 13,
+      theme: { background: '#181825' },
+    });
     const fit = new FitAddon();
     term.loadAddon(fit);
     term.open(mount);
     fit.fit();
+    term.write(ENABLE_BRACKETED_PASTE);
 
-    term.write('browser-terminal M1 — echo round-trip through WASM\r\n> ');
-    term.onData((data) => {
-      // Sync hot path: input → WASM → echo bytes, written in the same tick.
-      term.write(core.feed(0, data));
+    const writer = new PaneWriter(term);
+    const core = new BtermCore((event: EngineEvent) => {
+      switch (event.type) {
+        case 'paneOutput':
+          writer.write(event.data);
+          break;
+        case 'fatal':
+          writer.write(`\r\n\x1b[1;31mterminal crashed:\x1b[0m ${event.message}\r\n`);
+          break;
+      }
     });
 
-    const resizeObserver = new ResizeObserver(() => fit.fit());
+    core.resize(0, term.cols, term.rows);
+    term.onData((data) => {
+      // Sync hot path: input → WASM editor → echo bytes, same tick.
+      const effects = core.feed(0, data) as Effects | null;
+      if (effects && effects.echo) {
+        term.write(effects.echo);
+      }
+    });
+
+    const resizeObserver = new ResizeObserver(() => {
+      fit.fit();
+      core.resize(0, term.cols, term.rows);
+    });
     resizeObserver.observe(mount);
 
     instanceLive = true;
-    return new BrowserTerminal(core, term, resizeObserver, ownedMount);
+    return new BrowserTerminal(core, term, writer, resizeObserver, ownedMount);
   }
 
   dispose(): void {
     this.resizeObserver.disconnect();
+    this.writer.dispose();
+    this.core.dispose();
+    this.core.free();
     this.term.dispose();
     this.ownedMount?.remove();
-    this.core.free();
     instanceLive = false;
   }
 
@@ -81,7 +114,7 @@ export class BrowserTerminal {
       'right:16px',
       'bottom:16px',
       'height:320px',
-      'background:#1e1e2e',
+      'background:#181825',
       'padding:8px',
       'border-radius:8px',
       'box-shadow:0 8px 32px rgba(0,0,0,.4)',
