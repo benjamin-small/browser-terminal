@@ -25,7 +25,7 @@ bt.registerCommand(
 Then, in the terminal panel:
 
 ```
-❯ links --limit 20 | where text ne '' | first 5
+❯ links --limit 20 | where text ne '' | head 5
 ┌───────────────┬──────────────────────────────┐
 │ text          │ href                         │
 ├───────────────┼──────────────────────────────┤
@@ -45,7 +45,7 @@ const count = await bt.run("links | where text ne '' | length");  // → 5
 - **Structured pipes**: values (strings, numbers, lists, records) flow between
   commands; tables render automatically at the end of a pipeline.
 - **Commands in Rust or TypeScript**: builtins (`where`, `sort-by`, `get`,
-  `first`, `to json`, …) plus `registerCommand` for page-side commands.
+  `head`, `to json`, …) plus `registerCommand` for page-side commands.
   TS commands get an `AbortSignal` (Ctrl-C cancels in-flight `fetch`es) and an
   `emit()` for progressive output.
 - **tmux surface**: `Ctrl-B` prefix — `%`/`"` split, `c`/`n`/`p` windows,

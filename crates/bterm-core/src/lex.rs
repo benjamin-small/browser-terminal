@@ -322,11 +322,11 @@ mod tests {
     #[test]
     fn barewords_and_pipes() {
         assert_eq!(
-            kinds("links | first 5"),
+            kinds("links | head 5"),
             vec![
                 TokenKind::Bareword("links".into()),
                 TokenKind::Pipe,
-                TokenKind::Bareword("first".into()),
+                TokenKind::Bareword("head".into()),
                 TokenKind::Int(5),
             ]
         );

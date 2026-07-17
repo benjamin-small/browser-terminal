@@ -207,7 +207,7 @@ mod tests {
 
     #[test]
     fn flagship_demo_line_parses() {
-        let line = ok("links --limit 20 | where text ne '' | first 5");
+        let line = ok("links --limit 20 | where text ne '' | head 5");
         assert_eq!(line.pipelines.len(), 1);
         let calls = &line.pipelines[0].calls;
         assert_eq!(calls.len(), 3);

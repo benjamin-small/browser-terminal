@@ -6,7 +6,7 @@ Run `just demo`, open http://localhost:5173, then walk through:
 - [ ] Banner + green `❯` prompt appear in the floating panel
 - [ ] `help` lists commands as a table; `help where` shows usage
 - [ ] `echo a b c | str upcase` renders an indexed list
-- [ ] `links --limit 20 | where text ne '' | first 5` renders a box table
+- [ ] `links --limit 20 | where text ne '' | head 5` renders a box table
 - [ ] `sort-by`, `get`, `to json --pretty`, `from json` behave
 - [ ] Bad input: `sort-by n --reverze` → red caret + "did you mean `--reverse`?"
 - [ ] Unknown command `nop 5` → caret + help; `str upcsae` suggests `str upcase`

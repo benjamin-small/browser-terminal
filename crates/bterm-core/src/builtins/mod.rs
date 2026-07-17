@@ -53,14 +53,14 @@ pub fn register_all(registry: &mut CommandRegistry) {
         where_cmd,
     ));
     registry.register_builtin(cmd(
-        Signature::build("first", "Take the first row (or first n rows)")
+        Signature::build("head", "Take the first row (or first n rows)")
             .optional_arg("n", Shape::Int, "how many rows"),
-        first,
+        head,
     ));
     registry.register_builtin(cmd(
-        Signature::build("last", "Take the last row (or last n rows)")
+        Signature::build("tail", "Take the last row (or last n rows)")
             .optional_arg("n", Shape::Int, "how many rows"),
-        last,
+        tail,
     ));
     registry.register_builtin(cmd(
         Signature::build("length", "Count items in a list (or characters in a string)"),
@@ -312,25 +312,25 @@ fn take_n(call: &BoundCall) -> Result<Option<usize>, ShellError> {
     match call.positionals.first() {
         None => Ok(None),
         // try_from, not `as`: on wasm32 (32-bit usize) an as-cast truncates
-        // and `first 4294967296` would silently take 0 rows.
+        // and `head 4294967296` would silently take 0 rows.
         Some(Value::Int(n)) if *n >= 0 => Ok(Some(usize::try_from(*n).unwrap_or(usize::MAX))),
         Some(Value::Int(n)) => Err(ShellError::runtime(format!("`{n}` is negative")).with_span(call.head_span)),
-        Some(other) => Err(type_err("first/last", "an int", other)),
+        Some(other) => Err(type_err("head/tail", "an int", other)),
     }
 }
 
-fn first(_ctx: ExecContext, call: BoundCall, input: PipelineData) -> Result<PipelineData, ShellError> {
+fn head(_ctx: ExecContext, call: BoundCall, input: PipelineData) -> Result<PipelineData, ShellError> {
     let n = take_n(&call)?;
     match input.into_value() {
         Value::List(items) => Ok(PipelineData::Value(match n {
             None => items.into_iter().next().unwrap_or(Value::Null),
             Some(n) => Value::List(items.into_iter().take(n).collect()),
         })),
-        other => Err(type_err("first", "a list", &other)),
+        other => Err(type_err("head", "a list", &other)),
     }
 }
 
-fn last(_ctx: ExecContext, call: BoundCall, input: PipelineData) -> Result<PipelineData, ShellError> {
+fn tail(_ctx: ExecContext, call: BoundCall, input: PipelineData) -> Result<PipelineData, ShellError> {
     let n = take_n(&call)?;
     match input.into_value() {
         Value::List(items) => Ok(PipelineData::Value(match n {
@@ -340,7 +340,7 @@ fn last(_ctx: ExecContext, call: BoundCall, input: PipelineData) -> Result<Pipel
                 Value::List(items.into_iter().skip(skip).collect())
             }
         })),
-        other => Err(type_err("last", "a list", &other)),
+        other => Err(type_err("tail", "a list", &other)),
     }
 }
 
@@ -537,7 +537,7 @@ mod tests {
 
     #[test]
     fn flagship_pipeline_works() {
-        let v = eval(&format!("echo {} | from json | where text ne '' | first 5", table_json()))
+        let v = eval(&format!("echo {} | from json | where text ne '' | head 5", table_json()))
             .expect("eval");
         match v {
             Value::List(rows) => {
@@ -588,10 +588,10 @@ mod tests {
     }
 
     #[test]
-    fn first_last_without_n_return_single() {
-        let v = eval(r#"echo '[1,2,3]' | from json | first"#).expect("eval");
+    fn head_tail_without_n_return_single() {
+        let v = eval(r#"echo '[1,2,3]' | from json | head"#).expect("eval");
         assert_eq!(v, Value::Int(1));
-        let v = eval(r#"echo '[1,2,3]' | from json | last"#).expect("eval");
+        let v = eval(r#"echo '[1,2,3]' | from json | tail"#).expect("eval");
         assert_eq!(v, Value::Int(3));
     }
 
@@ -678,9 +678,9 @@ mod tests {
     }
 
     #[test]
-    fn first_with_huge_n_returns_everything() {
+    fn head_with_huge_n_returns_everything() {
         // 2^32: on wasm32 an `as usize` cast truncated this to 0.
-        let v = eval("echo '[1,2,3]' | from json | first 4294967296 | length").expect("eval");
+        let v = eval("echo '[1,2,3]' | from json | head 4294967296 | length").expect("eval");
         assert_eq!(v, Value::Int(3));
     }
 

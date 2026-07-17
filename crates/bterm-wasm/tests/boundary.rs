@@ -65,7 +65,7 @@ async fn ts_command_sync_return_and_int_conversion() {
     let sig = js_sys::JSON::parse(r#"{"name":"nums"}"#).expect("sig");
     let f = Function::new_with_args("args", "return [10, 20, 30];");
     core.register_command(sig, f).expect("registered");
-    let v = run_line(&core, "nums | first 2 | length").await.expect("resolves");
+    let v = run_line(&core, "nums | head 2 | length").await.expect("resolves");
     assert_eq!(v.as_f64(), Some(2.0));
     core.dispose();
 }

@@ -421,7 +421,7 @@ input. No auto-restart, no persistence-based recovery in v1.
    mounts one xterm and round-trips `feed` echo through WASM. *Proves the whole
    toolchain and the sync hot path before any real code.*
 2. **Language + engine (native)** — Value, lexer, parser, signatures, binding, eval,
-   `ShellError` carets, builtins (`echo, get, where, first, last, length, sort-by,
+   `ShellError` carets, builtins (`echo, get, where, head, tail, length, sort-by,
    str upcase/downcase, to/from json, table, help, history, clear`), `bterm-cli`
    REPL. *Verify: cargo test green; pipe commands in a native terminal.*
 3. **REPL pane in browser** — line editor, event queue + flush, renderer wired
