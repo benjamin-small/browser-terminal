@@ -97,6 +97,8 @@ bt.registerCommand(spec, (args, input, ctx) => value | Promise<value>);
 //  ctx:  { signal: AbortSignal, emit(line: string): void }
 //  throw { message, help? } for rich diagnostics
 bt.unregisterCommand(name);
+bt.registerFn(name, (item) => value);  // usable as @name in any selector
+bt.unregisterFn(name);
 bt.run(line): Promise<Value>;  // programmatic execution, typed result
 bt.snapshot;                   // sessions/windows/pane rects
 bt.show(); bt.hide(); bt.toggle(); bt.dispose();
@@ -126,6 +128,46 @@ for **zero added binary size**, since the engine is already in every JS
 runtime. The native CLI has no JS engine, so it falls back to substring
 matching: patterns that work in the CLI always work in the browser, but not
 the reverse.
+
+### Selectors: `--on`, `map`, `filter`
+
+Anywhere a command needs to know *which part* of an item to look at, it takes
+the same three-form selector — learned once, identical everywhere:
+
+| form | meaning |
+|---|---|
+| `href`, `user.name` | a field, or a dotted path into nested records |
+| `'(o) => o.id > 5'` | inline JavaScript, compiled by the browser |
+| `@slug` | a function registered from TypeScript |
+
+`--on` is the **common parameter**: it changes what a command *examines*
+while keeping the whole row — something you can't express by piping through
+`get`, which would discard the other columns.
+
+```
+links | grep '^https' --on href          # test one field, keep whole rows
+links | sort-by --on '(o) => o.text.length'   # computed sort key
+links | map '(o) => ({ site: o.text, host: o.href })'   # reshape rows
+links | filter '(o) => o.text.length > 4' | tail 5
+```
+
+`map` and `filter` are the composable half: `--on` narrows what a command
+looks at, `map` changes what flows downstream.
+
+Commands where `--on` would be meaningless (`length`, `head`) simply don't
+declare it and reject it with the usual did-you-mean — no silent no-ops.
+
+**Inline functions use `eval`**, so a page whose Content-Security-Policy
+omits `unsafe-eval` will refuse them. Register the function instead — no
+`eval`, works under any CSP, and stays type-checked and debuggable:
+
+```ts
+bt.registerFn('host', (link) => new URL(link.href).hostname);
+// then:  links | map @host
+```
+
+The engine detects a blocking CSP once and says so, pointing at
+`registerFn` rather than surfacing a raw JS error.
 `( ) { } && || > <` are reserved for v2 (closures, operators, redirects).
 
 Run `help` in the panel for the full command list; `help <command>` /

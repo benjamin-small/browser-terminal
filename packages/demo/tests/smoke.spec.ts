@@ -51,7 +51,7 @@ test('grep filters with real regex and fails cleanly on bad patterns', async ({ 
   // native RegExp is wired in rather than substring matching.
   expect(await page.evaluate(() => window.bt.run("links | grep '^Rust' | length"))).toBe(1);
   expect(await page.evaluate(() => window.bt.run("links | grep 'rust|xterm' -i | length"))).toBe(2);
-  expect(await page.evaluate(() => window.bt.run("links | grep org --column href | length"))).toBe(3);
+  expect(await page.evaluate(() => window.bt.run("links | grep org --on href | length"))).toBe(3);
   expect(await page.evaluate(() => window.bt.run("links | grep '^Rust' -v | length"))).toBe(5);
 
   const err = await page.evaluate(() =>
@@ -63,6 +63,40 @@ test('grep filters with real regex and fails cleanly on bad patterns', async ({ 
   expect(err).toContain('invalid regex pattern');
   // The engine must survive an invalid pattern.
   expect(await page.evaluate(() => window.bt.run('echo 42'))).toBe(42);
+});
+
+test('selectors: inline functions, @named, and --on', async ({ page }) => {
+  await page.goto('/');
+  await waitForTerminal(page);
+
+  // Inline lambdas project and filter, and compose with everything else.
+  expect(
+    await page.evaluate(() =>
+      window.bt.run("links | filter '(o) => o.text.length > 4' | length"),
+    ),
+  ).toBe(4);
+  expect(
+    await page.evaluate(() => window.bt.run("links | map '(o) => o.text' | head")),
+  ).toBe('Rust language');
+
+  // `--on` narrows what a command looks at while keeping whole rows.
+  expect(
+    await page.evaluate(() => window.bt.run("links | grep '^Rust' --on text | map href")),
+  ).toEqual(['https://www.rust-lang.org/']);
+
+  // A registered function needs no eval — the CSP-safe path.
+  expect(
+    await page.evaluate(() => window.bt.run("links | map @host | head")),
+  ).toBe('www.rust-lang.org');
+
+  // A bad selector name is a clean, suggestive error.
+  const err = await page.evaluate(() =>
+    window.bt.run('links | map @hostt').then(
+      () => 'resolved?!',
+      (e: Error) => e.message,
+    ),
+  );
+  expect(err).toContain('did you mean `@host`');
 });
 
 test('prefix chord splits the pane', async ({ page }) => {

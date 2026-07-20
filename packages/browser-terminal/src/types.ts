@@ -57,3 +57,14 @@ export type CommandFn = (
   input: Value,
   ctx: CommandCtx,
 ) => unknown | Promise<unknown>;
+
+/**
+ * A named function usable as `@name` in any selector position (`--on`,
+ * `map`, `filter`). Receives one pipeline item and returns a projection or
+ * a predicate result.
+ *
+ * Unlike inline `'(o) => …'` source, this needs no `eval`, so it works on
+ * pages whose Content-Security-Policy omits `unsafe-eval` — and it stays
+ * type-checked and debuggable in devtools.
+ */
+export type SelectorFn = (item: Value) => unknown;

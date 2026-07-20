@@ -47,6 +47,16 @@ async function main(): Promise<void> {
     },
   );
 
+  // A CSP-safe named selector: usable as `@host` in map/filter/--on.
+  bt.registerFn('host', (item) => {
+    const href = (item as { href?: string })?.href ?? '';
+    try {
+      return new URL(href).hostname;
+    } catch {
+      return '';
+    }
+  });
+
   // Expose for programmatic-run experiments in the console.
   (window as unknown as { bt: BrowserTerminal }).bt = bt;
 }

@@ -97,6 +97,16 @@ impl Signature {
         self
     }
 
+    /// Declare the common `--on` parameter: "operate on *this part* of each
+    /// item." Its meaning is identical everywhere it appears — a field name,
+    /// a dotted path, inline source, or `@registered` — so it is learned
+    /// once. Commands where it would be meaningless simply don't declare it
+    /// and reject it with the usual unknown-flag diagnostic, rather than
+    /// accepting it and silently doing nothing.
+    pub fn on_selector(self, desc: &str) -> Self {
+        self.flag("on", None, Some(Shape::Str), desc)
+    }
+
     /// `help <name>` / `--help` text.
     pub fn render_help(&self) -> String {
         const BOLD: &str = "\x1b[1m";

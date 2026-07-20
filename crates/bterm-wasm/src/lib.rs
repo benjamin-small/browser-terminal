@@ -12,6 +12,7 @@
 
 mod convert;
 mod js_command;
+mod js_fn;
 mod js_regex;
 mod tasks;
 
@@ -56,6 +57,11 @@ impl EngineAccess for WasmAccess {
         // Runs with no engine borrow held: AbortController listeners may
         // synchronously call back into the engine.
         tasks::abort_panes(panes);
+    }
+
+    fn lookup_fn(&self, name: &str) -> Result<Rc<dyn bterm_core::callable::HostFn>, String> {
+        // The registry lives outside the engine, so no borrow is involved.
+        js_fn::lookup(name)
     }
 }
 
@@ -132,9 +138,11 @@ impl BtermCore {
         ON_EVENT.with(|c| *c.borrow_mut() = Some(on_event));
         ENGINE.with(|c| {
             let mut engine = Engine::new();
-            // Upgrade `grep` from substring to real regex — free, since the
-            // browser's RegExp engine is already loaded.
+            // Upgrade `grep` from substring to real regex, and enable inline
+            // callables — both free, since the browser's JS engine is
+            // already loaded.
             engine.set_matcher(Rc::new(js_regex::JsRegexMatcher));
+            engine.set_fn_compiler(Rc::new(js_fn::JsFnCompiler));
             let pane = engine.mux.active_pane();
             engine.emit_output(
                 pane,
@@ -269,6 +277,26 @@ impl BtermCore {
         WasmAccess.with(|e| e.registry.unregister_external(name));
     }
 
+    /// Register a named function usable as `@name` in any selector
+    /// (`--on`, `map`, `filter`). Unlike inline source this needs no `eval`,
+    /// so it works under a strict Content-Security-Policy.
+    pub fn register_fn(&self, name: &str, func: js_sys::Function) -> Result<(), JsValue> {
+        if name.trim().is_empty() {
+            return Err(JsValue::from_str("function name must not be empty"));
+        }
+        if name.starts_with('@') {
+            return Err(JsValue::from_str(
+                "register the bare name; `@` is only used at the call site",
+            ));
+        }
+        js_fn::register(name, func);
+        Ok(())
+    }
+
+    pub fn unregister_fn(&self, name: &str) {
+        js_fn::unregister(name);
+    }
+
     /// Programmatic execution: evaluate a line in a pane's context and
     /// resolve with the final structured value (no prompt echo, no pane
     /// render). Rejects with an Error whose message is the shell error.
@@ -317,6 +345,7 @@ impl BtermCore {
 #[wasm_bindgen]
 pub fn dispose_engine() {
     tasks::abort_all();
+    js_fn::clear();
     ON_EVENT.with(|c| *c.borrow_mut() = None);
     ENGINE.with(|c| *c.borrow_mut() = None);
 }

@@ -14,6 +14,7 @@ use crate::eval::{eval_line, CommandSource};
 use crate::mux::{keys, layout_window, Dir, FocusDir, Mux, PaneShell, Rect};
 use crate::parse::parse;
 use crate::protocol::{EngineEvent, HostMsg, LayoutSnapshot, PaneInfo, SessionInfo, WindowInfo};
+use crate::callable::{FnCompiler, NoFnCompiler};
 use crate::matcher::{PatternMatcher, SubstringMatcher};
 use crate::registry::{Command, CommandRegistry, ExecContext, HostHooks, MuxAction, PipelineData};
 use crate::render::render;
@@ -26,6 +27,8 @@ pub struct Engine {
     pub mux: Mux,
     /// Supplied by the host: JS `RegExp` in the browser, substring natively.
     matcher: Rc<dyn PatternMatcher>,
+    /// Supplied by the host: JavaScript in the browser, absent natively.
+    fn_compiler: Rc<dyn FnCompiler>,
     prefix_armed: bool,
     events: VecDeque<EngineEvent>,
 }
@@ -53,6 +56,7 @@ impl Engine {
             registry,
             mux: Mux::new(),
             matcher: Rc::new(SubstringMatcher),
+            fn_compiler: Rc::new(NoFnCompiler),
             prefix_armed: false,
             events: VecDeque::new(),
         }
@@ -68,6 +72,15 @@ impl Engine {
     /// JS — happens with no engine borrow held.
     pub fn matcher(&self) -> Rc<dyn PatternMatcher> {
         self.matcher.clone()
+    }
+
+    /// Install the host's scripting engine for inline callables.
+    pub fn set_fn_compiler(&mut self, compiler: Rc<dyn FnCompiler>) {
+        self.fn_compiler = compiler;
+    }
+
+    pub fn fn_compiler(&self) -> Rc<dyn FnCompiler> {
+        self.fn_compiler.clone()
     }
 
     pub fn pane(&self, id: u32) -> Option<&PaneShell> {
@@ -316,6 +329,13 @@ pub trait EngineAccess: Clone + 'static {
     /// Panes closed by a mux mutation — the wasm layer aborts their
     /// in-flight tasks here (JS AbortControllers fire outside any borrow).
     fn panes_closed(&self, _panes: &[u32]) {}
+    /// Resolve `@name` against the host's registered-function table, which
+    /// lives outside the engine (the wasm layer owns the JS handles).
+    fn lookup_fn(&self, name: &str) -> Result<Rc<dyn crate::callable::HostFn>, String> {
+        Err(format!(
+            "no registered function `{name}`; this host cannot register functions"
+        ))
+    }
 }
 
 impl EngineAccess for Rc<std::cell::RefCell<Engine>> {
@@ -404,6 +424,16 @@ impl<A: EngineAccess> HostHooks for EngineHost<A> {
 
     fn pattern_dialect(&self) -> &'static str {
         self.access.with(|e| e.matcher().dialect())
+    }
+
+    fn compile_fn(&self, source: &str) -> Result<Rc<dyn crate::callable::HostFn>, String> {
+        // Borrow ends with `with`; compiling may call into JS.
+        let compiler = self.access.with(|e| e.fn_compiler());
+        compiler.compile(source)
+    }
+
+    fn lookup_fn(&self, name: &str) -> Result<Rc<dyn crate::callable::HostFn>, String> {
+        self.access.lookup_fn(name)
     }
 }
 

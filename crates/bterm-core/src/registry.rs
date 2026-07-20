@@ -93,6 +93,17 @@ pub trait HostHooks {
     fn pattern_dialect(&self) -> &'static str {
         "substring"
     }
+    /// Compile inline callable source (`'(o) => o.id'`). The browser
+    /// compiles JavaScript; native hosts have no engine.
+    fn compile_fn(&self, _source: &str) -> Result<Rc<dyn crate::callable::HostFn>, String> {
+        Err("inline functions need a JavaScript host; this shell is running natively".into())
+    }
+    /// Look up a function the host registered by name (`@byId`).
+    fn lookup_fn(&self, name: &str) -> Result<Rc<dyn crate::callable::HostFn>, String> {
+        Err(format!(
+            "no registered function `{name}`; this host cannot register functions"
+        ))
+    }
 }
 
 /// Per-invocation context handed to every command.

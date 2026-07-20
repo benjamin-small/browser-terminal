@@ -5,6 +5,7 @@ use crate::error::{ErrorKind, ShellError};
 use crate::registry::{
     ready, Command, CommandRegistry, ExecContext, LocalBoxFuture, PipelineData,
 };
+use crate::callable::{is_truthy, Selector};
 use crate::render::plain;
 use crate::signature::{BoundCall, Shape, Signature};
 use crate::value::Value;
@@ -56,10 +57,21 @@ pub fn register_all(registry: &mut CommandRegistry) {
     registry.register_builtin(cmd(
         Signature::build("grep", "Filter rows or lines matching a pattern")
             .required_arg("pattern", Shape::Str, "regex in the browser, substring in the CLI")
-            .flag("column", None, Some(Shape::Str), "search only this column")
+            .on_selector("match against this field, path, or function")
             .flag("ignore-case", Some('i'), None, "case-insensitive match")
             .flag("invert", Some('v'), None, "keep non-matching rows instead"),
         grep,
+    ));
+    registry.register_builtin(cmd(
+        Signature::build("map", "Project each item through a function or field")
+            .required_arg("selector", Shape::Str, "field, dotted path, '(o) => …', or @name"),
+        map,
+    ));
+    registry.register_builtin(cmd(
+        Signature::build("filter", "Keep items for which a function returns true")
+            .required_arg("predicate", Shape::Str, "'(o) => …' or @name")
+            .flag("invert", Some('v'), None, "keep items that return false instead"),
+        filter,
     ));
     registry.register_builtin(cmd(
         Signature::build("head", "Take the first row (or first n rows)")
@@ -76,8 +88,9 @@ pub fn register_all(registry: &mut CommandRegistry) {
         length,
     ));
     registry.register_builtin(cmd(
-        Signature::build("sort-by", "Sort a table by a column")
-            .required_arg("column", Shape::Str, "column to sort by")
+        Signature::build("sort-by", "Sort a table by a column or computed key")
+            .optional_arg("column", Shape::Str, "column to sort by (shorthand for --on)")
+            .on_selector("sort by this field, path, or computed key")
             .flag("reverse", Some('r'), None, "descending order"),
         sort_by,
     ));
@@ -317,18 +330,119 @@ fn where_cmd(_ctx: ExecContext, call: BoundCall, input: PipelineData) -> Result<
     Ok(PipelineData::Value(Value::List(filtered)))
 }
 
+/// Resolve the common `--on` parameter into a [`Selector`], turning a host
+/// resolution failure into a spanned shell error.
+fn on_selector(ctx: &ExecContext, call: &BoundCall) -> Result<Option<Selector>, ShellError> {
+    let Some(spec) = call.flag("on").and_then(|v| v.as_str()) else {
+        return Ok(None);
+    };
+    Selector::parse(spec, ctx.host.as_ref())
+        .map(Some)
+        .map_err(|msg| {
+            ShellError::new(ErrorKind::Binding, format!("`--on {spec}`: {msg}"))
+                .with_span(call.head_span)
+        })
+}
+
+/// Apply a selector, converting its failure into a spanned shell error.
+fn project(selector: &Selector, item: &Value, span: crate::error::Span) -> Result<Value, ShellError> {
+    selector
+        .apply(item)
+        .map_err(|msg| ShellError::runtime(msg).with_span(span))
+}
+
+/// If a field selector names a column no row has, that's a typo — say so
+/// rather than silently returning nothing. Callables get no such check;
+/// computing `null` is legitimate for them.
+fn check_field_exists(
+    selector: &Selector,
+    items: &[Value],
+    span: crate::error::Span,
+) -> Result<(), ShellError> {
+    let Some(field) = selector.head_field() else {
+        return Ok(());
+    };
+    if items.is_empty() {
+        return Ok(());
+    }
+    let mut seen: Vec<String> = Vec::new();
+    for item in items {
+        if let Value::Record(map) = item {
+            for k in map.keys() {
+                if !seen.contains(k) {
+                    seen.push(k.clone());
+                }
+            }
+        }
+    }
+    if seen.iter().any(|k| k == field) {
+        return Ok(());
+    }
+    let help = if seen.is_empty() {
+        "`--on <field>` applies to tables (lists of records)".to_string()
+    } else {
+        format!("available columns: {}", seen.join(", "))
+    };
+    Err(
+        ShellError::new(ErrorKind::Runtime, format!("no column `{field}`"))
+            .with_span(span)
+            .with_help(help),
+    )
+}
+
+/// `map` projects each item; `filter` keeps items whose predicate is truthy.
+/// Together with `--on` these are the composable half of the story: `--on`
+/// changes what a command *looks at* while keeping the row, `map` changes
+/// what flows downstream.
+fn map(ctx: ExecContext, call: BoundCall, input: PipelineData) -> Result<PipelineData, ShellError> {
+    let spec = call.positionals[0].as_str().unwrap_or_default();
+    let selector = Selector::parse(spec, ctx.host.as_ref()).map_err(|msg| {
+        ShellError::new(ErrorKind::Binding, format!("`{spec}`: {msg}")).with_span(call.head_span)
+    })?;
+    match input.into_value() {
+        Value::List(items) => {
+            check_field_exists(&selector, &items, call.head_span)?;
+            let mapped = items
+                .iter()
+                .map(|item| project(&selector, item, call.head_span))
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(PipelineData::Value(Value::List(mapped)))
+        }
+        // A single value maps to a single value — no need to wrap it first.
+        other => Ok(PipelineData::Value(project(&selector, &other, call.head_span)?)),
+    }
+}
+
+fn filter(ctx: ExecContext, call: BoundCall, input: PipelineData) -> Result<PipelineData, ShellError> {
+    let spec = call.positionals[0].as_str().unwrap_or_default();
+    let selector = Selector::parse(spec, ctx.host.as_ref()).map_err(|msg| {
+        ShellError::new(ErrorKind::Binding, format!("`{spec}`: {msg}")).with_span(call.head_span)
+    })?;
+    let invert = call.has_flag("invert");
+    match input.into_value() {
+        Value::List(items) => {
+            let mut kept = Vec::new();
+            for item in items {
+                let verdict = is_truthy(&project(&selector, &item, call.head_span)?);
+                if verdict != invert {
+                    kept.push(item);
+                }
+            }
+            Ok(PipelineData::Value(Value::List(kept)))
+        }
+        other => Err(type_err("filter", "a list", &other)),
+    }
+}
+
 /// `grep` searches the text a value *displays as* — the same strings the
 /// table renderer shows — so what you see is what you match. A `List` filters
-/// its items (every cell of a row, or just `--column`); a multi-line `Str`
-/// filters its lines, the way real grep does.
+/// its items (every cell of a row, or just the `--on` projection); a
+/// multi-line `Str` filters its lines, the way real grep does.
 fn grep(ctx: ExecContext, call: BoundCall, input: PipelineData) -> Result<PipelineData, ShellError> {
     let pattern_src = call.positionals[0].as_str().unwrap_or_default().to_string();
     let case_insensitive = call.has_flag("ignore-case");
     let invert = call.has_flag("invert");
-    let column = call
-        .flag("column")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
+    let selector = on_selector(&ctx, &call)?;
 
     let pattern = ctx
         .host
@@ -353,51 +467,27 @@ fn grep(ctx: ExecContext, call: BoundCall, input: PipelineData) -> Result<Pipeli
             Ok(PipelineData::Value(Value::List(lines)))
         }
         Value::List(items) => {
-            if let Some(col) = &column {
+            if let Some(sel) = &selector {
                 // Same courtesy as `get`: an unknown column is a typo, not an
                 // empty result set.
-                let known: Vec<String> = items
-                    .iter()
-                    .filter_map(|item| match item {
-                        Value::Record(map) => Some(map.keys().cloned()),
-                        _ => None,
-                    })
-                    .flatten()
-                    .collect();
-                if !items.is_empty() && !known.iter().any(|k| k == col) {
-                    let mut seen: Vec<String> = Vec::new();
-                    for k in known {
-                        if !seen.contains(&k) {
-                            seen.push(k);
-                        }
-                    }
-                    let help = if seen.is_empty() {
-                        "`--column` only applies to tables (lists of records)".to_string()
-                    } else {
-                        format!("available columns: {}", seen.join(", "))
-                    };
-                    return Err(ShellError::new(
-                        ErrorKind::Runtime,
-                        format!("no column `{col}`"),
-                    )
-                    .with_span(call.head_span)
-                    .with_help(help));
-                }
+                check_field_exists(sel, &items, call.head_span)?;
             }
-            let kept: Vec<Value> = items
-                .into_iter()
-                .filter(|item| match (item, &column) {
-                    (Value::Record(map), Some(col)) => {
-                        map.get(col).map(|v| keep(&plain(v))).unwrap_or(invert)
-                    }
-                    (Value::Record(map), None) => {
-                        // A row matches if any cell does — but `keep` already
-                        // folds in `invert`, so test raw then invert once.
+            let mut kept = Vec::new();
+            for item in items {
+                // With `--on`, test the projection; without it, a row matches
+                // if any cell does. `keep` folds in `invert`, so the
+                // any-cell branch tests raw and inverts once.
+                let hit = match (&selector, &item) {
+                    (Some(sel), _) => keep(&plain(&project(sel, &item, call.head_span)?)),
+                    (None, Value::Record(map)) => {
                         map.values().any(|v| pattern.is_match(&plain(v))) != invert
                     }
-                    (scalar, _) => keep(&plain(scalar)),
-                })
-                .collect();
+                    (None, scalar) => keep(&plain(scalar)),
+                };
+                if hit {
+                    kept.push(item);
+                }
+            }
             Ok(PipelineData::Value(Value::List(kept)))
         }
         other => Err(type_err("grep", "a list or string", &other)),
@@ -448,37 +538,59 @@ fn length(_ctx: ExecContext, _call: BoundCall, input: PipelineData) -> Result<Pi
     }
 }
 
-fn sort_by(_ctx: ExecContext, call: BoundCall, input: PipelineData) -> Result<PipelineData, ShellError> {
-    let column = call.positionals[0].as_str().unwrap_or_default().to_string();
+fn sort_by(ctx: ExecContext, call: BoundCall, input: PipelineData) -> Result<PipelineData, ShellError> {
+    // `sort-by n` is shorthand for `sort-by --on n`; --on wins if both are
+    // given, and it additionally allows computed keys.
+    let selector = match on_selector(&ctx, &call)? {
+        Some(sel) => sel,
+        None => match call.positionals.first().and_then(|v| v.as_str()) {
+            Some(col) => Selector::parse(col, ctx.host.as_ref()).map_err(|msg| {
+                ShellError::new(ErrorKind::Binding, format!("`{col}`: {msg}"))
+                    .with_span(call.head_span)
+            })?,
+            None => {
+                return Err(ShellError::new(
+                    ErrorKind::Binding,
+                    "`sort-by` needs a column or `--on`",
+                )
+                .with_span(call.head_span)
+                .with_help("try `sort-by name` or `sort-by --on='(o) => o.a + o.b'`"))
+            }
+        },
+    };
     let reverse = call.has_flag("reverse");
     let mut rows = match input.into_value() {
         Value::List(rows) => rows,
         other => return Err(type_err("sort-by", "a table (list of records)", &other)),
     };
-    // total_cmp_values keeps the comparator a genuine total order even on
-    // mixed-type columns (std's sort panics on intransitive comparators).
-    // --reverse flips the value order only: missing-column rows stay last,
-    // and the sort stays stable (no post-hoc rows.reverse()).
-    rows.sort_by(|a, b| {
-        let cell = |v: &Value| match v {
-            Value::Record(map) => map.get(&column).cloned(),
-            _ => None,
-        };
-        match (cell(a), cell(b)) {
-            (Some(ca), Some(cb)) => {
-                let ord = ca.total_cmp_values(&cb);
-                if reverse {
-                    ord.reverse()
-                } else {
-                    ord
-                }
+    check_field_exists(&selector, &rows, call.head_span)?;
+
+    // Keys are computed once up front rather than inside the comparator:
+    // a callable key must not be invoked O(n log n) times, and projection
+    // can fail, which a comparator cannot report.
+    let mut keyed: Vec<(Option<Value>, Value)> = Vec::with_capacity(rows.len());
+    for row in rows.drain(..) {
+        let key = project(&selector, &row, call.head_span)?;
+        // Missing fields sort last, as before.
+        let key = if matches!(key, Value::Null) { None } else { Some(key) };
+        keyed.push((key, row));
+    }
+    keyed.sort_by(|(a, _), (b, _)| match (a, b) {
+        (Some(ka), Some(kb)) => {
+            let ord = ka.total_cmp_values(kb);
+            if reverse {
+                ord.reverse()
+            } else {
+                ord
             }
-            (Some(_), None) => std::cmp::Ordering::Less,
-            (None, Some(_)) => std::cmp::Ordering::Greater,
-            (None, None) => std::cmp::Ordering::Equal,
         }
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => std::cmp::Ordering::Equal,
     });
-    Ok(PipelineData::Value(Value::List(rows)))
+    Ok(PipelineData::Value(Value::List(
+        keyed.into_iter().map(|(_, row)| row).collect(),
+    )))
 }
 
 fn map_strings(
@@ -823,22 +935,84 @@ mod tests {
     }
 
     #[test]
-    fn grep_column_restricts_the_search() {
+    fn grep_on_restricts_the_search_but_keeps_whole_rows() {
         let json = r#"'[{"t":"rust","href":"a"},{"t":"b","href":"rust"}]'"#;
-        // Unrestricted matches both rows; --column t matches only the first.
+        // Unrestricted matches both rows; --on t matches only the first —
+        // and the surviving row keeps every column, which is the whole point
+        // of --on over piping through `get`.
         let v = eval(&format!("echo {json} | from json | grep rust | length")).expect("eval");
         assert_eq!(v, Value::Int(2));
-        let v = eval(&format!("echo {json} | from json | grep rust --column t | get href"))
+        let v = eval(&format!("echo {json} | from json | grep rust --on t | get href"))
             .expect("eval");
         assert_eq!(v, Value::List(vec![Value::Str("a".into())]));
     }
 
     #[test]
-    fn grep_unknown_column_errors_with_available_columns() {
-        let err = eval(r#"echo '[{"a":1}]' | from json | grep x --column nope"#)
+    fn grep_on_unknown_column_errors_with_available_columns() {
+        let err = eval(r#"echo '[{"a":1}]' | from json | grep x --on nope"#)
             .expect_err("unknown column");
         assert!(err.msg.contains("no column `nope`"), "{}", err.msg);
         assert!(err.help.expect("help").contains('a'));
+    }
+
+    #[test]
+    fn on_is_rejected_by_commands_that_do_not_declare_it() {
+        // The point of declaring `--on` per command rather than injecting it
+        // everywhere: a meaningless use is an error, not a silent no-op.
+        let err = eval("echo '[1,2]' | from json | length --on foo").expect_err("unknown flag");
+        assert!(err.msg.contains("unknown flag"), "{}", err.msg);
+    }
+
+    #[test]
+    fn grep_on_dotted_path_reaches_nested_records() {
+        let json = r#"'[{"u":{"name":"ada"}},{"u":{"name":"bob"}}]'"#;
+        let v = eval(&format!("echo {json} | from json | grep ada --on u.name | length"))
+            .expect("eval");
+        assert_eq!(v, Value::Int(1));
+    }
+
+    #[test]
+    fn sort_by_on_is_shorthand_compatible() {
+        let json = r#"'[{"n":3},{"n":1},{"n":2}]'"#;
+        // Positional and --on forms agree.
+        let a = eval(&format!("echo {json} | from json | sort-by n | get n")).expect("eval");
+        let b = eval(&format!("echo {json} | from json | sort-by --on n | get n")).expect("eval");
+        assert_eq!(a, b);
+        assert_eq!(a, Value::List(vec![Value::Int(1), Value::Int(2), Value::Int(3)]));
+    }
+
+    #[test]
+    fn sort_by_without_column_or_on_explains_itself() {
+        let err = eval(r#"echo '[{"n":1}]' | from json | sort-by"#).expect_err("needs a key");
+        assert!(err.msg.contains("needs a column or `--on`"), "{}", err.msg);
+        assert!(err.help.expect("help").contains("--on"));
+    }
+
+    #[test]
+    fn map_projects_a_field_and_a_dotted_path() {
+        let json = r#"'[{"u":{"name":"ada"},"id":1},{"u":{"name":"bob"},"id":2}]'"#;
+        let v = eval(&format!("echo {json} | from json | map u.name")).expect("eval");
+        assert_eq!(
+            v,
+            Value::List(vec![Value::Str("ada".into()), Value::Str("bob".into())])
+        );
+        let v = eval(&format!("echo {json} | from json | map id")).expect("eval");
+        assert_eq!(v, Value::List(vec![Value::Int(1), Value::Int(2)]));
+    }
+
+    #[test]
+    fn map_unknown_field_errors_rather_than_yielding_nulls() {
+        let err = eval(r#"echo '[{"a":1}]' | from json | map nope"#).expect_err("typo");
+        assert!(err.msg.contains("no column `nope`"), "{}", err.msg);
+    }
+
+    #[test]
+    fn inline_functions_need_a_js_host_natively() {
+        // The native test host has no scripting engine; the error must say
+        // so rather than mangling the source into a field name.
+        let err = eval(r#"echo '[{"a":1}]' | from json | map '(o) => o.a'"#)
+            .expect_err("no js host");
+        assert!(err.msg.contains("JavaScript host"), "{}", err.msg);
     }
 
     #[test]

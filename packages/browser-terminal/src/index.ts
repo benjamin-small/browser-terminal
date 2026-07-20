@@ -11,7 +11,7 @@ import init, { BtermCore } from './wasm/bterm_wasm.js';
 import { PaneManager } from './panes.js';
 import { PanelHost } from './panels.js';
 import type { Effects, EngineEvent, HostMsg, LayoutSnapshot } from './events.js';
-import type { CommandFn, CommandSpec, Value } from './types.js';
+import type { CommandFn, CommandSpec, SelectorFn, Value } from './types.js';
 
 export type {
   DividerInfo,
@@ -31,6 +31,7 @@ export type {
   CommandSpec,
   FlagSpec,
   PosArg,
+  SelectorFn,
   Shape,
   Value,
 } from './types.js';
@@ -155,6 +156,25 @@ export class BrowserTerminal {
   unregisterCommand(name: string): void {
     this.assertLive();
     this.core.unregister_command(name);
+  }
+
+  /**
+   * Register a function usable as `@name` wherever a selector is accepted:
+   * `map @slug`, `filter @isActive`, `grep pattern --on @key`.
+   *
+   * This is the CSP-safe counterpart to inline `'(o) => …'` source — no
+   * `eval`, so it works on pages with a strict Content-Security-Policy, and
+   * the function stays type-checked and breakpoint-able.
+   */
+  registerFn(name: string, fn: SelectorFn): void {
+    this.assertLive();
+    this.core.register_fn(name, fn as (...args: unknown[]) => unknown);
+  }
+
+  /** Remove a registered selector function. */
+  unregisterFn(name: string): void {
+    this.assertLive();
+    this.core.unregister_fn(name);
   }
 
   /**

@@ -136,6 +136,107 @@ async fn grep_invalid_regex_is_a_clean_error_not_a_crash() {
 }
 
 #[wasm_bindgen_test]
+async fn inline_functions_project_and_filter() {
+    let core = make_core();
+    let sig = js_sys::JSON::parse(r#"{"name":"rows"}"#).expect("sig");
+    let f = Function::new_with_args(
+        "args",
+        r#"return [{id:1,name:"a"},{id:7,name:"b"},{id:9,name:"c"}];"#,
+    );
+    core.register_command(sig, f).expect("registered");
+
+    // The shape from the original sketch: project one field, filter by
+    // another, then compose with the rest of the pipeline.
+    let v = run_line(&core, "rows | map '(o) => o.name' | length").await.expect("resolves");
+    assert_eq!(v.as_f64(), Some(3.0));
+
+    let v = run_line(&core, "rows | filter '(o) => o.id > 5' | length").await.expect("resolves");
+    assert_eq!(v.as_f64(), Some(2.0));
+
+    // Computed projection — not expressible as a field path at all.
+    // Bare `tail` yields the scalar; `tail 1` would yield a one-item list.
+    let v = run_line(&core, "rows | map '(o) => o.name + o.id' | tail").await.expect("resolves");
+    assert_eq!(v.as_string().as_deref(), Some("c9"));
+
+    // `--on` with a function: filter on a computed key while keeping rows.
+    let v = run_line(&core, "rows | grep '^b' --on '(o) => o.name' | map id")
+        .await
+        .expect("resolves");
+    let arr: Array = v.dyn_into().expect("list");
+    assert_eq!(arr.length(), 1);
+    assert_eq!(arr.get(0).as_f64(), Some(7.0));
+
+    // Computed sort key: descending by negating, so the largest id leads.
+    let v = run_line(&core, "rows | sort-by --on '(o) => -o.id' | map id | head")
+        .await
+        .expect("resolves");
+    assert_eq!(v.as_f64(), Some(9.0));
+    core.dispose();
+}
+
+#[wasm_bindgen_test]
+async fn registered_functions_work_without_eval() {
+    let core = make_core();
+    let sig = js_sys::JSON::parse(r#"{"name":"rows"}"#).expect("sig");
+    core.register_command(
+        sig,
+        Function::new_with_args("args", r#"return [{id:1},{id:7}];"#),
+    )
+    .expect("registered");
+
+    core.register_fn("big", Function::new_with_args("o", "return o.id > 5;"))
+        .expect("register_fn");
+    let v = run_line(&core, "rows | filter @big | length").await.expect("resolves");
+    assert_eq!(v.as_f64(), Some(1.0));
+
+    // Unknown name gets a did-you-mean rather than a bare failure.
+    let err = run_line(&core, "rows | filter @bigg").await.expect_err("unknown");
+    let msg = Reflect::get(&err, &"message".into())
+        .ok()
+        .and_then(|m| m.as_string())
+        .unwrap_or_default();
+    assert!(msg.contains("did you mean `@big`"), "message: {msg}");
+
+    core.unregister_fn("big");
+    assert!(run_line(&core, "rows | filter @big").await.is_err(), "unregistered");
+    core.dispose();
+}
+
+#[wasm_bindgen_test]
+async fn callable_errors_are_clean_and_survivable() {
+    let core = make_core();
+    let sig = js_sys::JSON::parse(r#"{"name":"rows"}"#).expect("sig");
+    core.register_command(
+        sig,
+        Function::new_with_args("args", r#"return [{id:1}];"#),
+    )
+    .expect("registered");
+
+    // Syntax error in inline source.
+    let err = run_line(&core, "rows | map '(o) =>'").await.expect_err("syntax");
+    let msg = Reflect::get(&err, &"message".into())
+        .ok()
+        .and_then(|m| m.as_string())
+        .unwrap_or_default();
+    assert!(!msg.is_empty(), "syntax error surfaces");
+
+    // A function that throws at call time.
+    let err = run_line(&core, "rows | map '(o) => { throw new Error(\"boom\") }'")
+        .await
+        .expect_err("throws");
+    let msg = Reflect::get(&err, &"message".into())
+        .ok()
+        .and_then(|m| m.as_string())
+        .unwrap_or_default();
+    assert!(msg.contains("boom"), "message: {msg}");
+
+    // Engine survives both.
+    let v = run_line(&core, "echo 7").await.expect("still alive");
+    assert_eq!(v.as_f64(), Some(7.0));
+    core.dispose();
+}
+
+#[wasm_bindgen_test]
 async fn ts_rejection_and_rich_error() {
     let core = make_core();
     let sig = js_sys::JSON::parse(r#"{"name":"boom"}"#).expect("sig");
