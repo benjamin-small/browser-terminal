@@ -91,6 +91,51 @@ async fn ts_command_async_and_args_shape() {
 }
 
 #[wasm_bindgen_test]
+async fn grep_uses_real_regex_in_the_browser() {
+    let core = make_core();
+    let sig = js_sys::JSON::parse(r#"{"name":"rows"}"#).expect("sig");
+    let f = Function::new_with_args(
+        "args",
+        r#"return [{t:"Rust lang"},{t:"WebAssembly"},{t:"rust book"}];"#,
+    );
+    core.register_command(sig, f).expect("registered");
+
+    // Anchors: only "Rust lang" starts with capital R-u-s-t.
+    let v = run_line(&core, "rows | grep '^Rust' | length").await.expect("resolves");
+    assert_eq!(v.as_f64(), Some(1.0), "^ anchor is regex, not a literal");
+
+    // Alternation + case-insensitive.
+    let v = run_line(&core, "rows | grep 'rust|assembly' -i | length").await.expect("resolves");
+    assert_eq!(v.as_f64(), Some(3.0), "| is alternation");
+
+    // Character class + quantifier.
+    let v = run_line(&core, r#"rows | grep '[A-Z][a-z]+As' | length"#).await.expect("resolves");
+    assert_eq!(v.as_f64(), Some(1.0));
+
+    // Invert still composes with regex.
+    let v = run_line(&core, "rows | grep '^Rust' -v | length").await.expect("resolves");
+    assert_eq!(v.as_f64(), Some(2.0));
+    core.dispose();
+}
+
+#[wasm_bindgen_test]
+async fn grep_invalid_regex_is_a_clean_error_not_a_crash() {
+    let core = make_core();
+    // Unterminated group: RegExp throws SyntaxError; must surface as a shell
+    // error, and the engine must stay alive afterwards.
+    let err = run_line(&core, "echo abc | grep '('").await.expect_err("rejects");
+    let msg = Reflect::get(&err, &"message".into())
+        .ok()
+        .and_then(|m| m.as_string())
+        .unwrap_or_default();
+    assert!(msg.contains("invalid regex pattern"), "message: {msg}");
+
+    let v = run_line(&core, "echo 5").await.expect("engine still alive");
+    assert_eq!(v.as_f64(), Some(5.0));
+    core.dispose();
+}
+
+#[wasm_bindgen_test]
 async fn ts_rejection_and_rich_error() {
     let core = make_core();
     let sig = js_sys::JSON::parse(r#"{"name":"boom"}"#).expect("sig");

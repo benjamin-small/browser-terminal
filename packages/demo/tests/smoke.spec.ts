@@ -43,6 +43,28 @@ test('flagship pipeline: TS command → structured pipes → typed result', asyn
   expect(rows[0]).toHaveProperty('href');
 });
 
+test('grep filters with real regex and fails cleanly on bad patterns', async ({ page }) => {
+  await page.goto('/');
+  await waitForTerminal(page);
+
+  // Anchors and alternation are regex, not literals — proving the browser's
+  // native RegExp is wired in rather than substring matching.
+  expect(await page.evaluate(() => window.bt.run("links | grep '^Rust' | length"))).toBe(1);
+  expect(await page.evaluate(() => window.bt.run("links | grep 'rust|xterm' -i | length"))).toBe(2);
+  expect(await page.evaluate(() => window.bt.run("links | grep org --column href | length"))).toBe(3);
+  expect(await page.evaluate(() => window.bt.run("links | grep '^Rust' -v | length"))).toBe(5);
+
+  const err = await page.evaluate(() =>
+    window.bt.run("links | grep '('").then(
+      () => 'resolved?!',
+      (e: Error) => e.message,
+    ),
+  );
+  expect(err).toContain('invalid regex pattern');
+  // The engine must survive an invalid pattern.
+  expect(await page.evaluate(() => window.bt.run('echo 42'))).toBe(42);
+});
+
 test('prefix chord splits the pane', async ({ page }) => {
   await page.goto('/');
   await waitForTerminal(page);

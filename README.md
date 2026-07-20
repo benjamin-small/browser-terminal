@@ -44,8 +44,8 @@ const count = await bt.run("links | where text ne '' | length");  // → 5
 
 - **Structured pipes**: values (strings, numbers, lists, records) flow between
   commands; tables render automatically at the end of a pipeline.
-- **Commands in Rust or TypeScript**: builtins (`where`, `sort-by`, `get`,
-  `head`, `to json`, …) plus `registerCommand` for page-side commands.
+- **Commands in Rust or TypeScript**: builtins (`where`, `grep`, `sort-by`,
+  `get`, `head`, `to json`, …) plus `registerCommand` for page-side commands.
   TS commands get an `AbortSignal` (Ctrl-C cancels in-flight `fetch`es) and an
   `emit()` for progressive output.
 - **tmux surface**: `Ctrl-B` prefix — `%`/`"` split, `c`/`n`/`p` windows,
@@ -109,6 +109,23 @@ bt.show(); bt.hide(); bt.toggle(); bt.dispose();
 `#` comments. `where` uses word operators so everything parses cleanly:
 `where text ne ''`, `where n gt 4`, `where href starts-with https`.
 Operators: `eq ne gt lt ge le contains starts-with ends-with`.
+
+Where `where` tests one column, **`grep` searches everything** — it matches
+against the text each value *displays as*, so what you see in a table is what
+you match:
+
+```
+links | grep 'rust|xterm' -i        # any cell, case-insensitive
+links | grep '^https' --column href # one column only
+links | grep tmux -v                # invert
+```
+
+`grep` uses **JavaScript's native `RegExp`** in the browser — full regex
+(including lookahead and backreferences, which Rust's `regex` crate can't do)
+for **zero added binary size**, since the engine is already in every JS
+runtime. The native CLI has no JS engine, so it falls back to substring
+matching: patterns that work in the CLI always work in the browser, but not
+the reverse.
 `( ) { } && || > <` are reserved for v2 (closures, operators, redirects).
 
 Run `help` in the panel for the full command list; `help <command>` /

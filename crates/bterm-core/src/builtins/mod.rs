@@ -5,6 +5,7 @@ use crate::error::{ErrorKind, ShellError};
 use crate::registry::{
     ready, Command, CommandRegistry, ExecContext, LocalBoxFuture, PipelineData,
 };
+use crate::render::plain;
 use crate::signature::{BoundCall, Shape, Signature};
 use crate::value::Value;
 use std::rc::Rc;
@@ -51,6 +52,14 @@ pub fn register_all(registry: &mut CommandRegistry) {
             .required_arg("op", Shape::Str, "eq|ne|gt|lt|ge|le|contains|starts-with|ends-with")
             .required_arg("value", Shape::Any, "value to compare against"),
         where_cmd,
+    ));
+    registry.register_builtin(cmd(
+        Signature::build("grep", "Filter rows or lines matching a pattern")
+            .required_arg("pattern", Shape::Str, "regex in the browser, substring in the CLI")
+            .flag("column", None, Some(Shape::Str), "search only this column")
+            .flag("ignore-case", Some('i'), None, "case-insensitive match")
+            .flag("invert", Some('v'), None, "keep non-matching rows instead"),
+        grep,
     ));
     registry.register_builtin(cmd(
         Signature::build("head", "Take the first row (or first n rows)")
@@ -306,6 +315,93 @@ fn where_cmd(_ctx: ExecContext, call: BoundCall, input: PipelineData) -> Result<
         })
         .collect();
     Ok(PipelineData::Value(Value::List(filtered)))
+}
+
+/// `grep` searches the text a value *displays as* — the same strings the
+/// table renderer shows — so what you see is what you match. A `List` filters
+/// its items (every cell of a row, or just `--column`); a multi-line `Str`
+/// filters its lines, the way real grep does.
+fn grep(ctx: ExecContext, call: BoundCall, input: PipelineData) -> Result<PipelineData, ShellError> {
+    let pattern_src = call.positionals[0].as_str().unwrap_or_default().to_string();
+    let case_insensitive = call.has_flag("ignore-case");
+    let invert = call.has_flag("invert");
+    let column = call
+        .flag("column")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    let pattern = ctx
+        .host
+        .compile_pattern(&pattern_src, case_insensitive)
+        .map_err(|msg| {
+            ShellError::new(
+                ErrorKind::Binding,
+                format!("invalid {} pattern `{pattern_src}`: {msg}", ctx.host.pattern_dialect()),
+            )
+            .with_span(call.head_span)
+        })?;
+    // XOR with `invert` in one place so every branch honors -v.
+    let keep = |text: &str| pattern.is_match(text) != invert;
+
+    match input.into_value() {
+        Value::Str(text) => {
+            let lines: Vec<Value> = text
+                .lines()
+                .filter(|line| keep(line))
+                .map(|line| Value::Str(line.to_string()))
+                .collect();
+            Ok(PipelineData::Value(Value::List(lines)))
+        }
+        Value::List(items) => {
+            if let Some(col) = &column {
+                // Same courtesy as `get`: an unknown column is a typo, not an
+                // empty result set.
+                let known: Vec<String> = items
+                    .iter()
+                    .filter_map(|item| match item {
+                        Value::Record(map) => Some(map.keys().cloned()),
+                        _ => None,
+                    })
+                    .flatten()
+                    .collect();
+                if !items.is_empty() && !known.iter().any(|k| k == col) {
+                    let mut seen: Vec<String> = Vec::new();
+                    for k in known {
+                        if !seen.contains(&k) {
+                            seen.push(k);
+                        }
+                    }
+                    let help = if seen.is_empty() {
+                        "`--column` only applies to tables (lists of records)".to_string()
+                    } else {
+                        format!("available columns: {}", seen.join(", "))
+                    };
+                    return Err(ShellError::new(
+                        ErrorKind::Runtime,
+                        format!("no column `{col}`"),
+                    )
+                    .with_span(call.head_span)
+                    .with_help(help));
+                }
+            }
+            let kept: Vec<Value> = items
+                .into_iter()
+                .filter(|item| match (item, &column) {
+                    (Value::Record(map), Some(col)) => {
+                        map.get(col).map(|v| keep(&plain(v))).unwrap_or(invert)
+                    }
+                    (Value::Record(map), None) => {
+                        // A row matches if any cell does — but `keep` already
+                        // folds in `invert`, so test raw then invert once.
+                        map.values().any(|v| pattern.is_match(&plain(v))) != invert
+                    }
+                    (scalar, _) => keep(&plain(scalar)),
+                })
+                .collect();
+            Ok(PipelineData::Value(Value::List(kept)))
+        }
+        other => Err(type_err("grep", "a list or string", &other)),
+    }
 }
 
 fn take_n(call: &BoundCall) -> Result<Option<usize>, ShellError> {
@@ -702,6 +798,80 @@ mod tests {
         let err = eval("str upcsae hi").expect_err("typo");
         assert!(err.msg.contains("unknown command `str upcsae`"), "{}", err.msg);
         assert_eq!(err.help.as_deref(), Some("did you mean `str upcase`?"));
+    }
+
+    // --- grep (native host: substring dialect) ---
+
+    #[test]
+    fn grep_filters_table_rows_across_all_columns() {
+        // "Rust" appears in text; "webassembly.org" only in href — both hit.
+        let v = eval(&format!("echo {} | from json | grep Rust | length", table_json()))
+            .expect("eval");
+        assert_eq!(v, Value::Int(1));
+        let v = eval(r#"echo '[{"t":"a","href":"x.org"},{"t":"b","href":"y.com"}]' | from json | grep .org | get t"#)
+            .expect("eval");
+        assert_eq!(v, Value::List(vec![Value::Str("a".into())]));
+    }
+
+    #[test]
+    fn grep_ignore_case_and_invert() {
+        let json = r#"'[{"n":"Rust"},{"n":"wasm"}]'"#;
+        let v = eval(&format!("echo {json} | from json | grep rust -i | length")).expect("eval");
+        assert_eq!(v, Value::Int(1));
+        let v = eval(&format!("echo {json} | from json | grep Rust -v | get n")).expect("eval");
+        assert_eq!(v, Value::List(vec![Value::Str("wasm".into())]));
+    }
+
+    #[test]
+    fn grep_column_restricts_the_search() {
+        let json = r#"'[{"t":"rust","href":"a"},{"t":"b","href":"rust"}]'"#;
+        // Unrestricted matches both rows; --column t matches only the first.
+        let v = eval(&format!("echo {json} | from json | grep rust | length")).expect("eval");
+        assert_eq!(v, Value::Int(2));
+        let v = eval(&format!("echo {json} | from json | grep rust --column t | get href"))
+            .expect("eval");
+        assert_eq!(v, Value::List(vec![Value::Str("a".into())]));
+    }
+
+    #[test]
+    fn grep_unknown_column_errors_with_available_columns() {
+        let err = eval(r#"echo '[{"a":1}]' | from json | grep x --column nope"#)
+            .expect_err("unknown column");
+        assert!(err.msg.contains("no column `nope`"), "{}", err.msg);
+        assert!(err.help.expect("help").contains('a'));
+    }
+
+    #[test]
+    fn grep_filters_lines_of_a_string() {
+        let v = eval(r#"echo "alpha\nbeta\ngamma" | grep a | length"#).expect("eval");
+        // alpha, beta, gamma all contain "a".
+        assert_eq!(v, Value::Int(3));
+        let v = eval(r#"echo "alpha\nbeta" | grep bet"#).expect("eval");
+        assert_eq!(v, Value::List(vec![Value::Str("beta".into())]));
+    }
+
+    #[test]
+    fn grep_no_matches_yields_empty_list() {
+        let v = eval(r#"echo '[{"a":"x"}]' | from json | grep zzz | length"#).expect("eval");
+        assert_eq!(v, Value::Int(0));
+    }
+
+    #[test]
+    fn grep_scalar_list_and_type_error() {
+        let v = eval(r#"echo '["one","two"]' | from json | grep tw"#).expect("eval");
+        assert_eq!(v, Value::List(vec![Value::Str("two".into())]));
+        let err = eval("echo 5 | grep x").expect_err("int input");
+        assert!(err.msg.contains("expects a list or string"), "{}", err.msg);
+    }
+
+    #[test]
+    fn grep_composes_with_the_rest_of_the_pipeline() {
+        let v = eval(&format!(
+            "echo {} | from json | grep -i wasm | head 1 | get text",
+            table_json()
+        ))
+        .expect("eval");
+        assert_eq!(v, Value::List(vec![Value::Str("WASM".into())]));
     }
 
     #[test]

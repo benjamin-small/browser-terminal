@@ -14,6 +14,7 @@ use crate::eval::{eval_line, CommandSource};
 use crate::mux::{keys, layout_window, Dir, FocusDir, Mux, PaneShell, Rect};
 use crate::parse::parse;
 use crate::protocol::{EngineEvent, HostMsg, LayoutSnapshot, PaneInfo, SessionInfo, WindowInfo};
+use crate::matcher::{PatternMatcher, SubstringMatcher};
 use crate::registry::{Command, CommandRegistry, ExecContext, HostHooks, MuxAction, PipelineData};
 use crate::render::render;
 use crate::value::Value;
@@ -23,6 +24,8 @@ use std::rc::Rc;
 pub struct Engine {
     pub registry: CommandRegistry,
     pub mux: Mux,
+    /// Supplied by the host: JS `RegExp` in the browser, substring natively.
+    matcher: Rc<dyn PatternMatcher>,
     prefix_armed: bool,
     events: VecDeque<EngineEvent>,
 }
@@ -49,9 +52,22 @@ impl Engine {
         Engine {
             registry,
             mux: Mux::new(),
+            matcher: Rc::new(SubstringMatcher),
             prefix_armed: false,
             events: VecDeque::new(),
         }
+    }
+
+    /// Install the host's pattern engine (the browser passes a JS
+    /// `RegExp`-backed matcher).
+    pub fn set_matcher(&mut self, matcher: Rc<dyn PatternMatcher>) {
+        self.matcher = matcher;
+    }
+
+    /// Cloned out under a short borrow so compilation — which may call into
+    /// JS — happens with no engine borrow held.
+    pub fn matcher(&self) -> Rc<dyn PatternMatcher> {
+        self.matcher.clone()
     }
 
     pub fn pane(&self, id: u32) -> Option<&PaneShell> {
@@ -374,6 +390,20 @@ impl<A: EngineAccess> HostHooks for EngineHost<A> {
         }
         self.access.events_ready();
         result
+    }
+
+    fn compile_pattern(
+        &self,
+        pattern: &str,
+        case_insensitive: bool,
+    ) -> Result<Box<dyn crate::matcher::Pattern>, String> {
+        // Borrow ends with `with`; compiling may call into JS.
+        let matcher = self.access.with(|e| e.matcher());
+        matcher.compile(pattern, case_insensitive)
+    }
+
+    fn pattern_dialect(&self) -> &'static str {
+        self.access.with(|e| e.matcher().dialect())
     }
 }
 

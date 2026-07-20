@@ -12,6 +12,7 @@
 
 mod convert;
 mod js_command;
+mod js_regex;
 mod tasks;
 
 use bterm_core::abort::Abortable;
@@ -131,6 +132,9 @@ impl BtermCore {
         ON_EVENT.with(|c| *c.borrow_mut() = Some(on_event));
         ENGINE.with(|c| {
             let mut engine = Engine::new();
+            // Upgrade `grep` from substring to real regex — free, since the
+            // browser's RegExp engine is already loaded.
+            engine.set_matcher(Rc::new(js_regex::JsRegexMatcher));
             let pane = engine.mux.active_pane();
             engine.emit_output(
                 pane,

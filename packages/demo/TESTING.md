@@ -8,6 +8,9 @@ Run `just demo`, open http://localhost:5173, then walk through:
 - [ ] `echo a b c | str upcase` renders an indexed list
 - [ ] `links --limit 20 | where text ne '' | head 5` renders a box table
 - [ ] `sort-by`, `get`, `to json --pretty`, `from json` behave
+- [ ] `links | grep 'rust|xterm' -i` filters by real regex (alternation works)
+- [ ] `links | grep '^https' --column href` restricts to one column; `-v` inverts
+- [ ] `links | grep '('` shows a clean "invalid regex pattern" error, engine survives
 - [ ] Bad input: `sort-by n --reverze` → red caret + "did you mean `--reverse`?"
 - [ ] Unknown command `nop 5` → caret + help; `str upcsae` suggests `str upcase`
 - [ ] Prompt turns red after a failure, green after success

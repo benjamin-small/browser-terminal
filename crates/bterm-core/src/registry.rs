@@ -79,6 +79,20 @@ pub trait HostHooks {
             "the multiplexer is not available in this host",
         ))
     }
+    /// Compile a `grep` pattern. Hosts with a real regex engine (the browser,
+    /// via JS `RegExp`) override this; the default is substring matching.
+    fn compile_pattern(
+        &self,
+        pattern: &str,
+        case_insensitive: bool,
+    ) -> Result<Box<dyn crate::matcher::Pattern>, String> {
+        use crate::matcher::PatternMatcher as _;
+        crate::matcher::SubstringMatcher.compile(pattern, case_insensitive)
+    }
+    /// `regex` or `substring` — used in help and error text.
+    fn pattern_dialect(&self) -> &'static str {
+        "substring"
+    }
 }
 
 /// Per-invocation context handed to every command.
