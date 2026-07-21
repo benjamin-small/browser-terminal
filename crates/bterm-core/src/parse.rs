@@ -2,9 +2,9 @@
 //! and syncs to the next `|` or `;`, so one line can produce multiple
 //! diagnostics. Evaluation only proceeds when there are no diagnostics.
 
-use crate::ast::{Arg, Call, Expr, Line, Pipeline, Spanned};
+use crate::ast::{Arg, BinOp, Call, Closure, Expr, Line, Pipeline, Spanned, UnOp};
 use crate::error::{ShellError, Span};
-use crate::lex::{lex, Token, TokenKind};
+use crate::lex::{lex, Op, Token, TokenKind};
 use crate::value::Value;
 
 pub struct ParseOutcome {
@@ -148,7 +148,15 @@ impl Parser {
         Ok(Call { words, args, span })
     }
 
+    /// An argument at pipeline level: a plain value or a closure literal.
+    /// Operators are *not* valid here — only inside a closure body — so
+    /// they produce the same "not supported here" diagnostic as before.
     fn parse_expr(&mut self) -> Result<Expr, ShellError> {
+        if let Some(tok) = self.peek() {
+            if tok.kind == TokenKind::Op(Op::LBrace) {
+                return self.parse_closure();
+            }
+        }
         let tok = self
             .next()
             .ok_or_else(|| ShellError::parse("expected a value", Span::new(0, 0)))?;
@@ -163,6 +171,170 @@ impl Parser {
                 format!("`{r}` is not supported yet"),
                 tok.span,
             )),
+            TokenKind::Op(op) => Err(ShellError::parse(
+                format!("`{}` can only be used inside a closure", op.as_str()),
+                tok.span,
+            )
+            .with_help("write a closure like `{|x| $x.n > 5}`")),
+            other => Err(ShellError::parse(
+                format!("expected a value, found {}", describe(&other)),
+                tok.span,
+            )),
+        }
+    }
+
+    /// `{|x| <expr>}` — parameters between pipes, then one expression.
+    fn parse_closure(&mut self) -> Result<Expr, ShellError> {
+        let open = self.next().expect("caller peeked `{`").span;
+        let mut params = Vec::new();
+
+        match self.peek().map(|t| t.kind.clone()) {
+            Some(TokenKind::Pipe) => {
+                self.next();
+                // Params run until the closing pipe. `||` lexes as OrOr, so
+                // an empty list is written `{|| …}` and arrives as one token.
+                loop {
+                    match self.next() {
+                        Some(Token { kind: TokenKind::Pipe, .. }) => break,
+                        Some(Token { kind: TokenKind::Bareword(name), .. }) => params.push(name),
+                        Some(Token { kind: TokenKind::Var(name), .. }) => params.push(name),
+                        Some(tok) => {
+                            return Err(ShellError::parse(
+                                format!("expected a parameter name, found {}", describe(&tok.kind)),
+                                tok.span,
+                            ))
+                        }
+                        None => {
+                            return Err(ShellError::parse(
+                                "unterminated closure parameters: expected a closing `|`",
+                                open,
+                            ))
+                        }
+                    }
+                }
+            }
+            Some(TokenKind::Op(Op::OrOr)) => {
+                self.next(); // `||` — no parameters
+            }
+            _ => {
+                return Err(ShellError::parse(
+                    "a closure needs parameters: `{|x| …}`",
+                    open,
+                )
+                .with_help("use `{|| …}` for a closure that takes nothing"))
+            }
+        }
+
+        let body = self.parse_operator_expr(0)?;
+        match self.next() {
+            Some(Token { kind: TokenKind::Op(Op::RBrace), span }) => Ok(Expr::Closure(
+                Box::new(Closure { params, body }),
+                open.merge(span),
+            )),
+            Some(tok) => Err(ShellError::parse(
+                format!("expected `}}` to close the closure, found {}", describe(&tok.kind)),
+                tok.span,
+            )),
+            None => Err(ShellError::parse(
+                "unterminated closure: expected a closing `}`",
+                open,
+            )),
+        }
+    }
+
+    /// Precedence climbing. Binding powers, loosest first:
+    /// `||` < `&&` < comparison < `+ -` < `* / %` < unary.
+    fn parse_operator_expr(&mut self, min_bp: u8) -> Result<Expr, ShellError> {
+        let mut lhs = self.parse_unary()?;
+        while let Some(tok) = self.peek() {
+            let TokenKind::Op(op) = tok.kind else { break };
+            let Some((bin, bp)) = binop_of(op) else { break };
+            if bp < min_bp {
+                break;
+            }
+            self.next();
+            // Left-associative: the right side must bind strictly tighter.
+            let rhs = self.parse_operator_expr(bp + 1)?;
+            let span = lhs.span().merge(rhs.span());
+            lhs = Expr::Binary { op: bin, lhs: Box::new(lhs), rhs: Box::new(rhs), span };
+        }
+        Ok(lhs)
+    }
+
+    fn parse_unary(&mut self) -> Result<Expr, ShellError> {
+        if let Some(tok) = self.peek().cloned() {
+            let un = match tok.kind {
+                TokenKind::Op(Op::Bang) => Some(UnOp::Not),
+                TokenKind::Op(Op::Minus) => Some(UnOp::Neg),
+                _ => None,
+            };
+            if let Some(op) = un {
+                self.next();
+                let operand = self.parse_unary()?;
+                let span = tok.span.merge(operand.span());
+                return Ok(Expr::Unary { op, operand: Box::new(operand), span });
+            }
+        }
+        self.parse_postfix()
+    }
+
+    /// A primary followed by any number of `.field` accessors.
+    fn parse_postfix(&mut self) -> Result<Expr, ShellError> {
+        let mut expr = self.parse_primary()?;
+        // The lexer already folds `.` into barewords, so `$x.a.b` arrives as
+        // Var("x") followed by Bareword(".a.b").
+        while let Some(Token { kind: TokenKind::Bareword(w), span }) = self.peek().cloned() {
+            if !w.starts_with('.') {
+                break;
+            }
+            self.next();
+            let path: Vec<String> = w
+                .trim_start_matches('.')
+                .split('.')
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+                .collect();
+            if path.is_empty() {
+                return Err(ShellError::parse("expected a field name after `.`", span));
+            }
+            let full = expr.span().merge(span);
+            expr = Expr::Field { base: Box::new(expr), path, span: full };
+        }
+        Ok(expr)
+    }
+
+    fn parse_primary(&mut self) -> Result<Expr, ShellError> {
+        let tok = self
+            .next()
+            .ok_or_else(|| ShellError::parse("expected a value", Span::new(0, 0)))?;
+        match tok.kind {
+            TokenKind::Int(n) => Ok(Expr::Literal(Value::Int(n), tok.span)),
+            TokenKind::Float(f) => Ok(Expr::Literal(Value::Float(f), tok.span)),
+            TokenKind::StrRaw(s) => Ok(Expr::Literal(Value::Str(s), tok.span)),
+            TokenKind::StrInterp(parts) => Ok(Expr::StrInterp(parts, tok.span)),
+            TokenKind::Var(name) => Ok(Expr::Var(name, tok.span)),
+            TokenKind::Bareword(w) => Ok(match w.as_str() {
+                "true" => Expr::Literal(Value::Bool(true), tok.span),
+                "false" => Expr::Literal(Value::Bool(false), tok.span),
+                "null" => Expr::Literal(Value::Null, tok.span),
+                _ => Expr::Bareword(w, tok.span),
+            }),
+            TokenKind::Op(Op::LParen) => {
+                let inner = self.parse_operator_expr(0)?;
+                match self.next() {
+                    Some(Token { kind: TokenKind::Op(Op::RParen), .. }) => Ok(inner),
+                    Some(t) => Err(ShellError::parse(
+                        format!("expected `)`, found {}", describe(&t.kind)),
+                        t.span,
+                    )),
+                    None => Err(ShellError::parse("expected `)`", tok.span)),
+                }
+            }
+            TokenKind::Op(Op::Assign) => Err(ShellError::parse(
+                "`=` is not an operator here",
+                tok.span,
+            )
+            .with_help("use `==` to compare")),
             other => Err(ShellError::parse(
                 format!("expected a value, found {}", describe(&other)),
                 tok.span,
@@ -181,6 +353,27 @@ impl Parser {
     }
 }
 
+/// Operator → (AST op, binding power). `None` for grouping/`!`/`=`, which
+/// are never infix.
+fn binop_of(op: Op) -> Option<(BinOp, u8)> {
+    Some(match op {
+        Op::OrOr => (BinOp::Or, 1),
+        Op::AndAnd => (BinOp::And, 2),
+        Op::EqEq => (BinOp::Eq, 3),
+        Op::Ne => (BinOp::Ne, 3),
+        Op::Lt => (BinOp::Lt, 3),
+        Op::Le => (BinOp::Le, 3),
+        Op::Gt => (BinOp::Gt, 3),
+        Op::Ge => (BinOp::Ge, 3),
+        Op::Plus => (BinOp::Add, 4),
+        Op::Minus => (BinOp::Sub, 4),
+        Op::Star => (BinOp::Mul, 5),
+        Op::Slash => (BinOp::Div, 5),
+        Op::Percent => (BinOp::Rem, 5),
+        _ => return None,
+    })
+}
+
 fn describe(kind: &TokenKind) -> String {
     match kind {
         TokenKind::Bareword(w) => format!("`{w}`"),
@@ -191,6 +384,7 @@ fn describe(kind: &TokenKind) -> String {
         TokenKind::Flag { name, .. } => format!("flag `--{name}`"),
         TokenKind::Pipe => "`|`".to_string(),
         TokenKind::Semi => "`;`".to_string(),
+        TokenKind::Op(op) => format!("`{}`", op.as_str()),
         TokenKind::Reserved(r) => format!("`{r}`"),
     }
 }
@@ -250,8 +444,18 @@ mod tests {
     }
 
     #[test]
-    fn reserved_syntax_reports_not_supported() {
+    fn operators_outside_a_closure_point_at_closures() {
+        // Arithmetic at pipeline level isn't supported, but the error now
+        // tells you where operators *do* work rather than saying "reserved".
         let out = parse("echo (1 + 2)");
+        assert_eq!(out.errors.len(), 1);
+        assert!(out.errors[0].msg.contains("only be used inside a closure"), "{}", out.errors[0].msg);
+        assert!(out.errors[0].help.as_deref().unwrap_or("").contains("{|x|"));
+    }
+
+    #[test]
+    fn still_reserved_syntax_reports_not_supported() {
+        let out = parse("echo & background");
         assert_eq!(out.errors.len(), 1);
         assert!(out.errors[0].msg.contains("not supported yet"));
     }

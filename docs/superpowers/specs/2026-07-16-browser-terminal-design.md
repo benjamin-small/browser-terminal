@@ -471,8 +471,10 @@ input. No auto-restart, no persistence-based recovery in v1.
 
 - Streaming pipelines (`PipelineData::Stream`) and streaming TS commands;
   row-incremental table paint
-- Comparison-operator syntax (`!=`, `>`), closures, `&&`/`||`, redirection, cell
-  paths (`$x.foo.0`) — all behind reserved tokens
+- ~~Comparison-operator syntax (`!=`, `>`), closures, `&&`/`||`, cell paths~~ —
+  **landed**: `{|x| …}` closures with a full expression language, working
+  identically in the browser and the native CLI
+- Redirection (`>`), list indexing (`$x.0`), closures as first-class values
 - Tab completion (editor reserves `Effects::CompletionRequest`) and `C-r` history
   search
 - Session persistence (localStorage/IndexedDB), detach/reattach, panic-state restore

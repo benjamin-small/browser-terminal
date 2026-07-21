@@ -6,6 +6,7 @@ use crate::lex::InterpPart;
 use crate::value::Value;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::rc::Rc;
 
 /// Declared type of a positional arg or flag value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -167,12 +168,27 @@ impl Signature {
 }
 
 /// A call after binding: evaluated, coerced values in place.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct BoundCall {
     pub head_span: Span,
     pub positionals: Vec<Value>,
     /// Keyed by long flag name. Switches bind to `Bool(true)`.
     pub flags: HashMap<String, Value>,
+    /// Closure literals, keyed by the parameter or flag name they were
+    /// bound to. A closure isn't a `Value` — keeping it out of `Value`
+    /// leaves the JS boundary and serde derives untouched.
+    pub closures: HashMap<String, Rc<dyn crate::callable::HostFn>>,
+}
+
+impl std::fmt::Debug for BoundCall {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BoundCall")
+            .field("head_span", &self.head_span)
+            .field("positionals", &self.positionals)
+            .field("flags", &self.flags)
+            .field("closures", &self.closures.keys().collect::<Vec<_>>())
+            .finish()
+    }
 }
 
 impl BoundCall {
@@ -182,6 +198,11 @@ impl BoundCall {
 
     pub fn has_flag(&self, name: &str) -> bool {
         matches!(self.flags.get(name), Some(Value::Bool(true)))
+    }
+
+    /// A closure literal bound to this parameter or flag, if one was given.
+    pub fn closure(&self, name: &str) -> Option<Rc<dyn crate::callable::HostFn>> {
+        self.closures.get(name).cloned()
     }
 }
 
@@ -197,6 +218,11 @@ pub fn wants_help(call: &Call) -> bool {
 /// Evaluate an argument expression to a Value against the scope.
 pub fn eval_expr(expr: &Expr, scope: &Scope) -> Result<Value, ShellError> {
     match expr {
+        // Operators, field access and closures only appear inside closure
+        // bodies; the shared evaluator owns them.
+        Expr::Field { .. } | Expr::Binary { .. } | Expr::Unary { .. } | Expr::Closure(..) => {
+            crate::expr::eval_expr(expr, scope)
+        }
         Expr::Literal(v, _) => Ok(v.clone()),
         // Bare `true`/`false` are boolean literals; quoted 'true' stays a
         // string (a Str-shaped parameter turns the Bool back into text).
@@ -327,6 +353,10 @@ pub fn bind(
 ) -> Result<BoundCall, ShellError> {
     let mut positionals: Vec<(Value, Span)> = Vec::new();
     let mut flags: HashMap<String, Value> = HashMap::new();
+    let mut closures: HashMap<String, Rc<dyn crate::callable::HostFn>> = HashMap::new();
+    // Closure literals can't become Values, so they're pulled aside and
+    // matched to parameter names by position after the value args settle.
+    let mut positional_closures: Vec<(usize, crate::ast::Closure)> = Vec::new();
 
     for w in leading_words {
         // Same bareword semantics as eval_expr: bare true/false are bools.
@@ -342,7 +372,14 @@ pub fn bind(
     while let Some(arg) = args.next() {
         match arg {
             Arg::Positional(expr) => {
-                positionals.push((eval_expr(expr, scope)?, expr.span()));
+                if let Some(c) = expr.as_closure() {
+                    // Occupies a positional slot so arity still lines up;
+                    // the placeholder is never handed to a command.
+                    positional_closures.push((positionals.len(), c.clone()));
+                    positionals.push((Value::Null, expr.span()));
+                } else {
+                    positionals.push((eval_expr(expr, scope)?, expr.span()));
+                }
             }
             Arg::Flag { name, long, span, value } => {
                 let spec = find_flag(sig, name, *long, *span)?;
@@ -359,6 +396,26 @@ pub fn bind(
                         flags.insert(long_name, Value::Bool(true));
                     }
                     Some(shape) => {
+                        // A closure given to a value-taking flag (e.g.
+                        // `--on {|x| …}`) is stored by flag name instead.
+                        let closure_arg = match value {
+                            Some(expr) => expr.as_closure().cloned(),
+                            None => match args.peek() {
+                                Some(Arg::Positional(expr)) => expr.as_closure().cloned(),
+                                _ => None,
+                            },
+                        };
+                        if let Some(c) = closure_arg {
+                            if value.is_none() {
+                                args.next();
+                            }
+                            closures.insert(
+                                long_name.clone(),
+                                crate::expr::NativeClosure::new(c, scope.clone()),
+                            );
+                            flags.insert(long_name, Value::Null);
+                            continue;
+                        }
                         let (raw, vspan) = match value {
                             Some(expr) => (eval_expr(expr, scope)?, expr.span()),
                             None => match args.peek() {
@@ -384,13 +441,26 @@ pub fn bind(
         }
     }
 
-    // Arity + shape check on positionals.
+    // Arity + shape check on positionals. Slots holding a closure skip
+    // coercion — a closure has no Value form to coerce.
     let declared: Vec<&PosArg> = sig.required.iter().chain(&sig.optional).collect();
+    let closure_slots: HashMap<usize, crate::ast::Closure> =
+        positional_closures.into_iter().collect();
     let mut bound = Vec::new();
-    let mut supplied = positionals.into_iter();
+    let mut supplied = positionals.into_iter().enumerate();
     for (idx, spec) in declared.iter().enumerate() {
         match supplied.next() {
-            Some((v, span)) => bound.push(coerce(v, spec.shape, span, &format!("`{}`", spec.name))?),
+            Some((slot, _)) if closure_slots.contains_key(&slot) => {
+                let c = closure_slots[&slot].clone();
+                closures.insert(
+                    spec.name.clone(),
+                    crate::expr::NativeClosure::new(c, scope.clone()),
+                );
+                bound.push(Value::Null);
+            }
+            Some((_, (v, span))) => {
+                bound.push(coerce(v, spec.shape, span, &format!("`{}`", spec.name))?)
+            }
             None if idx < sig.required.len() => {
                 return Err(ShellError::new(
                     ErrorKind::Binding,
@@ -402,7 +472,7 @@ pub fn bind(
             None => break,
         }
     }
-    let leftovers: Vec<(Value, Span)> = supplied.collect();
+    let leftovers: Vec<(Value, Span)> = supplied.map(|(_, pair)| pair).collect();
     if !leftovers.is_empty() {
         match &sig.rest {
             Some(rest) => {
@@ -422,7 +492,7 @@ pub fn bind(
         }
     }
 
-    Ok(BoundCall { head_span: call.words_span(), positionals: bound, flags })
+    Ok(BoundCall { head_span: call.words_span(), positionals: bound, flags, closures })
 }
 
 fn find_flag<'a>(sig: &'a Signature, name: &str, long: bool, span: Span) -> Result<&'a FlagSpec, ShellError> {

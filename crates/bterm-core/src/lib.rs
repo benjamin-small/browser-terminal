@@ -11,6 +11,7 @@ pub mod editor;
 pub mod engine;
 pub mod error;
 pub mod eval;
+pub mod expr;
 pub mod lex;
 pub mod matcher;
 pub mod mux;

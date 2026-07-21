@@ -15,6 +15,11 @@ Run `just demo`, open http://localhost:5173, then walk through:
 - [ ] `links | map @host` uses the registered function (no eval needed)
 - [ ] `links | map @hostt` suggests `@host`; `length --on x` rejects the flag
 - [ ] `links | sort-by --on '(o) => o.text.length'` sorts by a computed key
+- [ ] `links | filter {|o| $o.text.length > 4}` — native closure, no JS engine
+- [ ] `links | map {|o| $o.text + ' -> ' + $o.href}` concatenates
+- [ ] `links | filter {|o| $o.missing > 5}` returns 0 rows, does NOT error
+- [ ] `echo 1 | map {|o| $o.a` reports an unterminated closure
+- [ ] The same closure lines work in `cargo run -p bterm-cli` (no JS there)
 - [ ] `links | grep '('` shows a clean "invalid regex pattern" error, engine survives
 - [ ] Bad input: `sort-by n --reverze` → red caret + "did you mean `--reverse`?"
 - [ ] Unknown command `nop 5` → caret + help; `str upcsae` suggests `str upcase`

@@ -333,6 +333,10 @@ fn where_cmd(_ctx: ExecContext, call: BoundCall, input: PipelineData) -> Result<
 /// Resolve the common `--on` parameter into a [`Selector`], turning a host
 /// resolution failure into a spanned shell error.
 fn on_selector(ctx: &ExecContext, call: &BoundCall) -> Result<Option<Selector>, ShellError> {
+    // A closure literal — `--on {|x| …}` — needs no host at all.
+    if let Some(f) = call.closure("on") {
+        return Ok(Some(Selector::Callable(f)));
+    }
     let Some(spec) = call.flag("on").and_then(|v| v.as_str()) else {
         return Ok(None);
     };
@@ -342,6 +346,22 @@ fn on_selector(ctx: &ExecContext, call: &BoundCall) -> Result<Option<Selector>, 
             ShellError::new(ErrorKind::Binding, format!("`--on {spec}`: {msg}"))
                 .with_span(call.head_span)
         })
+}
+
+/// Resolve a positional selector argument: a closure literal if one was
+/// given, otherwise the string form routed through the host.
+fn positional_selector(
+    ctx: &ExecContext,
+    call: &BoundCall,
+    param: &str,
+) -> Result<Selector, ShellError> {
+    if let Some(f) = call.closure(param) {
+        return Ok(Selector::Callable(f));
+    }
+    let spec = call.positionals[0].as_str().unwrap_or_default();
+    Selector::parse(spec, ctx.host.as_ref()).map_err(|msg| {
+        ShellError::new(ErrorKind::Binding, format!("`{spec}`: {msg}")).with_span(call.head_span)
+    })
 }
 
 /// Apply a selector, converting its failure into a spanned shell error.
@@ -395,10 +415,7 @@ fn check_field_exists(
 /// changes what a command *looks at* while keeping the row, `map` changes
 /// what flows downstream.
 fn map(ctx: ExecContext, call: BoundCall, input: PipelineData) -> Result<PipelineData, ShellError> {
-    let spec = call.positionals[0].as_str().unwrap_or_default();
-    let selector = Selector::parse(spec, ctx.host.as_ref()).map_err(|msg| {
-        ShellError::new(ErrorKind::Binding, format!("`{spec}`: {msg}")).with_span(call.head_span)
-    })?;
+    let selector = positional_selector(&ctx, &call, "selector")?;
     match input.into_value() {
         Value::List(items) => {
             check_field_exists(&selector, &items, call.head_span)?;
@@ -414,10 +431,7 @@ fn map(ctx: ExecContext, call: BoundCall, input: PipelineData) -> Result<Pipelin
 }
 
 fn filter(ctx: ExecContext, call: BoundCall, input: PipelineData) -> Result<PipelineData, ShellError> {
-    let spec = call.positionals[0].as_str().unwrap_or_default();
-    let selector = Selector::parse(spec, ctx.host.as_ref()).map_err(|msg| {
-        ShellError::new(ErrorKind::Binding, format!("`{spec}`: {msg}")).with_span(call.head_span)
-    })?;
+    let selector = positional_selector(&ctx, &call, "predicate")?;
     let invert = call.has_flag("invert");
     match input.into_value() {
         Value::List(items) => {
@@ -543,6 +557,9 @@ fn sort_by(ctx: ExecContext, call: BoundCall, input: PipelineData) -> Result<Pip
     // given, and it additionally allows computed keys.
     let selector = match on_selector(&ctx, &call)? {
         Some(sel) => sel,
+        None if call.closure("column").is_some() => {
+            Selector::Callable(call.closure("column").expect("checked"))
+        }
         None => match call.positionals.first().and_then(|v| v.as_str()) {
             Some(col) => Selector::parse(col, ctx.host.as_ref()).map_err(|msg| {
                 ShellError::new(ErrorKind::Binding, format!("`{col}`: {msg}"))
@@ -739,6 +756,23 @@ mod tests {
         Ok(results.pop().map(PipelineData::into_value).unwrap_or(Value::Null))
     }
 
+    /// Like `eval`, but returns parse errors as `Err` instead of asserting
+    /// — for cases where a parse failure is the expected outcome.
+    fn eval_any(src: &str) -> Result<Value, ShellError> {
+        let mut registry = CommandRegistry::new();
+        register_all(&mut registry);
+        let ctx = ExecContext { host: Rc::new(TestHost), width: 80, pane: 0, run_id: 0 };
+        let out = parse(src);
+        if let Some(e) = out.errors.into_iter().next() {
+            return Err(e);
+        }
+        let (mut results, error) = block_on(eval_line(&out.line, &registry, &ctx, &Scope::new()));
+        if let Some(e) = error {
+            return Err(e);
+        }
+        Ok(results.pop().map(PipelineData::into_value).unwrap_or(Value::Null))
+    }
+
     fn table_json() -> &'static str {
         r#"'[{"text":"Rust","href":"a"},{"text":"","href":"b"},{"text":"WASM","href":"c"}]'"#
     }
@@ -898,6 +932,7 @@ mod tests {
             head_span: crate::error::Span::new(0, 0),
             positionals: vec![],
             flags: std::collections::HashMap::new(),
+            closures: std::collections::HashMap::new(),
         };
         let ctx = ExecContext { host: Rc::new(TestHost), width: 80, pane: 0, run_id: 0 };
         let err = to_json(ctx, call, PipelineData::Value(Value::Float(f64::NAN)))
@@ -1046,6 +1081,77 @@ mod tests {
         ))
         .expect("eval");
         assert_eq!(v, Value::List(vec![Value::Str("WASM".into())]));
+    }
+
+    // --- native closures: no host engine involved ---
+    //
+    // The whole point of these tests is the host used by `eval()` has *no*
+    // scripting engine (`compile_fn` errors). Everything below therefore
+    // proves closures work identically in the CLI and the browser.
+
+    #[test]
+    fn closure_filters_without_any_host_engine() {
+        let json = r#"'[{"id":1},{"id":7},{"id":9}]'"#;
+        let v = eval(&format!("echo {json} | from json | filter {{|o| $o.id > 5}} | length"))
+            .expect("eval");
+        assert_eq!(v, Value::Int(2));
+    }
+
+    #[test]
+    fn closure_maps_and_computes() {
+        let json = r#"'[{"a":1,"b":2},{"a":10,"b":20}]'"#;
+        let v = eval(&format!("echo {json} | from json | map {{|o| $o.a + $o.b}}")).expect("eval");
+        assert_eq!(v, Value::List(vec![Value::Int(3), Value::Int(30)]));
+    }
+
+    #[test]
+    fn closure_works_as_on_selector_keeping_whole_rows() {
+        let json = r#"'[{"t":"rust","n":1},{"t":"wasm","n":2}]'"#;
+        // Match on a computed value but keep every column.
+        // `str upcase` isn't an expression — a clean parse error, not a panic.
+        let v = eval_any(&format!(
+            "echo {json} | from json | grep RUST --on {{|o| str upcase}} | length"
+        ));
+        assert!(v.is_err());
+
+        let v = eval(&format!("echo {json} | from json | grep rust --on {{|o| $o.t}} | get n"))
+            .expect("eval");
+        assert_eq!(v, Value::List(vec![Value::Int(1)]));
+    }
+
+    #[test]
+    fn closure_computes_a_sort_key() {
+        let json = r#"'[{"a":1,"b":9},{"a":5,"b":1}]'"#;
+        // Sort by a sum that exists in no column.
+        let v = eval(&format!(
+            "echo {json} | from json | sort-by --on {{|o| $o.a + $o.b}} | map a"
+        ))
+        .expect("eval");
+        assert_eq!(v, Value::List(vec![Value::Int(5), Value::Int(1)]));
+    }
+
+    #[test]
+    fn closure_string_predicate_and_logical_ops() {
+        let json = r#"'[{"t":"rust","n":1},{"t":"wasm","n":9}]'"#;
+        let v = eval(&format!(
+            "echo {json} | from json | filter {{|o| $o.t == 'rust' || $o.n > 5}} | length"
+        ))
+        .expect("eval");
+        assert_eq!(v, Value::Int(2));
+    }
+
+    #[test]
+    fn closure_errors_are_spanned_not_panics() {
+        // Unknown variable inside a closure body.
+        let err = eval(r#"echo '[{"a":1}]' | from json | map {|o| $nope.a}"#)
+            .expect_err("unknown var");
+        assert!(err.msg.contains("unknown variable"), "{}", err.msg);
+    }
+
+    #[test]
+    fn malformed_closures_report_clearly() {
+        assert!(eval_any("echo 1 | map {|o| $o.a").is_err(), "unterminated closure");
+        assert!(eval_any("echo 1 | map {$o}").is_err(), "missing parameters");
     }
 
     #[test]

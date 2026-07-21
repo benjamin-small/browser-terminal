@@ -22,8 +22,64 @@ pub enum TokenKind {
     Flag { name: String, long: bool, has_eq: bool },
     Pipe,
     Semi,
-    /// Syntax fenced off for v2: `( ) { } > < & && | | (as ||)` etc.
+    /// Operators and grouping. These only mean anything inside a closure
+    /// body; at pipeline level the parser rejects them with a spanned
+    /// "not supported here", preserving the pre-closure error behavior.
+    Op(Op),
+    /// Syntax still fenced off for later: `&`, redirection, etc.
     Reserved(String),
+}
+
+/// Operator and grouping tokens.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Op {
+    LParen,
+    RParen,
+    LBrace,
+    RBrace,
+    Plus,
+    Minus,
+    Star,
+    Slash,
+    Percent,
+    EqEq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+    AndAnd,
+    OrOr,
+    Bang,
+    /// A lone `=`, which is never valid on its own — kept as a token so the
+    /// parser can say "did you mean `==`?" instead of a generic failure.
+    Assign,
+}
+
+impl Op {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Op::LParen => "(",
+            Op::RParen => ")",
+            Op::LBrace => "{",
+            Op::RBrace => "}",
+            Op::Plus => "+",
+            Op::Minus => "-",
+            Op::Star => "*",
+            Op::Slash => "/",
+            Op::Percent => "%",
+            Op::EqEq => "==",
+            Op::Ne => "!=",
+            Op::Lt => "<",
+            Op::Le => "<=",
+            Op::Gt => ">",
+            Op::Ge => ">=",
+            Op::AndAnd => "&&",
+            Op::OrOr => "||",
+            Op::Bang => "!",
+            Op::Assign => "=",
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -72,8 +128,11 @@ pub fn lex(src: &str) -> Result<Vec<Token>, ShellError> {
 
         match c {
             '|' => {
+                // `||` is an operator; a single `|` stays the pipeline
+                // separator. Inside `{|x| …}` the parser reinterprets the
+                // single pipes as parameter delimiters.
                 if rest.starts_with("||") {
-                    tokens.push(Token { kind: TokenKind::Reserved("||".into()), span: Span::new(start, start + 2) });
+                    tokens.push(Token { kind: TokenKind::Op(Op::OrOr), span: Span::new(start, start + 2) });
                     i += 2;
                 } else {
                     tokens.push(Token { kind: TokenKind::Pipe, span: Span::new(start, start + 1) });
@@ -85,13 +144,19 @@ pub fn lex(src: &str) -> Result<Vec<Token>, ShellError> {
                 i += 1;
             }
             '&' => {
-                let len = if rest.starts_with("&&") { 2 } else { 1 };
-                tokens.push(Token { kind: TokenKind::Reserved(rest[..len].into()), span: Span::new(start, start + len as u32) });
-                i += len;
+                if rest.starts_with("&&") {
+                    tokens.push(Token { kind: TokenKind::Op(Op::AndAnd), span: Span::new(start, start + 2) });
+                    i += 2;
+                } else {
+                    // Single `&` (background jobs) is still fenced off.
+                    tokens.push(Token { kind: TokenKind::Reserved("&".into()), span: Span::new(start, start + 1) });
+                    i += 1;
+                }
             }
-            '(' | ')' | '{' | '}' | '>' | '<' | '=' => {
-                tokens.push(Token { kind: TokenKind::Reserved(c.to_string()), span: Span::new(start, start + 1) });
-                i += 1;
+            '(' | ')' | '{' | '}' | '<' | '>' | '=' | '!' => {
+                let (op, len) = lex_operator(rest);
+                tokens.push(Token { kind: TokenKind::Op(op), span: Span::new(start, start + len as u32) });
+                i += len;
             }
             '\'' => {
                 let (s, consumed) = lex_raw_string(rest, start)?;
@@ -152,13 +217,15 @@ pub fn lex(src: &str) -> Result<Vec<Token>, ShellError> {
                         i += len;
                     }
                 } else {
-                    // Lone `-` or `-<punct>`: bareword.
+                    // Lone `-` or `-<punct>`: bareword, unless it stands
+                    // alone, in which case it's subtraction.
                     let word: String = rest.chars().take_while(|&ch| is_bareword_char(ch) || ch == '-').collect();
                     let len = word.len().max(1);
-                    tokens.push(Token {
-                        kind: TokenKind::Bareword(rest[..len].to_string()),
-                        span: Span::new(start, start + len as u32),
-                    });
+                    let kind = match standalone_operator(&word) {
+                        Some(op) => TokenKind::Op(op),
+                        None => TokenKind::Bareword(rest[..len].to_string()),
+                    };
+                    tokens.push(Token { kind, span: Span::new(start, start + len as u32) });
                     i += len;
                 }
             }
@@ -170,16 +237,56 @@ pub fn lex(src: &str) -> Result<Vec<Token>, ShellError> {
             _ => {
                 let word: String = rest.chars().take_while(|&ch| is_bareword_char(ch)).collect();
                 debug_assert!(!word.is_empty(), "lexer made no progress at byte {i}");
-                tokens.push(Token {
-                    kind: TokenKind::Bareword(word.clone()),
-                    span: Span::new(start, start + word.len() as u32),
-                });
+                let kind = match standalone_operator(&word) {
+                    Some(op) => TokenKind::Op(op),
+                    None => TokenKind::Bareword(word.clone()),
+                };
+                tokens.push(Token { kind, span: Span::new(start, start + word.len() as u32) });
                 i += word.len();
             }
         }
         let _ = bytes; // spans are byte offsets; bytes kept for clarity
     }
     Ok(tokens)
+}
+
+/// Operators and grouping, longest match first.
+fn lex_operator(rest: &str) -> (Op, usize) {
+    for (text, op) in [
+        ("<=", Op::Le),
+        (">=", Op::Ge),
+        ("==", Op::EqEq),
+        ("!=", Op::Ne),
+    ] {
+        if rest.starts_with(text) {
+            return (op, 2);
+        }
+    }
+    let op = match rest.as_bytes().first() {
+        Some(b'(') => Op::LParen,
+        Some(b')') => Op::RParen,
+        Some(b'{') => Op::LBrace,
+        Some(b'}') => Op::RBrace,
+        Some(b'<') => Op::Lt,
+        Some(b'>') => Op::Gt,
+        Some(b'=') => Op::Assign,
+        _ => Op::Bang,
+    };
+    (op, 1)
+}
+
+/// `+ * / %` are ordinary bareword characters (so `a+b` and `c++` still
+/// lex as words); they only become operators when standing alone, which is
+/// why closure bodies want spaces around binary operators.
+fn standalone_operator(word: &str) -> Option<Op> {
+    match word {
+        "+" => Some(Op::Plus),
+        "-" => Some(Op::Minus),
+        "*" => Some(Op::Star),
+        "/" => Some(Op::Slash),
+        "%" => Some(Op::Percent),
+        _ => None,
+    }
 }
 
 /// Numbers: `123`, `-123`, `1.5`, `-0.25`. A trailing bareword char (e.g.
@@ -379,10 +486,40 @@ mod tests {
     }
 
     #[test]
-    fn reserved_tokens() {
-        assert_eq!(kinds("("), vec![TokenKind::Reserved("(".into())]);
-        assert_eq!(kinds("&&"), vec![TokenKind::Reserved("&&".into())]);
-        assert_eq!(kinds("||"), vec![TokenKind::Reserved("||".into())]);
+    fn operator_tokens() {
+        assert_eq!(kinds("("), vec![TokenKind::Op(Op::LParen)]);
+        assert_eq!(kinds("&&"), vec![TokenKind::Op(Op::AndAnd)]);
+        assert_eq!(kinds("||"), vec![TokenKind::Op(Op::OrOr)]);
+        assert_eq!(kinds(">="), vec![TokenKind::Op(Op::Ge)]);
+        assert_eq!(kinds("=="), vec![TokenKind::Op(Op::EqEq)]);
+        assert_eq!(kinds("!="), vec![TokenKind::Op(Op::Ne)]);
+        // A single `&` (background jobs) is still fenced off.
+        assert_eq!(kinds("&"), vec![TokenKind::Reserved("&".into())]);
+    }
+
+    #[test]
+    fn arithmetic_symbols_are_operators_only_when_standalone() {
+        assert_eq!(kinds("+"), vec![TokenKind::Op(Op::Plus)]);
+        assert_eq!(kinds("*"), vec![TokenKind::Op(Op::Star)]);
+        // Embedded in a word they stay part of the bareword, so ordinary
+        // arguments like `c++` or `a/b` are unaffected.
+        assert_eq!(kinds("c++"), vec![TokenKind::Bareword("c++".into())]);
+        assert_eq!(kinds("a/b"), vec![TokenKind::Bareword("a/b".into())]);
+    }
+
+    #[test]
+    fn closure_braces_and_pipes_lex() {
+        assert_eq!(
+            kinds("{|x| $x}"),
+            vec![
+                TokenKind::Op(Op::LBrace),
+                TokenKind::Pipe,
+                TokenKind::Bareword("x".into()),
+                TokenKind::Pipe,
+                TokenKind::Var("x".into()),
+                TokenKind::Op(Op::RBrace),
+            ]
+        );
     }
 
     #[test]

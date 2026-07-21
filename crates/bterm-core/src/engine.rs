@@ -586,7 +586,7 @@ mod tests {
     #[test]
     fn parse_error_renders_caret_and_red_prompt() {
         let access = engine();
-        let events = feed_and_run(&access, "echo (\r");
+        let events = feed_and_run(&access, "echo &\r");
         let out = output_text(&events);
         assert!(out.contains("not supported yet"));
         assert!(out.contains("^"));

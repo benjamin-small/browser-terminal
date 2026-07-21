@@ -69,12 +69,67 @@ pub enum Expr {
     StrInterp(Vec<InterpPart>, Span),
     /// `$var`
     Var(String, Span),
+    /// `$x.field.nested` — field access on any expression.
+    Field { base: Box<Expr>, path: Vec<String>, span: Span },
+    /// `a + b`, `a > b`, `a && b`, …
+    Binary { op: BinOp, lhs: Box<Expr>, rhs: Box<Expr>, span: Span },
+    /// `-a`, `!a`
+    Unary { op: UnOp, operand: Box<Expr>, span: Span },
+    /// `{|x| expr}` — a closure literal. Only valid where a signature
+    /// declares `Shape::Callable`; bind turns it into a callable.
+    Closure(Box<Closure>, Span),
+}
+
+/// A closure literal's parameters and body.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Closure {
+    pub params: Vec<String>,
+    pub body: Expr,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BinOp {
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Rem,
+    Eq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+    And,
+    Or,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UnOp {
+    Neg,
+    Not,
 }
 
 impl Expr {
     pub fn span(&self) -> Span {
         match self {
-            Expr::Literal(_, s) | Expr::Bareword(_, s) | Expr::StrInterp(_, s) | Expr::Var(_, s) => *s,
+            Expr::Literal(_, s)
+            | Expr::Bareword(_, s)
+            | Expr::StrInterp(_, s)
+            | Expr::Var(_, s)
+            | Expr::Field { span: s, .. }
+            | Expr::Binary { span: s, .. }
+            | Expr::Unary { span: s, .. }
+            | Expr::Closure(_, s) => *s,
+        }
+    }
+
+    /// Closure literals are the only expression that can't be reduced to a
+    /// `Value`; binding routes them separately.
+    pub fn as_closure(&self) -> Option<&Closure> {
+        match self {
+            Expr::Closure(c, _) => Some(c),
+            _ => None,
         }
     }
 }

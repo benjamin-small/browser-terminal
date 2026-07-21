@@ -237,6 +237,38 @@ async fn callable_errors_are_clean_and_survivable() {
 }
 
 #[wasm_bindgen_test]
+async fn native_closures_match_the_cli_exactly() {
+    // These are the same lines the native CLI runs in bterm-core's tests —
+    // no JS engine is involved in evaluating them, so browser and CLI agree.
+    let core = make_core();
+    let sig = js_sys::JSON::parse(r#"{"name":"rows"}"#).expect("sig");
+    core.register_command(
+        sig,
+        Function::new_with_args("args", r#"return [{a:2,b:3},{a:10,b:1}];"#),
+    )
+    .expect("registered");
+
+    let v = run_line(&core, "rows | filter {|o| $o.a > 5} | length").await.expect("resolves");
+    assert_eq!(v.as_f64(), Some(1.0));
+
+    let v = run_line(&core, "rows | map {|o| $o.a * $o.b} | head").await.expect("resolves");
+    assert_eq!(v.as_f64(), Some(6.0));
+
+    // Computed descending sort key, expressible in no column.
+    let v = run_line(&core, "rows | sort-by --on {|o| -$o.a} | map a | head")
+        .await
+        .expect("resolves");
+    assert_eq!(v.as_f64(), Some(10.0));
+
+    // Closures and JS lambdas coexist in one pipeline.
+    let v = run_line(&core, "rows | filter {|o| $o.a > 1} | map '(o) => o.b' | length")
+        .await
+        .expect("resolves");
+    assert_eq!(v.as_f64(), Some(2.0));
+    core.dispose();
+}
+
+#[wasm_bindgen_test]
 async fn ts_rejection_and_rich_error() {
     let core = make_core();
     let sig = js_sys::JSON::parse(r#"{"name":"boom"}"#).expect("sig");

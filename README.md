@@ -154,6 +154,7 @@ the same three-form selector — learned once, identical everywhere:
 | form | meaning |
 |---|---|
 | `href`, `user.name` | a field, or a dotted path into nested records |
+| `{\|o\| $o.id > 5}` | **a native closure — works everywhere, no host needed** |
 | `'(o) => o.id > 5'` | inline JavaScript, compiled by the browser |
 | `@slug` | a function registered from TypeScript |
 
@@ -185,6 +186,35 @@ bt.registerFn('host', (link) => new URL(link.href).hostname);
 
 The engine detects a blocking CSP once and says so, pointing at
 `registerFn` rather than surfacing a raw JS error.
+
+### Native closures
+
+`{|x| …}` is the shell's own closure syntax. Unlike inline JavaScript it
+needs no scripting engine, so **the same line behaves identically in the
+browser and in the native CLI**, and no Content-Security-Policy can switch
+it off:
+
+```
+links | filter {|o| $o.text.length > 4}
+links | sort-by --on {|o| -$o.text.length}
+links | map {|o| $o.text + ' -> ' + $o.href}
+links | filter {|o| $o.text == 'tmux' || $o.n > 5}
+```
+
+The expression language is deliberately small: field access (`$o.a.b`),
+comparisons (`== != < <= > >=`), logic (`&& || !`), arithmetic
+(`+ - * / %`, where `+` concatenates if either side is a string), literals,
+and parentheses. Put spaces around binary operators — `a+b` is a single
+bareword, by design, so ordinary arguments aren't mangled.
+
+Two rules make ragged data safe rather than explosive:
+
+- **A missing field is `null`**, not an error.
+- **Ordering comparisons against `null` are `false`**, so a row lacking the
+  field simply doesn't match instead of killing the pipeline.
+
+`.length` is the one pseudo-field, on strings, lists, and records — a real
+field of that name shadows it.
 `( ) { } && || > <` are reserved for v2 (closures, operators, redirects).
 
 Run `help` in the panel for the full command list; `help <command>` /
