@@ -45,6 +45,12 @@ export interface CreateOptions {
   mount?: HTMLElement;
   /** Override the URL of the .wasm binary (for CDN / non-bundler setups). */
   wasmUrl?: string | URL;
+  /**
+   * Pre-loaded wasm bytes, used instead of fetching. Takes precedence over
+   * `wasmUrl`. This is what makes a single-file build possible: `file://`
+   * pages can't `fetch()` anything, but they can decode an inlined binary.
+   */
+  wasmBinary?: BufferSource;
   /** Add a window-level Ctrl+` toggle for the panel (off by default — the
    * library adds no global listeners unless asked). */
   globalToggle?: boolean;
@@ -73,7 +79,9 @@ export class BrowserTerminal {
     }
     await init({
       module_or_path:
-        opts.wasmUrl ?? new URL('./wasm/bterm_wasm_bg.wasm', import.meta.url),
+        opts.wasmBinary ??
+        opts.wasmUrl ??
+        new URL('./wasm/bterm_wasm_bg.wasm', import.meta.url),
     });
 
     let core!: BtermCore;

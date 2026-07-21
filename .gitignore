@@ -21,3 +21,6 @@ packages/browser-terminal/src/generated/
 # Test artifacts
 packages/demo/test-results/
 packages/demo/playwright-report/
+
+# Standalone single-file build output
+packages/demo/dist-standalone/

@@ -82,6 +82,23 @@ This library requires a browser (no SSR/Jest); guard imports accordingly.
 One instance per page in v1 — `create()` throws if one is live; `dispose()`
 first.
 
+**Everything runs client-side.** There is no server component — a production
+build is three static files (HTML, one JS bundle, one `.wasm`) that any file
+host will serve. A dev server is needed only because `file://` pages have an
+opaque origin and cannot `fetch()` ES modules or the wasm binary.
+
+To remove even that, pass the wasm as bytes and inline everything:
+
+```ts
+BrowserTerminal.create({ wasmBinary: myUint8Array });  // never fetches
+```
+
+`just demo-standalone` does exactly this, producing one self-contained
+`.html` that opens by double-click with no server at all (verified: a single
+`file://` request, no network). Base64 inflates the wasm ~33% and you lose
+streaming compilation, so this is for demos you can email — not how you'd
+ship to the web.
+
 ## API sketch
 
 ```ts

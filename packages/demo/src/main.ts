@@ -1,7 +1,17 @@
 import { BrowserTerminal } from 'browser-terminal';
 
+/**
+ * The single-file build inlines the wasm and hands it over on `globalThis`
+ * before this bundle runs, so nothing is ever fetched. In the normal build
+ * this is undefined and the library resolves the .wasm by URL.
+ */
+const inlinedWasm = (globalThis as { __BTERM_WASM__?: BufferSource }).__BTERM_WASM__;
+
 async function main(): Promise<void> {
-  const bt = await BrowserTerminal.create({ globalToggle: true });
+  const bt = await BrowserTerminal.create({
+    globalToggle: true,
+    wasmBinary: inlinedWasm,
+  });
 
   // The flagship demo: a page-DOM command in a few lines.
   bt.registerCommand(

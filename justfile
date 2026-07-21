@@ -25,5 +25,10 @@ test-e2e: build
 demo: build
     npm --prefix packages/demo run dev
 
+# One self-contained .html — opens from the filesystem, no server needed.
+demo-standalone: build
+    npm --prefix packages/demo run build
+    node packages/demo/scripts/build-standalone.mjs
+
 pack: build
     npm --prefix packages/browser-terminal pack --dry-run
