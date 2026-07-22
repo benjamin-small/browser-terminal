@@ -50,19 +50,19 @@ pub fn register_all(registry: &mut CommandRegistry) {
     registry.register_builtin(cmd(
         Signature::build("grep", "Filter rows or lines matching a pattern")
             .required_arg("pattern", Shape::Str, "regex in the browser, substring in the CLI")
-            .on_selector("match against this field, path, or function")
+            .on_selector("match against this field, path, {|o| …} closure, or @name")
             .flag("ignore-case", Some('i'), None, "case-insensitive match")
             .flag("invert", Some('v'), None, "keep non-matching rows instead"),
         grep,
     ));
     registry.register_builtin(cmd(
-        Signature::build("map", "Project each item through a function or field")
-            .required_arg("selector", Shape::Str, "field, dotted path, '(o) => …', or @name"),
+        Signature::build("map", "Project each item through a closure or field")
+            .required_arg("selector", Shape::Str, "{|o| …} closure, field, dotted path, '(o) => …', or @name"),
         map,
     ));
     registry.register_builtin(cmd(
-        Signature::build("filter", "Keep items for which a function returns true")
-            .required_arg("predicate", Shape::Str, "'(o) => …' or @name")
+        Signature::build("filter", "Keep items whose predicate is truthy")
+            .required_arg("predicate", Shape::Str, "{|o| …} closure, '(o) => …', or @name")
             .flag("invert", Some('v'), None, "keep items that return false instead"),
         filter,
     ));
@@ -83,7 +83,7 @@ pub fn register_all(registry: &mut CommandRegistry) {
     registry.register_builtin(cmd(
         Signature::build("sort-by", "Sort a table by a column or computed key")
             .optional_arg("column", Shape::Str, "column to sort by (shorthand for --on)")
-            .on_selector("sort by this field, path, or computed key")
+            .on_selector("sort by this field, path, or {|o| …} computed key")
             .flag("reverse", Some('r'), None, "descending order"),
         sort_by,
     ));
@@ -512,7 +512,7 @@ fn sort_by(ctx: ExecContext, call: BoundCall, input: PipelineData) -> Result<Pip
                     "`sort-by` needs a column or `--on`",
                 )
                 .with_span(call.head_span)
-                .with_help("try `sort-by name` or `sort-by --on='(o) => o.a + o.b'`"))
+                .with_help("try `sort-by name` or `sort-by --on {|o| $o.a + $o.b}`"))
             }
         },
     };

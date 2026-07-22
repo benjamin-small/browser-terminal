@@ -176,10 +176,10 @@ while keeping the whole row — something you can't express by piping through
 `get`, which would discard the other columns.
 
 ```
-links | grep '^https' --on href          # test one field, keep whole rows
-links | sort-by --on '(o) => o.text.length'   # computed sort key
-links | map '(o) => ({ site: o.text, host: o.href })'   # reshape rows
-links | filter '(o) => o.text.length > 4' | tail 5
+links | grep '^https' --on href               # test one field, keep whole rows
+links | sort-by --on {|o| $o.text.length}     # computed sort key
+links | map {|o| $o.text}                     # project one field
+links | filter {|o| $o.text.length > 4} | tail 5
 ```
 
 `map` and `filter` are the composable half: `--on` narrows what a command
@@ -228,7 +228,9 @@ Two rules make ragged data safe rather than explosive:
 
 `.length` is the one pseudo-field, on strings, lists, and records — a real
 field of that name shadows it.
-`( ) { } && || > <` are reserved for v2 (closures, operators, redirects).
+
+Still reserved for later: `>`/`<` redirection, `&` background jobs, and list
+indexing (`$x.0`).
 
 Run `help` in the panel for the full command list; `help <command>` /
 `<command> --help` for usage.
