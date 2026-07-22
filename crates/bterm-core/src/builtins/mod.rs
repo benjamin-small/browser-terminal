@@ -48,13 +48,6 @@ pub fn register_all(registry: &mut CommandRegistry) {
         get,
     ));
     registry.register_builtin(cmd(
-        Signature::build("where", "Filter table rows by comparing a column")
-            .required_arg("column", Shape::Str, "column to test")
-            .required_arg("op", Shape::Str, "eq|ne|gt|lt|ge|le|contains|starts-with|ends-with")
-            .required_arg("value", Shape::Any, "value to compare against"),
-        where_cmd,
-    ));
-    registry.register_builtin(cmd(
         Signature::build("grep", "Filter rows or lines matching a pattern")
             .required_arg("pattern", Shape::Str, "regex in the browser, substring in the CLI")
             .on_selector("match against this field, path, or function")
@@ -272,63 +265,11 @@ fn get(_ctx: ExecContext, call: BoundCall, input: PipelineData) -> Result<Pipeli
     }
 }
 
-fn where_cmd(_ctx: ExecContext, call: BoundCall, input: PipelineData) -> Result<PipelineData, ShellError> {
-    let column = call.positionals[0].as_str().unwrap_or_default().to_string();
-    let op = call.positionals[1].as_str().unwrap_or_default().to_string();
-    let rhs = call.positionals[2].clone();
-
-    const OPS: [&str; 9] = ["eq", "ne", "gt", "lt", "ge", "le", "contains", "starts-with", "ends-with"];
-    if !OPS.contains(&op.as_str()) {
-        return Err(ShellError::new(ErrorKind::Binding, format!("unknown operator `{op}`"))
-            .with_span(call.head_span)
-            .with_help(format!("valid operators: {}", OPS.join(", "))));
-    }
-
-    let rows = match input.into_value() {
-        Value::List(rows) => rows,
-        other => return Err(type_err("where", "a table (list of records)", &other)),
-    };
-
-    let matches = |cell: &Value| -> bool {
-        match op.as_str() {
-            "eq" => cell.loose_eq(&rhs),
-            "ne" => !cell.loose_eq(&rhs),
-            "gt" => matches!(cell.partial_cmp_values(&rhs), Some(std::cmp::Ordering::Greater)),
-            "lt" => matches!(cell.partial_cmp_values(&rhs), Some(std::cmp::Ordering::Less)),
-            "ge" => matches!(
-                cell.partial_cmp_values(&rhs),
-                Some(std::cmp::Ordering::Greater | std::cmp::Ordering::Equal)
-            ),
-            "le" => matches!(
-                cell.partial_cmp_values(&rhs),
-                Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal)
-            ),
-            "contains" => match (cell, &rhs) {
-                (Value::Str(s), Value::Str(needle)) => s.contains(needle.as_str()),
-                (Value::List(items), needle) => items.iter().any(|i| i.loose_eq(needle)),
-                _ => false,
-            },
-            "starts-with" => match (cell, &rhs) {
-                (Value::Str(s), Value::Str(p)) => s.starts_with(p.as_str()),
-                _ => false,
-            },
-            "ends-with" => match (cell, &rhs) {
-                (Value::Str(s), Value::Str(p)) => s.ends_with(p.as_str()),
-                _ => false,
-            },
-            _ => false,
-        }
-    };
-
-    let filtered: Vec<Value> = rows
-        .into_iter()
-        .filter(|row| match row {
-            Value::Record(map) => map.get(&column).is_some_and(&matches),
-            _ => false,
-        })
-        .collect();
-    Ok(PipelineData::Value(Value::List(filtered)))
-}
+// `where` was retired once closures and `grep --on` landed: its comparison
+// operators are `filter {|o| $o.col > 5}` and its text operators
+// (contains/starts-with/ends-with) are `grep`'s job. Two orthogonal tools —
+// text search and arbitrary predicate — instead of a third that reinvented a
+// mini operator language.
 
 /// Resolve the common `--on` parameter into a [`Selector`], turning a host
 /// resolution failure into a spanned shell error.
@@ -779,8 +720,12 @@ mod tests {
 
     #[test]
     fn flagship_pipeline_works() {
-        let v = eval(&format!("echo {} | from json | where text ne '' | head 5", table_json()))
-            .expect("eval");
+        // `where` retired: the flagship filter is now a closure predicate.
+        let v = eval(&format!(
+            "echo {} | from json | filter {{|o| $o.text != ''}} | head 5",
+            table_json()
+        ))
+        .expect("eval");
         match v {
             Value::List(rows) => {
                 assert_eq!(rows.len(), 2);
@@ -790,17 +735,10 @@ mod tests {
     }
 
     #[test]
-    fn where_gt_on_numbers() {
-        let v = eval(r#"echo '[{"n":1},{"n":5},{"n":10}]' | from json | where n gt 4 | length"#)
-            .expect("eval");
-        assert_eq!(v, Value::Int(2));
-    }
-
-    #[test]
-    fn where_bad_op_lists_valid_ops() {
-        let err = eval(r#"echo '[]' | from json | where n above 4"#).expect_err("bad op");
-        assert!(err.msg.contains("unknown operator `above`"));
-        assert!(err.help.expect("help").contains("contains"));
+    fn where_is_gone() {
+        // Retired in favor of `filter` / `grep`; make sure it stays gone.
+        let err = eval(r#"echo '[]' | from json | where n gt 4"#).expect_err("removed");
+        assert!(err.msg.contains("unknown command `where`"), "{}", err.msg);
     }
 
     #[test]

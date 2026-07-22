@@ -21,7 +21,7 @@
     <p>
       This is an ordinary web page. The floating panel at the bottom is a
       terminal backed by a Rust/WASM core. Later milestones let you run
-      commands like <code>links | where text ne '' | head 5</code> against
+      commands like <code>links | filter {|o| $o.text != ''} | head 5</code> against
       this page's content.
     </p>
     <h2>Some links for the future <code>links</code> command</h2>

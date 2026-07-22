@@ -6,7 +6,7 @@ Run `just demo`, open http://localhost:5173, then walk through:
 - [ ] Banner + green `❯` prompt appear in the floating panel
 - [ ] `help` lists commands as a table; `help where` shows usage
 - [ ] `echo a b c | str upcase` renders an indexed list
-- [ ] `links --limit 20 | where text ne '' | head 5` renders a box table
+- [ ] `links --limit 20 | filter {|o| $o.text != ''} | head 5` renders a box table
 - [ ] `sort-by`, `get`, `to json --pretty`, `from json` behave
 - [ ] `links | grep 'rust|xterm' -i` filters by real regex (alternation works)
 - [ ] `links | grep '^https' --on href` restricts to one field; `-v` inverts

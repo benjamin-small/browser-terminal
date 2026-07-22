@@ -401,17 +401,15 @@ mod tests {
 
     #[test]
     fn flagship_demo_line_parses() {
-        let line = ok("links --limit 20 | where text ne '' | head 5");
+        let line = ok("links --limit 20 | filter {|o| $o.text != ''} | head 5");
         assert_eq!(line.pipelines.len(), 1);
         let calls = &line.pipelines[0].calls;
         assert_eq!(calls.len(), 3);
         assert_eq!(calls[0].words[0].node, "links");
-        // `where text ne ''` → words [where, text, ne] + one positional ''.
-        assert_eq!(
-            calls[1].words.iter().map(|w| w.node.as_str()).collect::<Vec<_>>(),
-            vec!["where", "text", "ne"]
-        );
+        // `filter {closure}` → head `filter` + one positional closure arg.
+        assert_eq!(calls[1].words[0].node, "filter");
         assert_eq!(calls[1].args.len(), 1);
+        assert!(matches!(&calls[1].args[0], Arg::Positional(e) if e.as_closure().is_some()));
     }
 
     #[test]

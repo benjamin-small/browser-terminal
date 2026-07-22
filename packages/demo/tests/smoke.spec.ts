@@ -31,12 +31,12 @@ test('flagship pipeline: TS command → structured pipes → typed result', asyn
   await page.goto('/');
   await waitForTerminal(page);
   const count = await page.evaluate(() =>
-    window.bt.run("links --limit 20 | where text ne '' | length"),
+    window.bt.run("links --limit 20 | filter {|o| $o.text != ''} | length"),
   );
   expect(count).toBe(5);
 
   const rows = (await page.evaluate(() =>
-    window.bt.run("links | where text ne '' | head 2"),
+    window.bt.run("links | filter {|o| $o.text != ''} | head 2"),
   )) as Array<{ text: string; href: string }>;
   expect(rows).toHaveLength(2);
   expect(rows[0]).toHaveProperty('text');

@@ -158,6 +158,13 @@ operators to the grammar**. `where` is an ordinary command with three positional
 links | where text ne '' | first 5
 ```
 
+> **Superseded.** `where` was retired once native closures and `grep --on`
+> landed: comparisons became `filter {|o| $o.text != ''}` and text operators
+> became `grep`. The flagship demo is now
+> `links | filter {|o| $o.text != ''} | head 5`. The reasoning below explains
+> why `where` used word operators in the *original* v1 (there were no operators
+> in the grammar yet) — history, not current behavior.
+
 This is parseable by the v1 grammar as written, self-documents via `help where`, and
 leaves `!=`-style operators as a pure-sugar v2 addition (the reserved-token list
 already fences the characters).

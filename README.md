@@ -25,7 +25,7 @@ bt.registerCommand(
 Then, in the terminal panel:
 
 ```
-❯ links --limit 20 | where text ne '' | head 5
+❯ links --limit 20 | filter {|o| $o.text != ''} | head 5
 ┌───────────────┬──────────────────────────────┐
 │ text          │ href                         │
 ├───────────────┼──────────────────────────────┤
@@ -37,15 +37,16 @@ Then, in the terminal panel:
 And from host-page code, the terminal doubles as a scripting engine:
 
 ```ts
-const count = await bt.run("links | where text ne '' | length");  // → 5
+const count = await bt.run("links | filter {|o| $o.text != ''} | length");  // → 5
 ```
 
 ## Features
 
 - **Structured pipes**: values (strings, numbers, lists, records) flow between
   commands; tables render automatically at the end of a pipeline.
-- **Commands in Rust or TypeScript**: builtins (`where`, `grep`, `sort-by`,
-  `get`, `head`, `to json`, …) plus `registerCommand` for page-side commands.
+- **Commands in Rust or TypeScript**: builtins (`filter`, `map`, `grep`,
+  `sort-by`, `get`, `head`, `to json`, …) plus `registerCommand` for page-side
+  commands.
   TS commands get an `AbortSignal` (Ctrl-C cancels in-flight `fetch`es) and an
   `emit()` for progressive output.
 - **tmux surface**: `Ctrl-B` prefix — `%`/`"` split, `c`/`n`/`p` windows,
@@ -125,18 +126,18 @@ bt.show(); bt.hide(); bt.toggle(); bt.dispose();
 
 `;`-separated pipelines; multi-word commands (`str upcase`); flags
 (`--limit 5`, `--limit=5`, `-l 5`); `'raw'` and `"interpolated $var"` strings;
-`#` comments. `where` uses word operators so everything parses cleanly:
-`where text ne ''`, `where n gt 4`, `where href starts-with https`.
-Operators: `eq ne gt lt ge le contains starts-with ends-with`.
+`#` comments.
 
-Where `where` tests one column, **`grep` searches everything** — it matches
-against the text each value *displays as*, so what you see in a table is what
-you match:
+Two orthogonal filters, not a grab-bag: **`grep` searches text**, **`filter`
+tests a predicate.**
+
+`grep` matches against the text each value *displays as*, so what you see in a
+table is what you match:
 
 ```
-links | grep 'rust|xterm' -i        # any cell, case-insensitive
-links | grep '^https' --column href # one column only
-links | grep tmux -v                # invert
+links | grep 'rust|xterm' -i     # any cell, case-insensitive
+links | grep '^https' --on href  # one field only
+links | grep tmux -v             # invert
 ```
 
 `grep` uses **JavaScript's native `RegExp`** in the browser — full regex
@@ -145,6 +146,18 @@ for **zero added binary size**, since the engine is already in every JS
 runtime. The native CLI has no JS engine, so it falls back to substring
 matching: patterns that work in the CLI always work in the browser, but not
 the reverse.
+
+`filter` keeps items whose predicate is truthy — a comparison grep can't
+express:
+
+```
+links | filter {|o| $o.text != ''}      # what where used to do
+links | filter {|o| $o.text.length > 4}
+```
+
+(An earlier `where col op value` command was retired: its comparisons are
+`filter` closures, its text operators are `grep`, and it had its own operator
+vocabulary to memorize. Two tools beat three.)
 
 ### Selectors: `--on`, `map`, `filter`
 
