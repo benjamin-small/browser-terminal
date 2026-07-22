@@ -32,6 +32,8 @@ export function App() {
       }
       created = t;
       setBt(t);
+      // For devtools poking and the CI boot check.
+      (window as unknown as { bt: BrowserTerminal }).bt = t;
     });
     return () => {
       live = false;

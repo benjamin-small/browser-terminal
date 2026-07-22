@@ -39,7 +39,25 @@ jobs:
         with:
           tool: wasm-bindgen-cli@${{ steps.wb.outputs.version }},just
 
-      - run: sudo apt-get update && sudo apt-get install -y binaryen
+      # NOT apt: Ubuntu ships binaryen 108 (2022), which silently mangles the
+      # externref table that wasm-bindgen emits — the module then instantiates
+      # far enough to look fine and dies on `Table.grow()` at runtime. Pin a
+      # modern release instead, and assert the version so a regression is loud.
+      - name: Install binaryen
+        env:
+          BINARYEN_VERSION: '131'
+        run: |
+          curl -sSfL "https://github.com/WebAssembly/binaryen/releases/download/version_${BINARYEN_VERSION}/binaryen-version_${BINARYEN_VERSION}-x86_64-linux.tar.gz" \
+            | tar xz
+          echo "$PWD/binaryen-version_${BINARYEN_VERSION}/bin" >> "$GITHUB_PATH"
+      - name: Check binaryen is recent enough
+        run: |
+          wasm-opt --version
+          v=$(wasm-opt --version | grep -oE '[0-9]+' | head -1)
+          if [ "$v" -lt 120 ]; then
+            echo "::error::wasm-opt $v is too old for the emitted reference types"
+            exit 1
+          fi
 
       - uses: actions/setup-node@v4
         with:
@@ -75,6 +93,12 @@ jobs:
           # Jekyll would otherwise skip files/dirs starting with _ or .
           touch _site/.nojekyll
           find _site -name '*.wasm' -exec ls -la {} +
+
+      # A green build is not a working site: instantiate the actual artifact
+      # in a real browser before publishing it.
+      - run: npx playwright install --with-deps chromium
+      - name: Verify demos boot from the built artifact
+        run: node scripts/verify-site.mjs _site "/${{ github.event.repository.name }}"
 
       - uses: actions/upload-pages-artifact@v3
         with:

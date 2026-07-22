@@ -24,3 +24,6 @@ packages/demo/playwright-report/
 
 # Standalone single-file build output
 packages/demo/dist-standalone/
+
+# Assembled Pages site (built by CI)
+_site/
