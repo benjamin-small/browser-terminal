@@ -1,0 +1,110 @@
+:root {
+  color-scheme: dark;
+  --bg: #11111b;
+  --fg: #cdd6f4;
+  --dim: #9399b2;
+  --line: #313244;
+  --accent: #a6e3a1;
+}
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font: 15px/1.6 system-ui, sans-serif;
+}
+main {
+  max-width: 680px;
+  margin: 3rem auto;
+  padding: 0 1.25rem 420px;
+}
+h1 {
+  font-size: 1.5rem;
+  margin-bottom: 0.25rem;
+}
+h1 .x {
+  color: var(--dim);
+}
+h2 {
+  font-size: 1rem;
+  margin-top: 2rem;
+  color: var(--dim);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+.lede {
+  color: var(--dim);
+  margin-top: 0;
+}
+code,
+pre {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 13px;
+}
+pre {
+  background: #181825;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 0.85rem 1rem;
+  overflow-x: auto;
+  color: var(--accent);
+}
+.tasks {
+  list-style: none;
+  padding: 0;
+  margin: 1.5rem 0 0.5rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.tasks li {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.6rem 0.9rem;
+  border-bottom: 1px solid var(--line);
+}
+.tasks li:last-child {
+  border-bottom: none;
+}
+.tasks li.done .title {
+  text-decoration: line-through;
+  color: var(--dim);
+}
+.tasks li.empty {
+  color: var(--dim);
+  font-style: italic;
+}
+.id {
+  color: var(--dim);
+  font-family: ui-monospace, monospace;
+  font-size: 12px;
+  min-width: 2.2rem;
+}
+.title {
+  flex: 1;
+}
+.pri {
+  font-family: ui-monospace, monospace;
+  font-size: 11px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  color: var(--dim);
+}
+.pri.p3 {
+  color: #f38ba8;
+  border-color: #f38ba8;
+}
+.pri.p2 {
+  color: #f9e2af;
+  border-color: #f9e2af;
+}
+.count {
+  color: var(--dim);
+  font-size: 13px;
+  margin: 0;
+}
+.note {
+  color: var(--dim);
+  font-size: 13px;
+}

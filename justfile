@@ -34,6 +34,13 @@ test-e2e: build
 demo: build
     npm --prefix packages/demo run dev
 
+# Framework integration demos: the same task list driven by shell commands.
+demo-react: build
+    npm --prefix packages/demo-react run dev
+
+demo-svelte: build
+    npm --prefix packages/demo-svelte run dev
+
 # One self-contained .html — opens from the filesystem, no server needed.
 demo-standalone: build
     npm --prefix packages/demo run build

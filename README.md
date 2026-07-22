@@ -244,9 +244,49 @@ Run `help` in the panel for the full command list; `help <command>` /
 - `packages/browser-terminal` — the npm package: TS wrapper, xterm.js panes,
   Shadow-DOM panel.
 - `packages/demo` — Vite demo + Playwright smoke suite (`npx playwright test`).
+- `packages/demo-react`, `packages/demo-svelte` — the same task list driven by
+  shell commands, showing how each framework's reactivity model integrates
+  (`just demo-react` / `just demo-svelte`).
 
 Architecture spec:
 [docs/superpowers/specs/2026-07-16-browser-terminal-design.md](docs/superpowers/specs/2026-07-16-browser-terminal-design.md)
+
+## Driving component state
+
+Commands are plain functions, so a command can read and write your app's state
+directly — `tasks | filter {|t| !$t.done}` over live component data.
+
+**React** needs one indirection. A command outlives the render that registered
+it, so a captured closure goes stale immediately; adding state to the effect's
+deps re-registers on every render instead. Register one stable wrapper that
+reads the freshest closure from a ref (see `packages/demo-react`):
+
+```tsx
+function useCommand(bt, spec, fn) {
+  const ref = useRef(fn);
+  useLayoutEffect(() => { ref.current = fn; });
+  useEffect(() => {
+    if (!bt) return;
+    bt.registerCommand(spec, (...args) => ref.current(...args));
+    return () => bt.unregisterCommand(spec.name);
+  }, [bt, spec.name]);
+}
+```
+
+The React demo ships a deliberately-broken `tasks-stale` command next to the
+correct one so you can see the difference: after adding a task, `tasks` reports
+4 and `tasks-stale` still reports 3.
+
+**Svelte** needs none of it. A module-level `$state` rune lives outside any
+component, so commands registered once at startup stay correct forever:
+
+```ts
+export const store = $state({ tasks: [] });
+bt.registerCommand({ name: 'tasks' }, () => store.tasks);
+```
+
+Same story for any external store (Zustand, Redux, Jotai) — if you have one,
+that's the better integration point than component state in either framework.
 
 ## Development
 
