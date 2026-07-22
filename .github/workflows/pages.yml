@@ -1,0 +1,91 @@
+name: Deploy demos to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Allow one concurrent deployment; let an in-progress run finish so a
+# half-published site is never left behind.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      # The wasm-bindgen CLI must match the crate version exactly or it
+      # refuses to process the module. Read it from Cargo.toml rather than
+      # hardcoding, so a future bump can't silently break this workflow.
+      - id: wb
+        run: |
+          v=$(grep -m1 'wasm-bindgen = "=' crates/bterm-wasm/Cargo.toml | sed 's/.*"=\(.*\)".*/\1/')
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "wasm-bindgen pinned at $v"
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-bindgen-cli@${{ steps.wb.outputs.version }},just
+
+      - run: sudo apt-get update && sudo apt-get install -y binaryen
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+
+      # Don't publish a broken demo: the native suite is fast and covers the
+      # engine the demos exercise.
+      - run: cargo test --workspace
+
+      - name: Build wasm + library
+        run: just build
+
+      # GitHub Pages serves from /<repo>/, so every demo needs a matching
+      # base or its asset and .wasm URLs resolve to the domain root.
+      - name: Build demos
+        env:
+          BASE: /${{ github.event.repository.name }}
+        run: |
+          npm --prefix packages/demo        run build -- --base="$BASE/vanilla/"
+          npm --prefix packages/demo-react  run build -- --base="$BASE/react/"
+          npm --prefix packages/demo-svelte run build -- --base="$BASE/svelte/"
+
+      - name: Assemble site
+        run: |
+          mkdir -p _site
+          cp site/index.html _site/index.html
+          cp -R packages/demo/dist        _site/vanilla
+          cp -R packages/demo-react/dist  _site/react
+          cp -R packages/demo-svelte/dist _site/svelte
+          # Jekyll would otherwise skip files/dirs starting with _ or .
+          touch _site/.nojekyll
+          find _site -name '*.wasm' -exec ls -la {} +
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

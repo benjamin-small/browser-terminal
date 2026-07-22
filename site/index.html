@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>browser-terminal — demos</title>
+    <style>
+      :root { color-scheme: dark; }
+      body {
+        margin: 0;
+        background: #11111b;
+        color: #cdd6f4;
+        font: 16px/1.65 system-ui, sans-serif;
+      }
+      main { max-width: 720px; margin: 4rem auto; padding: 0 1.25rem 4rem; }
+      h1 { font-size: 1.9rem; margin-bottom: 0.4rem; }
+      .lede { color: #9399b2; margin-top: 0; }
+      code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; }
+      pre {
+        background: #181825; border: 1px solid #313244; border-radius: 8px;
+        padding: 0.85rem 1rem; overflow-x: auto; color: #a6e3a1;
+      }
+      .cards { display: grid; gap: 1rem; margin: 2rem 0; }
+      a.card {
+        display: block; padding: 1.1rem 1.25rem; border: 1px solid #313244;
+        border-radius: 10px; background: #181825; text-decoration: none;
+        color: inherit; transition: border-color .15s, transform .15s;
+      }
+      a.card:hover { border-color: #a6e3a1; transform: translateY(-1px); }
+      a.card h2 { margin: 0 0 0.3rem; font-size: 1.05rem; }
+      a.card p { margin: 0; color: #9399b2; font-size: 14px; }
+      .tag {
+        font-family: ui-monospace, monospace; font-size: 11px; color: #9399b2;
+        border: 1px solid #313244; border-radius: 999px; padding: 1px 8px;
+        margin-left: 0.5rem; vertical-align: middle;
+      }
+      footer { color: #9399b2; font-size: 14px; border-top: 1px solid #313244; padding-top: 1.25rem; }
+      a { color: #a6e3a1; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>browser-terminal</h1>
+      <p class="lede">
+        A terminal/tmux experience for any web page — a Rust core compiled to
+        WebAssembly, running a shell language with structured-value pipes.
+      </p>
+
+      <pre>❯ links --limit 20 | filter {|o| $o.text != ''} | head 5</pre>
+
+      <div class="cards">
+        <a class="card" href="./vanilla/">
+          <h2>Vanilla demo <span class="tag">no framework</span></h2>
+          <p>
+            The core feature tour: DOM-reading commands, regex grep, closures,
+            splits and sessions, cancellation.
+          </p>
+        </a>
+        <a class="card" href="./react/">
+          <h2>React <span class="tag">useState</span></h2>
+          <p>
+            Shell commands driving component state through a latest-ref hook —
+            with a deliberately-broken command beside it showing the stale-closure
+            trap the hook exists to solve.
+          </p>
+        </a>
+        <a class="card" href="./svelte/">
+          <h2>Svelte <span class="tag">runes</span></h2>
+          <p>
+            The same task list over a module-level <code>$state</code> rune:
+            registered once at startup, no hooks, refs, or cleanup.
+          </p>
+        </a>
+      </div>
+
+      <footer>
+        Type <code>help</code> in any panel to explore, or <code>Ctrl-B %</code>
+        to split a pane. Source on
+        <a href="https://github.com/benjamin-small/browser-terminal">GitHub</a>.
+      </footer>
+    </main>
+  </body>
+</html>
