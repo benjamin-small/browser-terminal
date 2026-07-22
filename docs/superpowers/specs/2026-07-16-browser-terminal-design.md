@@ -65,6 +65,29 @@ single best dev-loop accelerator.
 `serde-wasm-bindgen`, `tsify`. Size budget: **≤350KB pre-gzip**, audited with
 `twiggy` at milestone 7.
 
+> **Measured (post-closures): 432 KB raw / 190 KB gzipped — target unmet.**
+> A full `twiggy` audit (`just size`) found **no hot spot to cut**: the largest
+> single function is 5.9 KB and ~48% of the binary is spread across 2,500+
+> items under 1% each. Build flags are exhausted — `-Oz --converge` plus every
+> strip pass buys 387 bytes, and `opt-level="s"` is 42 KB *worse* than `"z"`.
+> `Debug` derives cost only 2.3 KB (LLVM already eliminates the unused ones).
+>
+> Cost by bucket: Rust core/alloc/fmt 88 KB · static data 87 KB · our engine
+> 86 KB · serde 40 KB · indexmap/hashbrown 39 KB · serde_json 27 KB · float
+> formatting 20 KB · Unicode case tables 11 KB.
+>
+> Closing the 82 KB gap therefore requires giving up capability, not waste:
+> drop `to json`/`from json` or hand-roll JSON (~27 KB, risky), swap `Record`'s
+> IndexMap for a Vec-backed small map (~15 KB, touches everything), degrade
+> float printing (~20 KB), or ASCII-only case folding (~11 KB, breaks
+> non-ASCII `str upcase`). A nightly `-Z build-std` + `panic_immediate_abort`
+> build could plausibly take 30–60 KB but forces a nightly toolchain on a
+> library.
+>
+> Context for re-baselining: the 350 KB figure was set during design, before
+> `grep`, selectors, `map`/`filter`, and the whole closure expression language
+> existed. The binary grew 392 → 432 KB (+10%) while gaining all of that.
+
 **Consumption story.** Default load path is
 `init(new URL('./wasm/bterm_wasm_bg.wasm', import.meta.url))`, which Vite and
 webpack 5 handle. Additionally, `BrowserTerminal.create({ wasmUrl?: string | URL })`
