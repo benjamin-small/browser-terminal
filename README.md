@@ -162,7 +162,7 @@ vocabulary to memorize. Two tools beat three.)
 ### Selectors: `--on`, `map`, `filter`
 
 Anywhere a command needs to know *which part* of an item to look at, it takes
-the same three-form selector — learned once, identical everywhere:
+the same selector — learned once, identical everywhere:
 
 | form | meaning |
 |---|---|
