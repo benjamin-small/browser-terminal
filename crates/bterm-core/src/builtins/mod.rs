@@ -909,8 +909,8 @@ mod tests {
             _call: BoundCall,
             _input: PipelineData,
         ) -> LocalBoxFuture<Result<PipelineData, ShellError>> {
-            ctx.sink.write(crate::sink::Record::Log("progress".into()));
-            ctx.sink.write(crate::sink::Record::Err("warning".into()));
+            ctx.sink.write(crate::sink::Record::log("progress"));
+            ctx.sink.write(crate::sink::Record::err("warning"));
             ready(Ok(PipelineData::Value(Value::Int(1))))
         }
     }

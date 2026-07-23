@@ -53,9 +53,9 @@ struct CliSink;
 
 impl bterm_core::sink::Sink for CliSink {
     fn write(&self, record: bterm_core::sink::Record) {
-        match record {
-            bterm_core::sink::Record::Log(s) => println!("{s}"),
-            bterm_core::sink::Record::Err(s) => eprintln!("{s}"),
+        match record.channel() {
+            bterm_core::sink::Channel::Log => println!("{}", record.text()),
+            bterm_core::sink::Channel::Err => eprintln!("{}", record.text()),
         }
     }
 }

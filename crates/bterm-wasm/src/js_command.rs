@@ -58,17 +58,17 @@ impl Command for JsCommand {
             // from a continuation. A command that stashes one and calls it
             // after completing gets a JS error, which is the intended signal.
             let log = Closure::<dyn Fn(String)>::new(move |line: String| {
-                log_sink.write(Record::Log(line));
+                log_sink.write(Record::log(line));
             });
             let err_sink = ctx.sink.clone();
             let err = Closure::<dyn Fn(String)>::new(move |line: String| {
-                err_sink.write(Record::Err(line));
+                err_sink.write(Record::err(line));
             });
             let emit_sink = ctx.sink.clone();
             // `emit` predates the channel split and is what every existing
             // command calls; it is retained as an alias for `log`.
             let emit = Closure::<dyn Fn(String)>::new(move |line: String| {
-                emit_sink.write(Record::Log(line));
+                emit_sink.write(Record::log(line));
             });
             let _ = js_sys::Reflect::set(&ctx_obj, &JsValue::from_str("log"), log.as_ref());
             let _ = js_sys::Reflect::set(&ctx_obj, &JsValue::from_str("err"), err.as_ref());

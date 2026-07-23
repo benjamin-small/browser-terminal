@@ -35,7 +35,7 @@ Run `just demo`, open http://localhost:5173, then walk through:
 - [ ] `slow 15` ticks progressively; typing still echoes during it
 - [ ] Ctrl-C prints `^C`, stops the ticks, prompt returns
 - [ ] `fail` shows the rich error with help line
-- [ ] Console: `bt.run("links | length")` resolves a number
+- [ ] Console: `bt.run("links | length")` resolves `{ value, log, err }`, with `value` the number
 
 ## Multiplexer
 - [ ] Ctrl-B % / Ctrl-B " split; focus follows the new pane (blue outline)

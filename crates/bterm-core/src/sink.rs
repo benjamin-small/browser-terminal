@@ -7,22 +7,53 @@
 
 use std::cell::RefCell;
 
-/// A line written to a diagnostic channel.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Record {
+/// Which diagnostic channel a record belongs to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Channel {
     /// Channel 3 — progress and commentary.
-    Log(String),
+    Log,
     /// Channel 2 — warnings and diagnostics. Non-fatal: a thrown
     /// `ShellError` still aborts the pipeline. This is the case we
     /// previously had no way to express, "warn and keep going".
-    Err(String),
+    Err,
+}
+
+/// A line written to a diagnostic channel.
+///
+/// The text is sanitized on construction, so a `Record` cannot hold an
+/// escape sequence. Diagnostics originate in page-controlled TypeScript,
+/// and they reach more than one destination — a pane, a programmatic
+/// caller's UI, a log aggregator. Sanitizing per-sink meant each new sink
+/// had to remember; doing it here makes "diagnostics leaving the engine are
+/// escape-clean" a property of the type instead.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Record {
+    channel: Channel,
+    text: String,
 }
 
 impl Record {
-    pub fn text(&self) -> &str {
-        match self {
-            Record::Log(s) | Record::Err(s) => s,
+    pub fn log(text: impl AsRef<str>) -> Self {
+        Self::new(Channel::Log, text)
+    }
+
+    pub fn err(text: impl AsRef<str>) -> Self {
+        Self::new(Channel::Err, text)
+    }
+
+    fn new(channel: Channel, text: impl AsRef<str>) -> Self {
+        Record {
+            channel,
+            text: crate::render::diagnostic_text(text.as_ref()),
         }
+    }
+
+    pub fn channel(&self) -> Channel {
+        self.channel
+    }
+
+    pub fn text(&self) -> &str {
+        &self.text
     }
 }
 
@@ -54,11 +85,11 @@ impl CollectingSink {
     }
 
     pub fn log_lines(&self) -> Vec<String> {
-        self.lines(|r| matches!(r, Record::Log(_)))
+        self.lines(|r| matches!(r.channel(), Channel::Log))
     }
 
     pub fn err_lines(&self) -> Vec<String> {
-        self.lines(|r| matches!(r, Record::Err(_)))
+        self.lines(|r| matches!(r.channel(), Channel::Err))
     }
 
     fn lines(&self, keep: impl Fn(&Record) -> bool) -> Vec<String> {
@@ -91,9 +122,9 @@ mod tests {
     #[test]
     fn collecting_sink_separates_channels() {
         let sink = CollectingSink::new();
-        sink.write(Record::Log("progress".into()));
-        sink.write(Record::Err("uh oh".into()));
-        sink.write(Record::Log("more".into()));
+        sink.write(Record::log("progress"));
+        sink.write(Record::err("uh oh"));
+        sink.write(Record::log("more"));
 
         assert_eq!(sink.log_lines(), vec!["progress", "more"]);
         assert_eq!(sink.err_lines(), vec!["uh oh"]);
@@ -102,8 +133,17 @@ mod tests {
     #[test]
     fn take_drains_so_a_sink_can_be_reused() {
         let sink = CollectingSink::new();
-        sink.write(Record::Log("one".into()));
+        sink.write(Record::log("one"));
         assert_eq!(sink.take().len(), 1);
         assert!(sink.take().is_empty());
+    }
+
+    #[test]
+    fn a_record_cannot_hold_an_escape_sequence() {
+        // Diagnostics are page-controlled; the type, not the sink, is what
+        // guarantees they are safe to hand to any destination.
+        let r = Record::err("\x1b[2J\x1b[Hcleared\nsecond");
+        assert_eq!(r.text(), "cleared second");
+        assert_eq!(r.channel(), Channel::Err);
     }
 }

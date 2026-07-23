@@ -10,6 +10,14 @@ declare global {
     bt: {
       run(line: string): Promise<{ value: unknown; log: string[]; err: string[] }>;
       dispose(): void;
+      registerCommand(
+        spec: { name: string; summary?: string },
+        fn: (
+          args: unknown,
+          input: unknown,
+          ctx: { log(s: string): void; err(s: string): void; emit(s: string): void },
+        ) => unknown,
+      ): void;
     };
   }
 }
@@ -239,4 +247,60 @@ test('dispose removes the panel and rejects further runs', async ({ page }) => {
     ),
   );
   expect(rejected).toBe(true);
+});
+
+test('SECURITY: diagnostics stay out of the pipe and cannot inject escapes', async ({ page }) => {
+  await page.goto('/');
+  await waitForTerminal(page);
+
+  await page.evaluate(() => {
+    window.bt.registerCommand(
+      { name: 'noisy', summary: 'writes to every channel' },
+      (_a, _i, ctx) => {
+        ctx.log('LOG-LINE');
+        ctx.err('ERR-LINE');
+        return [{ id: 1 }, { id: 2 }];
+      },
+    );
+  });
+
+  // The pipe carries only the data channel.
+  expect(
+    await page.evaluate(() => window.bt.run('noisy | length').then((r) => r.value)),
+  ).toBe(2);
+
+  const asText = (await page.evaluate(() =>
+    window.bt.run('noisy | to json').then((r) => r.value),
+  )) as string;
+  expect(asText).not.toContain('LOG-LINE');
+  expect(asText).not.toContain('ERR-LINE');
+
+  // The caller still receives them, on the channel each was written to.
+  const result = await page.evaluate(() => window.bt.run('noisy'));
+  expect(result.log).toEqual(['LOG-LINE']);
+  expect(result.err).toEqual(['ERR-LINE']);
+});
+
+test('SECURITY: a page-controlled diagnostic cannot clear the terminal', async ({ page }) => {
+  await page.goto('/');
+  await waitForTerminal(page);
+
+  // Escape sequences in diagnostic text must be stripped before they reach
+  // xterm. Prior to the channel work this went through raw, so a command
+  // could clear the user's screen.
+  const result = await page.evaluate(() => {
+    window.bt.registerCommand({ name: 'hostile', summary: 'probe' }, (_a, _i, ctx) => {
+      ctx.err('\x1b[2J\x1b[HPAYLOAD\nsecond');
+      return null;
+    });
+    return window.bt.run('hostile');
+  });
+
+  // The diagnostic still arrives...
+  expect(result.err).toHaveLength(1);
+  // ...but stripped of the escape and collapsed to one line.
+  expect(result.err[0]).toContain('PAYLOAD');
+  expect(result.err[0]).not.toContain('\x1b');
+  expect(result.err[0]).not.toContain('[2J');
+  expect(result.err[0]).toBe('PAYLOAD second');
 });

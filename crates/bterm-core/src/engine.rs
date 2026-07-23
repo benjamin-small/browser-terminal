@@ -436,11 +436,13 @@ impl<A: EngineAccess> HostHooks for EngineHost<A> {
     }
 }
 
-/// Routes diagnostics to a pane, sanitized and then styled.
+/// Routes diagnostics to a pane, styled.
 ///
-/// Sanitizing is not optional: the text comes from a TS command and is
-/// therefore page-controlled. Styling is applied *after* stripping, so our
-/// colour survives and the command's cannot be injected.
+/// The record arrives already sanitized — `Record` sanitizes on
+/// construction, since diagnostics come from a TS command and are
+/// therefore page-controlled. This sink's only job is styling, applied
+/// around the already-clean text, so our colour survives and the
+/// command's cannot be injected.
 struct PaneSink<A: EngineAccess> {
     access: A,
     pane: u32,
@@ -450,10 +452,10 @@ impl<A: EngineAccess> crate::sink::Sink for PaneSink<A> {
     fn write(&self, record: crate::sink::Record) {
         const RED: &str = "\x1b[31m";
         const RESET: &str = "\x1b[0m";
-        let clean = crate::render::diagnostic_text(record.text());
-        let line = match record {
-            crate::sink::Record::Log(_) => format!("{clean}\n"),
-            crate::sink::Record::Err(_) => format!("{RED}{clean}{RESET}\n"),
+        let clean = record.text();
+        let line = match record.channel() {
+            crate::sink::Channel::Log => format!("{clean}\n"),
+            crate::sink::Channel::Err => format!("{RED}{clean}{RESET}\n"),
         };
         self.access.with(|e| e.emit_output(self.pane, &line));
         // Flush after the borrow closes, never inside `with` — flushing may
@@ -791,8 +793,8 @@ mod tests {
         let pane = active_pane(&access);
         let sink = PaneSink { access: access.clone(), pane };
 
-        sink.write(Record::Log("\x1b[2Jcleared".into()));
-        sink.write(Record::Err("bad\nthing".into()));
+        sink.write(Record::log("\x1b[2Jcleared"));
+        sink.write(Record::err("bad\nthing"));
 
         let out = output_text(&access.with(|e| e.drain_events()));
         // The command's own escape is gone...
@@ -836,9 +838,9 @@ mod tests {
         let pane = access.with(|e| e.mux.active_pane());
         let sink = PaneSink { access: access.clone(), pane };
 
-        sink.write(Record::Log("one".into()));
+        sink.write(Record::log("one"));
         assert_eq!(access.flushes.get(), 1, "write should flush immediately");
-        sink.write(Record::Err("two".into()));
+        sink.write(Record::err("two"));
         assert_eq!(access.flushes.get(), 2, "each write should flush, not just the last");
     }
 
@@ -856,8 +858,8 @@ mod tests {
             _call: BoundCall,
             _input: PipelineData,
         ) -> LocalBoxFuture<Result<PipelineData, ShellError>> {
-            ctx.sink.write(Record::Log("tick".into()));
-            ctx.sink.write(Record::Err("careful".into()));
+            ctx.sink.write(Record::log("tick"));
+            ctx.sink.write(Record::err("careful"));
             crate::registry::ready(Ok(PipelineData::Empty))
         }
     }
