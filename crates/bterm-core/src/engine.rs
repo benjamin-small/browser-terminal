@@ -540,21 +540,21 @@ pub async fn execute_line<A: EngineAccess>(access: A, pane: u32, line: String, r
 
 /// Programmatic execution (the TS `run()` API): parse and evaluate a line,
 /// returning the final pipeline's value without touching the pane's prompt
-/// or rendering anything. Commands' `ctx.emit` output is currently discarded
-/// (wired to a `NullSink`) rather than reaching the pane; Task 7 replaces
-/// this with a sink that captures it for the caller instead.
+/// or rendering anything. Commands' diagnostics (`ctx.log` / `ctx.err`) go
+/// to the caller-supplied sink rather than the pane, which is what lets a
+/// programmatic run avoid writing on the user's terminal.
 pub async fn eval_to_value<A: EngineAccess>(
     access: A,
     pane: u32,
     line: String,
     run_id: u64,
+    sink: Rc<dyn crate::sink::Sink>,
 ) -> Result<Value, ShellError> {
     let parsed = parse(&line);
     if let Some(err) = parsed.errors.into_iter().next() {
         return Err(err);
     }
-    // Task 7 replaces this with a capturing sink.
-    let ctx = make_ctx(&access, pane, run_id, Rc::new(crate::sink::NullSink));
+    let ctx = make_ctx(&access, pane, run_id, sink);
     let scope = scope_for_pane(&access, pane);
     let source = EngineCommands(access.clone());
     let (results, error) = eval_line(&parsed.line, &source, &ctx, &scope).await;

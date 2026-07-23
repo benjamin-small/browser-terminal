@@ -81,3 +81,13 @@ export type CommandFn = (
  * type-checked and debuggable in devtools.
  */
 export type SelectorFn = (item: Value) => unknown;
+
+/** What `run()` resolves to: the data channel plus both diagnostic channels. */
+export interface RunResult {
+  /** Channel 1 — the pipeline's final structured value. */
+  value: Value;
+  /** Channel 3 lines, in order. */
+  log: string[];
+  /** Channel 2 lines, in order. */
+  err: string[];
+}

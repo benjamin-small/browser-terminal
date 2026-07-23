@@ -96,6 +96,12 @@ fn to_js<T: Serialize>(value: &T) -> JsValue {
     value.serialize(&ser).unwrap_or(JsValue::NULL)
 }
 
+/// Diagnostics come back as a plain JS string array, so a caller can print,
+/// ignore, or surface them without touching the terminal.
+fn string_array(lines: &[String]) -> js_sys::Array {
+    lines.iter().map(|s| JsValue::from_str(s)).collect()
+}
+
 /// Spawn one submitted line as an abortable task, tracked in the task
 /// registry so Ctrl-C / dispose can cancel it.
 fn spawn_pipeline(pane: u32, line: String) {
@@ -298,8 +304,10 @@ impl BtermCore {
     }
 
     /// Programmatic execution: evaluate a line in a pane's context and
-    /// resolve with the final structured value (no prompt echo, no pane
-    /// render). Rejects with an Error whose message is the shell error.
+    /// resolve with `{ value, log, err }` — the final structured value
+    /// plus whatever the pipeline wrote to its two diagnostic channels (no
+    /// prompt echo, no pane render, nothing written to the terminal).
+    /// Rejects with an Error whose message is the shell error.
     pub fn run(&self, pane: u32, line: String) -> js_sys::Promise {
         if !engine_alive() {
             return js_sys::Promise::reject(&JsValue::from_str(
@@ -311,12 +319,37 @@ impl BtermCore {
             if let Ok(controller) = web_sys::AbortController::new() {
                 // Registered under the pane so Ctrl-C also cancels
                 // programmatic runs targeting it.
-                let (fut, handle) = Abortable::wrap(eval_to_value(WasmAccess, pane, line, run_id));
+                let sink = Rc::new(bterm_core::sink::CollectingSink::new());
+                let (fut, handle) = Abortable::wrap(eval_to_value(
+                    WasmAccess,
+                    pane,
+                    line,
+                    run_id,
+                    sink.clone(),
+                ));
                 tasks::register(run_id, pane, handle, controller);
                 let result = fut.await;
                 tasks::finish(run_id);
                 match result {
-                    Ok(Ok(value)) => Ok(convert::value_to_js(&value)),
+                    Ok(Ok(value)) => {
+                        let out = js_sys::Object::new();
+                        let _ = js_sys::Reflect::set(
+                            &out,
+                            &JsValue::from_str("value"),
+                            &convert::value_to_js(&value),
+                        );
+                        let _ = js_sys::Reflect::set(
+                            &out,
+                            &JsValue::from_str("log"),
+                            &string_array(&sink.log_lines()),
+                        );
+                        let _ = js_sys::Reflect::set(
+                            &out,
+                            &JsValue::from_str("err"),
+                            &string_array(&sink.err_lines()),
+                        );
+                        Ok(out.into())
+                    }
                     Ok(Err(err)) => {
                         let mut msg = err.msg.clone();
                         if let Some(help) = &err.help {

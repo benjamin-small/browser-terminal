@@ -11,7 +11,7 @@ import init, { BtermCore } from './wasm/bterm_wasm.js';
 import { PaneManager } from './panes.js';
 import { PanelHost, type PanelMode } from './panels.js';
 import type { Effects, EngineEvent, HostMsg, LayoutSnapshot } from './events.js';
-import type { CommandFn, CommandSpec, SelectorFn, Value } from './types.js';
+import type { CommandFn, CommandSpec, RunResult, SelectorFn } from './types.js';
 
 export type {
   DividerInfo,
@@ -32,6 +32,7 @@ export type {
   CommandSpec,
   FlagSpec,
   PosArg,
+  RunResult,
   SelectorFn,
   Shape,
   Value,
@@ -204,16 +205,19 @@ export class BrowserTerminal {
   }
 
   /**
-   * Run a line programmatically in the active pane's session and get the
-   * final structured value — the terminal as a scripting engine for the
-   * host page.
+   * Run a line programmatically in the active pane's session and get back
+   * `{ value, log, err }` — the terminal as a scripting engine for the
+   * host page. Diagnostics (`ctx.log` / `ctx.err`) come back as arrays
+   * instead of printing, so a background call (e.g. from a `useEffect`)
+   * never writes on whatever pane happens to be active; the caller decides
+   * what, if anything, to surface.
    */
-  run(line: string): Promise<Value> {
+  run(line: string): Promise<RunResult> {
     if (this.disposed) {
       return Promise.reject(new Error('browser-terminal: instance is disposed'));
     }
     const pane = this.lastSnapshot?.active_pane ?? 0;
-    return this.core.run(pane, line) as Promise<Value>;
+    return this.core.run(pane, line) as Promise<RunResult>;
   }
 
   /**
