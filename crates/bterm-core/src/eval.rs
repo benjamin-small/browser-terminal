@@ -7,7 +7,6 @@ use crate::ast::{Call, Line, Pipeline};
 use crate::error::ShellError;
 use crate::registry::{Command, CommandRegistry, ExecContext, PipelineData};
 use crate::signature::{bind, wants_help, Scope};
-use crate::value::Value;
 use std::rc::Rc;
 
 /// Resolves command names. `lookup` is synchronous and must not hold any
@@ -86,7 +85,7 @@ async fn eval_call(
 
     // `--help` intercepted before binding, so a malformed call still gets help.
     if wants_help(call) {
-        return Ok(PipelineData::Value(Value::Str(cmd.signature().render_help())));
+        return Ok(PipelineData::Rendered(cmd.signature().render_help()));
     }
 
     let bound = bind(cmd.signature(), &call.words[consumed..], call, scope)?;
@@ -124,6 +123,7 @@ pub fn block_on<T>(fut: impl std::future::Future<Output = T>) -> T {
 mod tests {
     use super::*;
     use crate::registry::{ready, HostHooks, LocalBoxFuture};
+    use crate::value::Value;
     use crate::signature::{BoundCall, Shape, Signature};
 
     struct NullHost;
@@ -231,8 +231,13 @@ mod tests {
         // Missing required arg, but --help still works.
         let results = eval("emit --help").expect("help");
         match &results[0] {
-            PipelineData::Value(Value::Str(s)) => assert!(s.contains("Usage:")),
-            other => panic!("expected help text, got {other:?}"),
+            // Rendered, not Value(Str): help is pre-formatted text and must
+            // reach the terminal with its styling intact.
+            PipelineData::Rendered(s) => {
+                assert!(s.contains("Usage:"));
+                assert!(s.contains('\x1b'), "help keeps its ANSI styling");
+            }
+            other => panic!("expected rendered help text, got {other:?}"),
         }
     }
 }

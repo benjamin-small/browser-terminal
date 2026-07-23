@@ -42,21 +42,72 @@ pub fn plain(value: &Value) -> String {
     }
 }
 
-/// Strip control characters from user-supplied text so a Str value cannot
-/// inject ANSI escapes into the terminal. Newlines and tabs survive in
-/// scalar display; table cells flatten them too (`cell_text`).
+/// Strip escape sequences and control characters from user-supplied text, so
+/// a value carrying page content can't move the cursor, clear the screen, or
+/// set the window title.
+///
+/// Whole sequences go, not just the `ESC` byte: dropping the escape alone
+/// leaves its body behind as visible litter (`[1m`) *and* still lets a
+/// hostile string fake formatting. `keep_lines` preserves `\n`/`\t` for
+/// scalar display; table cells flatten them to spaces so column widths stay
+/// truthful.
+fn strip_escapes(s: &str, keep_lines: bool) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            match chars.peek() {
+                // CSI: ESC [ params… final(0x40..=0x7e)
+                Some('[') => {
+                    chars.next();
+                    for c2 in chars.by_ref() {
+                        if ('\x40'..='\x7e').contains(&c2) {
+                            break;
+                        }
+                    }
+                }
+                // OSC: ESC ] … terminated by BEL or ST (ESC \)
+                Some(']') => {
+                    chars.next();
+                    while let Some(c2) = chars.next() {
+                        if c2 == '\x07' {
+                            break;
+                        }
+                        if c2 == '\x1b' {
+                            chars.next(); // consume the `\` of ST
+                            break;
+                        }
+                    }
+                }
+                // Two-character escape (ESC c, ESC 7, …)
+                Some(_) => {
+                    chars.next();
+                }
+                None => {}
+            }
+            continue;
+        }
+        if c == '\n' || c == '\t' {
+            out.push(if keep_lines { c } else { ' ' });
+        } else if c == '\r' {
+            if !keep_lines {
+                out.push(' ');
+            }
+        } else if !c.is_control() {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Display text for an untrusted scalar string.
 fn sanitize(s: &str) -> String {
-    s.chars()
-        .filter(|c| !c.is_control() || *c == '\n' || *c == '\t')
-        .collect()
+    strip_escapes(s, true)
 }
 
 /// Single-line, escape-free cell/key text for tables and records.
 fn cell_text(s: &str) -> String {
-    s.chars()
-        .map(|c| if c == '\n' || c == '\t' || c == '\r' { ' ' } else { c })
-        .filter(|c| !c.is_control())
-        .collect()
+    strip_escapes(s, false)
 }
 
 fn format_float(f: f64) -> String {
@@ -307,6 +358,40 @@ mod tests {
         let out = render(&v, 80);
         assert!(!out.contains("\x1b[2J"), "ESC must be stripped: {out:?}");
         assert!(out.contains("evilwiped") || out.contains("evil"), "{out:?}");
+    }
+
+    #[test]
+    fn whole_escape_sequences_go_not_just_the_esc_byte() {
+        // Regression: stripping only ESC left the body behind, so help text
+        // rendered as literal `[1mUsage:[0m` litter.
+        let v = Value::Str("\x1b[1mbold\x1b[0m plain".into());
+        let out = strip_ansi(&render(&v, 80));
+        assert_eq!(out, "bold plain\n", "no leftover [1m litter: {out:?}");
+    }
+
+    #[test]
+    fn osc_and_two_char_escapes_are_stripped() {
+        // OSC can set the window title / clipboard in some terminals.
+        let v = Value::Str("a\x1b]0;pwned\x07b\x1bcc".into());
+        let out = strip_ansi(&render(&v, 80));
+        assert_eq!(out, "abc\n", "got {out:?}");
+    }
+
+    #[test]
+    fn escapes_in_table_cells_do_not_skew_column_width() {
+        // A colored cell must not count its escape bytes as visible width.
+        let v = Value::List(vec![Value::record([
+            ("a".to_string(), Value::Str("\x1b[31mred\x1b[0m".into())),
+        ])]);
+        let out = strip_ansi(&render(&v, 80));
+        let widths: Vec<usize> = out
+            .lines()
+            .map(UnicodeWidthStr::width)
+            .collect();
+        assert!(
+            widths.windows(2).all(|w| w[0] == w[1]),
+            "table rows must line up: {widths:?}\n{out}"
+        );
     }
 
     #[test]

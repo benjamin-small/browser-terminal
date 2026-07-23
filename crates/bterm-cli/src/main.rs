@@ -98,9 +98,14 @@ fn main() {
                     continue;
                 }
                 let (results, error) = block_on(eval_line(&parsed.line, &*registry, &ctx, &scope));
+                // Exhaustive on purpose: an `if let` here silently swallowed
+                // the `Rendered` variant when it was added.
                 for data in results {
-                    if let PipelineData::Value(v) = data {
-                        print!("{}", render(&v, ctx.width));
+                    match data {
+                        PipelineData::Value(v) => print!("{}", render(&v, ctx.width)),
+                        // Already formatted (help, `table`) — print verbatim.
+                        PipelineData::Rendered(s) => println!("{s}"),
+                        PipelineData::Empty => {}
                     }
                 }
                 match error {

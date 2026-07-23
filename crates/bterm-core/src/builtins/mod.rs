@@ -619,7 +619,7 @@ fn from_json(_ctx: ExecContext, call: BoundCall, input: PipelineData) -> Result<
 
 fn table(ctx: ExecContext, _call: BoundCall, input: PipelineData) -> Result<PipelineData, ShellError> {
     let rendered = crate::render::render(&input.into_value(), ctx.width);
-    Ok(PipelineData::Value(Value::Str(rendered.trim_end_matches('\n').to_string())))
+    Ok(PipelineData::Rendered(rendered.trim_end_matches('\n').to_string()))
 }
 
 fn help(ctx: ExecContext, call: BoundCall, _input: PipelineData) -> Result<PipelineData, ShellError> {
@@ -644,7 +644,7 @@ fn help(ctx: ExecContext, call: BoundCall, _input: PipelineData) -> Result<Pipel
         .collect::<Vec<_>>()
         .join(" ");
     match ctx.host.help_for(&name) {
-        Some(text) => Ok(PipelineData::Value(Value::Str(text))),
+        Some(text) => Ok(PipelineData::Rendered(text)),
         None => Err(ShellError::new(ErrorKind::UnknownCommand, format!("no help for `{name}`"))
             .with_span(call.head_span)
             .with_help("run `help` to list commands")),

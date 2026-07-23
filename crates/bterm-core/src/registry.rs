@@ -22,6 +22,15 @@ pub fn ready<T: 'static>(t: T) -> LocalBoxFuture<T> {
 pub enum PipelineData {
     Empty,
     Value(Value),
+    /// Text this shell formatted itself — help output, `table` — which the
+    /// final renderer prints verbatim.
+    ///
+    /// Untrusted strings get their escape sequences stripped on the way to
+    /// the terminal (a page-controlled value must not be able to clear the
+    /// screen). Our own styled output would be destroyed by that same pass,
+    /// so it is tagged here instead of being smuggled through as a `Str`.
+    /// It still behaves as a string when piped onward.
+    Rendered(String),
 }
 
 impl PipelineData {
@@ -29,6 +38,7 @@ impl PipelineData {
         match self {
             PipelineData::Empty => Value::Null,
             PipelineData::Value(v) => v,
+            PipelineData::Rendered(s) => Value::Str(s),
         }
     }
 }

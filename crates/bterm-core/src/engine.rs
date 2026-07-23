@@ -482,9 +482,14 @@ pub async fn execute_line<A: EngineAccess>(access: A, pane: u32, line: String, r
     access.with(|e| {
         // Completed pipelines render even when a later one failed.
         for data in &results {
-            if let PipelineData::Value(v) = data {
-                let rendered = render(v, cols);
-                e.emit_output(pane, &rendered);
+            match data {
+                PipelineData::Value(v) => {
+                    let rendered = render(v, cols);
+                    e.emit_output(pane, &rendered);
+                }
+                // Already formatted by us — printed as-is, escapes intact.
+                PipelineData::Rendered(s) => e.emit_output(pane, &format!("{s}\n")),
+                PipelineData::Empty => {}
             }
         }
         match &error {
