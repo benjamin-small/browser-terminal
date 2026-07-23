@@ -436,6 +436,29 @@ impl<A: EngineAccess> HostHooks for EngineHost<A> {
     }
 }
 
+/// Routes diagnostics to a pane, sanitized and then styled.
+///
+/// Sanitizing is not optional: the text comes from a TS command and is
+/// therefore page-controlled. Styling is applied *after* stripping, so our
+/// colour survives and the command's cannot be injected.
+struct PaneSink<A: EngineAccess> {
+    access: A,
+    pane: u32,
+}
+
+impl<A: EngineAccess> crate::sink::Sink for PaneSink<A> {
+    fn write(&self, record: crate::sink::Record) {
+        const RED: &str = "\x1b[31m";
+        const RESET: &str = "\x1b[0m";
+        let clean = crate::render::diagnostic_text(record.text());
+        let line = match record {
+            crate::sink::Record::Log(_) => format!("{clean}\n"),
+            crate::sink::Record::Err(_) => format!("{RED}{clean}{RESET}\n"),
+        };
+        self.access.with(|e| e.emit_output(self.pane, &line));
+    }
+}
+
 fn make_ctx<A: EngineAccess>(
     access: &A,
     pane: u32,
@@ -477,8 +500,9 @@ pub async fn execute_line<A: EngineAccess>(access: A, pane: u32, line: String, r
         return;
     }
 
-    // Task 4 replaces this with a real PaneSink.
-    let ctx = make_ctx(&access, pane, run_id, Rc::new(crate::sink::NullSink));
+    let sink: Rc<dyn crate::sink::Sink> =
+        Rc::new(PaneSink { access: access.clone(), pane });
+    let ctx = make_ctx(&access, pane, run_id, sink);
     let cols = ctx.width;
     let scope = scope_for_pane(&access, pane);
     let source = EngineCommands(access.clone());
@@ -557,6 +581,9 @@ fn finish_pane(e: &mut Engine, pane: u32, ok: bool) {
 mod tests {
     use super::*;
     use crate::eval::block_on;
+    use crate::registry::{Command, LocalBoxFuture, PipelineData};
+    use crate::signature::{BoundCall, Signature};
+    use crate::sink::{Record, Sink};
     use std::cell::RefCell;
 
     fn engine() -> Rc<RefCell<Engine>> {
@@ -751,5 +778,54 @@ mod tests {
         let snapshot = access.with(|e| e.snapshot());
         assert_eq!(snapshot.panes.len(), 1, "zoomed pane fills the window");
         assert!(snapshot.zoomed.is_some());
+    }
+
+    #[test]
+    fn pane_sink_strips_escapes_from_diagnostics() {
+        let access = engine();
+        let pane = active_pane(&access);
+        let sink = PaneSink { access: access.clone(), pane };
+
+        sink.write(Record::Log("\x1b[2Jcleared".into()));
+        sink.write(Record::Err("bad\nthing".into()));
+
+        let out = output_text(&access.with(|e| e.drain_events()));
+        // The command's own escape is gone...
+        assert!(!out.contains("[2J"), "clear-screen survived: {out:?}");
+        assert!(out.contains("cleared"));
+        // ...the newline is collapsed, keeping one diagnostic on one line...
+        assert!(out.contains("bad thing"));
+        // ...and our styling is applied around the sanitized text.
+        assert!(out.contains("\x1b[31m"), "err not styled: {out:?}");
+    }
+
+    /// Writes to both diagnostic channels so the wiring from `execute_line`
+    /// through `make_ctx` into a running command can be asserted end to end.
+    struct Noisy;
+    impl Command for Noisy {
+        fn signature(&self) -> &Signature {
+            static SIG: std::sync::OnceLock<Signature> = std::sync::OnceLock::new();
+            SIG.get_or_init(|| Signature::build("noisy", "writes to log and err"))
+        }
+        fn run(
+            &self,
+            ctx: ExecContext,
+            _call: BoundCall,
+            _input: PipelineData,
+        ) -> LocalBoxFuture<Result<PipelineData, ShellError>> {
+            ctx.sink.write(Record::Log("tick".into()));
+            ctx.sink.write(Record::Err("careful".into()));
+            crate::registry::ready(Ok(PipelineData::Empty))
+        }
+    }
+
+    #[test]
+    fn typed_command_diagnostics_reach_the_pane() {
+        let access = engine();
+        access.with(|e| e.registry.register_builtin(Rc::new(Noisy)));
+        let out = output_text(&feed_and_run(&access, "noisy\r"));
+        assert!(out.contains("tick"), "log missing from pane: {out:?}");
+        assert!(out.contains("careful"), "err missing from pane: {out:?}");
+        assert!(out.contains("\x1b[31m"), "err not styled: {out:?}");
     }
 }
