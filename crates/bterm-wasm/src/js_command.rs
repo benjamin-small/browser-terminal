@@ -1,6 +1,7 @@
 //! TS-registered commands: a `Signature` plus a JS function, invoked as
 //! `fn(args, input, ctx)` where `args = { positionals, flags }`, `input` is
-//! the piped value, and `ctx = { signal: AbortSignal, emit(line) }`.
+//! the piped value, and `ctx = { signal: AbortSignal, log(line), err(line),
+//! emit(line) }` (`emit` is an alias for `log`).
 //! Sync returns are tolerated via `Promise.resolve`; rejections map to
 //! `ShellError` (rich `{ message, help? }` objects keep their help text).
 
@@ -52,12 +53,25 @@ impl Command for JsCommand {
             if let Some(signal) = crate::tasks::signal_for(ctx.run_id) {
                 let _ = js_sys::Reflect::set(&ctx_obj, &JsValue::from_str("signal"), &signal);
             }
-            let sink = ctx.sink.clone();
-            // Valid for the duration of the call; a TS command that stashes
-            // `emit` and calls it after completing gets a JS error.
-            let emit = Closure::<dyn Fn(String)>::new(move |line: String| {
-                sink.write(Record::Log(line));
+            let log_sink = ctx.sink.clone();
+            // These stay alive across the await: an async command may write
+            // from a continuation. A command that stashes one and calls it
+            // after completing gets a JS error, which is the intended signal.
+            let log = Closure::<dyn Fn(String)>::new(move |line: String| {
+                log_sink.write(Record::Log(line));
             });
+            let err_sink = ctx.sink.clone();
+            let err = Closure::<dyn Fn(String)>::new(move |line: String| {
+                err_sink.write(Record::Err(line));
+            });
+            let emit_sink = ctx.sink.clone();
+            // `emit` predates the channel split and is what every existing
+            // command calls; it is retained as an alias for `log`.
+            let emit = Closure::<dyn Fn(String)>::new(move |line: String| {
+                emit_sink.write(Record::Log(line));
+            });
+            let _ = js_sys::Reflect::set(&ctx_obj, &JsValue::from_str("log"), log.as_ref());
+            let _ = js_sys::Reflect::set(&ctx_obj, &JsValue::from_str("err"), err.as_ref());
             let _ = js_sys::Reflect::set(&ctx_obj, &JsValue::from_str("emit"), emit.as_ref());
 
             let returned = func
@@ -66,6 +80,8 @@ impl Command for JsCommand {
             let resolved = wasm_bindgen_futures::JsFuture::from(js_sys::Promise::resolve(&returned))
                 .await
                 .map_err(|e| js_error_to_shell(&e, span, &name))?;
+            drop(log);
+            drop(err);
             drop(emit);
 
             if resolved.is_undefined() {

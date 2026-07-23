@@ -48,7 +48,20 @@ export interface CommandArgs {
 export interface CommandCtx {
   /** Fires when the pipeline is aborted (Ctrl-C / dispose). Pass to fetch(). */
   signal: AbortSignal;
-  /** Progressive output: print a line above the pipeline's final result. */
+  /**
+   * Channel 3 — progress and commentary. Goes to the terminal, never into
+   * the pipe, so a downstream `| length` is unaffected by anything you log.
+   */
+  log(line: string): void;
+  /**
+   * Channel 2 — warnings and diagnostics, rendered in red. Non-fatal:
+   * throw if you need to abort the pipeline.
+   */
+  err(line: string): void;
+  /**
+   * Alias for `log`, kept because it predates the channel split and every
+   * existing command uses it. Prefer `log` in new code.
+   */
   emit(line: string): void;
 }
 
