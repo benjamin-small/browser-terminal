@@ -67,8 +67,6 @@ pub enum MuxAction {
 /// Host services a command may touch. Implemented by the CLI (stdout,
 /// readline history) and by the wasm engine (pane output, pane history).
 pub trait HostHooks {
-    /// Progressive output: print a line above the pipeline's final render.
-    fn emit_line(&self, line: &str);
     /// The current shell's history, newest last.
     fn history(&self) -> Vec<String> {
         Vec::new()
@@ -120,6 +118,9 @@ pub trait HostHooks {
 #[derive(Clone)]
 pub struct ExecContext {
     pub host: Rc<dyn HostHooks>,
+    /// Where `log` and `err` records go. Swappable so a programmatic
+    /// `run()` can capture what a pane would have printed.
+    pub sink: Rc<dyn crate::sink::Sink>,
     /// Render width (pane cols / terminal width).
     pub width: u16,
     /// Pane the pipeline is running in (0 for the CLI).

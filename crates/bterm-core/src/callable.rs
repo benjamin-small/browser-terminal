@@ -164,7 +164,6 @@ mod tests {
     }
 
     impl HostHooks for FakeHost {
-        fn emit_line(&self, _line: &str) {}
         fn compile_fn(&self, source: &str) -> Result<Rc<dyn HostFn>, String> {
             *self.calls.borrow_mut() += 1;
             if source.contains("* 2") {
@@ -237,9 +236,7 @@ mod tests {
     #[test]
     fn native_host_rejects_inline_source_with_guidance() {
         struct Native;
-        impl HostHooks for Native {
-            fn emit_line(&self, _l: &str) {}
-        }
+        impl HostHooks for Native {}
         let err = Selector::parse("(o) => o.id", &Native).expect_err("no engine");
         assert!(err.contains("JavaScript host"), "{err}");
     }

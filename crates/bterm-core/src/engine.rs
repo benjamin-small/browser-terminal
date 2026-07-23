@@ -372,11 +372,6 @@ struct EngineHost<A: EngineAccess> {
 }
 
 impl<A: EngineAccess> HostHooks for EngineHost<A> {
-    fn emit_line(&self, line: &str) {
-        self.access.with(|e| e.emit_output(self.pane, &format!("{line}\n")));
-        self.access.events_ready();
-    }
-
     fn history(&self) -> Vec<String> {
         self.access
             .with(|e| e.pane(self.pane).map(|p| p.editor.history().to_vec()))
@@ -441,10 +436,16 @@ impl<A: EngineAccess> HostHooks for EngineHost<A> {
     }
 }
 
-fn make_ctx<A: EngineAccess>(access: &A, pane: u32, run_id: u64) -> ExecContext {
+fn make_ctx<A: EngineAccess>(
+    access: &A,
+    pane: u32,
+    run_id: u64,
+    sink: Rc<dyn crate::sink::Sink>,
+) -> ExecContext {
     let cols = access.with(|e| e.pane(pane).map(|p| p.cols).unwrap_or(80));
     ExecContext {
         host: Rc::new(EngineHost { access: access.clone(), pane }),
+        sink,
         width: cols,
         pane,
         run_id,
@@ -476,7 +477,8 @@ pub async fn execute_line<A: EngineAccess>(access: A, pane: u32, line: String, r
         return;
     }
 
-    let ctx = make_ctx(&access, pane, run_id);
+    // Task 4 replaces this with a real PaneSink.
+    let ctx = make_ctx(&access, pane, run_id, Rc::new(crate::sink::NullSink));
     let cols = ctx.width;
     let scope = scope_for_pane(&access, pane);
     let source = EngineCommands(access.clone());
@@ -521,7 +523,8 @@ pub async fn eval_to_value<A: EngineAccess>(
     if let Some(err) = parsed.errors.into_iter().next() {
         return Err(err);
     }
-    let ctx = make_ctx(&access, pane, run_id);
+    // Task 7 replaces this with a capturing sink.
+    let ctx = make_ctx(&access, pane, run_id, Rc::new(crate::sink::NullSink));
     let scope = scope_for_pane(&access, pane);
     let source = EngineCommands(access.clone());
     let (results, error) = eval_line(&parsed.line, &source, &ctx, &scope).await;

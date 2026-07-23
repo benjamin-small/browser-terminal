@@ -144,12 +144,16 @@ mod tests {
     use crate::signature::{BoundCall, Shape, Signature};
 
     struct NullHost;
-    impl HostHooks for NullHost {
-        fn emit_line(&self, _line: &str) {}
-    }
+    impl HostHooks for NullHost {}
 
     fn ctx() -> ExecContext {
-        ExecContext { host: Rc::new(NullHost), width: 80, pane: 0, run_id: 0 }
+        ExecContext {
+            host: Rc::new(NullHost),
+            sink: Rc::new(crate::sink::NullSink),
+            width: 80,
+            pane: 0,
+            run_id: 0,
+        }
     }
 
     /// Fake command: `emit <n>` produces Int(n); `double` doubles its input.

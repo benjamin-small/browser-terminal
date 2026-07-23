@@ -18,10 +18,6 @@ struct CliHost {
 }
 
 impl HostHooks for CliHost {
-    fn emit_line(&self, line: &str) {
-        println!("{line}");
-    }
-
     fn history(&self) -> Vec<String> {
         self.history.borrow().clone()
     }
@@ -51,6 +47,19 @@ impl HostHooks for CliHost {
     }
 }
 
+/// The native harness maps the channels onto real file descriptors, so
+/// `bterm 2>/dev/null` behaves the way a shell user expects.
+struct CliSink;
+
+impl bterm_core::sink::Sink for CliSink {
+    fn write(&self, record: bterm_core::sink::Record) {
+        match record {
+            bterm_core::sink::Record::Log(s) => println!("{s}"),
+            bterm_core::sink::Record::Err(s) => eprintln!("{s}"),
+        }
+    }
+}
+
 fn terminal_width() -> u16 {
     std::env::var("COLUMNS")
         .ok()
@@ -66,7 +75,13 @@ fn main() {
         registry: registry.clone(),
         history: RefCell::new(Vec::new()),
     });
-    let ctx = ExecContext { host: host.clone(), width: terminal_width(), pane: 0, run_id: 0 };
+    let ctx = ExecContext {
+        host: host.clone(),
+        sink: Rc::new(CliSink),
+        width: terminal_width(),
+        pane: 0,
+        run_id: 0,
+    };
     let scope = Scope::new();
 
     let mut editor = match DefaultEditor::new() {

@@ -672,7 +672,6 @@ mod tests {
 
     struct TestHost;
     impl HostHooks for TestHost {
-        fn emit_line(&self, _line: &str) {}
         fn history(&self) -> Vec<String> {
             vec!["echo 1".into(), "help".into()]
         }
@@ -687,7 +686,13 @@ mod tests {
     fn eval(src: &str) -> Result<Value, ShellError> {
         let mut registry = CommandRegistry::new();
         register_all(&mut registry);
-        let ctx = ExecContext { host: Rc::new(TestHost), width: 80, pane: 0, run_id: 0 };
+        let ctx = ExecContext {
+            host: Rc::new(TestHost),
+            sink: Rc::new(crate::sink::NullSink),
+            width: 80,
+            pane: 0,
+            run_id: 0,
+        };
         let out = parse(src);
         assert!(out.errors.is_empty(), "{:?}", out.errors);
         let (mut results, error) = block_on(eval_line(&out.line, &registry, &ctx, &Scope::new()));
@@ -702,7 +707,13 @@ mod tests {
     fn eval_any(src: &str) -> Result<Value, ShellError> {
         let mut registry = CommandRegistry::new();
         register_all(&mut registry);
-        let ctx = ExecContext { host: Rc::new(TestHost), width: 80, pane: 0, run_id: 0 };
+        let ctx = ExecContext {
+            host: Rc::new(TestHost),
+            sink: Rc::new(crate::sink::NullSink),
+            width: 80,
+            pane: 0,
+            run_id: 0,
+        };
         let out = parse(src);
         if let Some(e) = out.errors.into_iter().next() {
             return Err(e);
@@ -872,10 +883,32 @@ mod tests {
             flags: std::collections::HashMap::new(),
             closures: std::collections::HashMap::new(),
         };
-        let ctx = ExecContext { host: Rc::new(TestHost), width: 80, pane: 0, run_id: 0 };
+        let ctx = ExecContext {
+            host: Rc::new(TestHost),
+            sink: Rc::new(crate::sink::NullSink),
+            width: 80,
+            pane: 0,
+            run_id: 0,
+        };
         let err = to_json(ctx, call, PipelineData::Value(Value::Float(f64::NAN)))
             .expect_err("NaN must not serialize");
         assert!(err.msg.contains("NaN"));
+    }
+
+    #[test]
+    fn a_command_writes_diagnostics_to_the_context_sink() {
+        let sink = Rc::new(crate::sink::CollectingSink::new());
+        let ctx = ExecContext {
+            host: Rc::new(TestHost),
+            sink: sink.clone(),
+            width: 80,
+            pane: 0,
+            run_id: 0,
+        };
+        ctx.sink.write(crate::sink::Record::Log("hello".into()));
+        ctx.sink.write(crate::sink::Record::Err("bad".into()));
+        assert_eq!(sink.log_lines(), vec!["hello"]);
+        assert_eq!(sink.err_lines(), vec!["bad"]);
     }
 
     #[test]

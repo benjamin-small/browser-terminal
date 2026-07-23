@@ -8,6 +8,7 @@ use crate::convert::{js_to_value, value_to_js};
 use bterm_core::error::Span;
 use bterm_core::registry::{Command, ExecContext, LocalBoxFuture, PipelineData};
 use bterm_core::signature::{BoundCall, Signature};
+use bterm_core::sink::Record;
 use bterm_core::ShellError;
 use wasm_bindgen::closure::Closure;
 use wasm_bindgen::JsValue;
@@ -51,11 +52,11 @@ impl Command for JsCommand {
             if let Some(signal) = crate::tasks::signal_for(ctx.run_id) {
                 let _ = js_sys::Reflect::set(&ctx_obj, &JsValue::from_str("signal"), &signal);
             }
-            let host = ctx.host.clone();
+            let sink = ctx.sink.clone();
             // Valid for the duration of the call; a TS command that stashes
             // `emit` and calls it after completing gets a JS error.
             let emit = Closure::<dyn Fn(String)>::new(move |line: String| {
-                host.emit_line(&line);
+                sink.write(Record::Log(line));
             });
             let _ = js_sys::Reflect::set(&ctx_obj, &JsValue::from_str("emit"), emit.as_ref());
 
