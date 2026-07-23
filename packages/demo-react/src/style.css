@@ -139,3 +139,15 @@ details.code code { font-size: 12.5px; line-height: 1.55; white-space: pre; }
 details.code .c { color: #6c7086; font-style: normal; }
 details.code .s { color: #a6e3a1; font-style: normal; }
 details.code .k { color: #cba6f7; font-style: normal; }
+
+/* The deliberately-broken example, marked so it can't be mistaken for
+   something to copy. */
+details.code.bad {
+  border-color: #6b2a35;
+}
+details.code.bad > summary {
+  color: #f38ba8;
+  background: #26141a;
+}
+details.code.bad > summary:hover { background: #331a21; }
+details.code.bad pre { border-top-color: #6b2a35; }

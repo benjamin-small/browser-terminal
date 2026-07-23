@@ -19,9 +19,19 @@ const SEED: Task[] = [
   { id: 3, title: 'compare with Svelte', done: false, priority: 1 },
 ];
 
-function CodeBlock({ title, source, name }: { title: string; source: string; name: string }) {
+function CodeBlock({
+  title,
+  source,
+  name,
+  tone,
+}: {
+  title: string;
+  source: string;
+  name: string;
+  tone?: 'bad';
+}) {
   return (
-    <details className="code" open>
+    <details className={tone === 'bad' ? 'code bad' : 'code'} open>
       <summary>{title}</summary>
       <pre>
         <code dangerouslySetInnerHTML={{ __html: highlight(region(source, name)) }} />
@@ -108,9 +118,17 @@ export function App() {
     },
   );
 
-  // Deliberately WRONG, kept as a teaching aid: registered once with the
-  // closure captured at mount, so it always reports the seed list no matter
-  // what you add. Compare `tasks` with `tasks-stale` after adding one.
+  // #region stale
+  // BROKEN ON PURPOSE — this is the mistake `useCommand` exists to prevent.
+  //
+  // The command is registered once, so it captures `tasks` from the render
+  // that registered it and reports that forever. Adding a task updates the
+  // component but not this closure.
+  //
+  // Note the eslint-disable: react-hooks/exhaustive-deps *does* catch this,
+  // and we had to silence it to keep the bug. Listening to the linter and
+  // adding `tasks` to the deps fixes the staleness but re-registers on every
+  // render — which is why the hook keeps a ref instead.
   useEffect(() => {
     if (!bt) return;
     bt.registerCommand(
@@ -120,6 +138,7 @@ export function App() {
     return () => bt.unregisterCommand('tasks-stale');
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [bt]); // <- no `tasks` dep: this is the bug being demonstrated
+  // #endregion
 
   const remaining = tasks.filter((t) => !t.done).length;
 
@@ -163,6 +182,12 @@ tasks-stale        # broken on purpose — still shows the seed list`}
         transcription.
       </p>
       <CodeBlock title="Registering commands over useState" source={appSource} name="commands" />
+      <CodeBlock
+        title="✗ The trap: registering the naive way (this is tasks-stale)"
+        source={appSource}
+        name="stale"
+        tone="bad"
+      />
       <CodeBlock title="The useCommand hook (latest-ref pattern)" source={hookSource} name="hook" />
 
       <p className="note">
