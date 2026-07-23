@@ -20,6 +20,7 @@ pub mod protocol;
 pub mod registry;
 pub mod render;
 pub mod signature;
+pub mod sink;
 pub mod value;
 
 pub use error::{ErrorKind, ShellError, Span};
