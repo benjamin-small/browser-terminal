@@ -66,8 +66,12 @@ fn strip_escapes(s: &str, keep_lines: bool) -> String {
                         }
                     }
                 }
-                // OSC: ESC ] … terminated by BEL or ST (ESC \)
-                Some(']') => {
+                // String-type escapes — OSC (`]`), DCS (`P`), APC (`_`), PM
+                // (`^`), SOS (`X`) — all take an arbitrary-length body
+                // terminated by BEL or ST (ESC \). Swallow the whole body:
+                // leaving it behind (e.g. a Sixel DCS payload) is just as
+                // much visible litter as leaving an escape's params would be.
+                Some(']') | Some('P') | Some('_') | Some('^') | Some('X') => {
                     chars.next();
                     while let Some(c2) = chars.next() {
                         if c2 == '\x07' {
@@ -111,6 +115,12 @@ fn cell_text(s: &str) -> String {
 }
 
 /// Display text for an untrusted diagnostic line (`ctx.log` / `ctx.err`).
+///
+/// Unicode bidi/formatting characters (e.g. U+202E RIGHT-TO-LEFT OVERRIDE)
+/// are deliberately left in place: `char::is_control()` doesn't catch them,
+/// and stripping them would corrupt legitimate Arabic/Hebrew text, which is
+/// a worse failure than the Trojan-Source-style visual reordering a hostile
+/// string could otherwise cause here.
 ///
 /// Single-line and escape-free: a command's diagnostic is page-controlled
 /// text, so it must not be able to move the cursor, clear the screen, or
@@ -384,6 +394,16 @@ mod tests {
         let v = Value::Str("a\x1b]0;pwned\x07b\x1bcc".into());
         let out = strip_ansi(&render(&v, 80));
         assert_eq!(out, "abc\n", "got {out:?}");
+    }
+
+    #[test]
+    fn dcs_apc_pm_sos_bodies_are_fully_dropped() {
+        // These string-type escapes take an arbitrary-length body (e.g. a
+        // Sixel image in a DCS). The old generic two-char-escape branch only
+        // ate the introducer, leaving the payload as visible garbage.
+        let v = Value::Str("a\x1bPsixel-junk\x1b\\b\x1b_apc-junk\x07c\x1b^pm-junk\x1b\\d\x1bXsos-junk\x1b\\e".into());
+        let out = strip_ansi(&render(&v, 80));
+        assert_eq!(out, "abcde\n", "got {out:?}");
     }
 
     #[test]

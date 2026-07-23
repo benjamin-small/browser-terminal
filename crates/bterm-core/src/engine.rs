@@ -456,6 +456,11 @@ impl<A: EngineAccess> crate::sink::Sink for PaneSink<A> {
             crate::sink::Record::Err(_) => format!("{RED}{clean}{RESET}\n"),
         };
         self.access.with(|e| e.emit_output(self.pane, &line));
+        // Flush after the borrow closes, never inside `with` — flushing may
+        // invoke the JS callback, and no JS call may happen while an engine
+        // borrow is held. Without this, a command's ctx.emit calls all sit
+        // queued and invisible until the whole pipeline resolves.
+        self.access.events_ready();
     }
 }
 
@@ -584,7 +589,7 @@ mod tests {
     use crate::registry::{Command, LocalBoxFuture, PipelineData};
     use crate::signature::{BoundCall, Signature};
     use crate::sink::{Record, Sink};
-    use std::cell::RefCell;
+    use std::cell::{Cell, RefCell};
 
     fn engine() -> Rc<RefCell<Engine>> {
         Rc::new(RefCell::new(Engine::new()))
@@ -797,6 +802,44 @@ mod tests {
         assert!(out.contains("bad thing"));
         // ...and our styling is applied around the sanitized text.
         assert!(out.contains("\x1b[31m"), "err not styled: {out:?}");
+    }
+
+    /// An `EngineAccess` that delegates to a real engine but counts
+    /// `events_ready` calls, so a flush-timing bug (queued but never
+    /// flushed) is visible to a test. The plain `Rc<RefCell<Engine>>`
+    /// impl's `events_ready` is a documented no-op and cannot catch this.
+    #[derive(Clone)]
+    struct CountingAccess {
+        inner: Rc<RefCell<Engine>>,
+        flushes: Rc<Cell<usize>>,
+    }
+
+    impl CountingAccess {
+        fn new() -> Self {
+            CountingAccess { inner: Rc::new(RefCell::new(Engine::new())), flushes: Rc::new(Cell::new(0)) }
+        }
+    }
+
+    impl EngineAccess for CountingAccess {
+        fn with<R>(&self, f: impl FnOnce(&mut Engine) -> R) -> R {
+            f(&mut self.inner.borrow_mut())
+        }
+
+        fn events_ready(&self) {
+            self.flushes.set(self.flushes.get() + 1);
+        }
+    }
+
+    #[test]
+    fn pane_sink_flushes_after_every_write() {
+        let access = CountingAccess::new();
+        let pane = access.with(|e| e.mux.active_pane());
+        let sink = PaneSink { access: access.clone(), pane };
+
+        sink.write(Record::Log("one".into()));
+        assert_eq!(access.flushes.get(), 1, "write should flush immediately");
+        sink.write(Record::Err("two".into()));
+        assert_eq!(access.flushes.get(), 2, "each write should flush, not just the last");
     }
 
     /// Writes to both diagnostic channels so the wiring from `execute_line`
