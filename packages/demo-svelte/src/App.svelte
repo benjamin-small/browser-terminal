@@ -1,5 +1,6 @@
 <script lang="ts">
   import { store } from './tasks.svelte';
+  import { helpPages } from './help.svelte';
   import { highlight, region } from './code';
   // Real source, extracted at build time — the example can't drift.
   import commandsSource from './commands.ts?raw';
@@ -35,7 +36,9 @@
   <p class="count">{remaining} remaining / {store.tasks.length} total</p>
 
   <h2>Try</h2>
-  <pre>{`task add 'ship it' --priority 3
+  <pre>{`task add --help    # every command gets this for free
+task add 'ship it' --priority 3
+task add 'already did this' --done
 tasks | filter {|t| !$t.done}
 tasks | sort-by priority --reverse | head 2
 tasks | map @slug
@@ -46,6 +49,20 @@ task done 2`}</pre>
     <details class="code" open>
       <summary>{title}</summary>
       <pre><code>{@html highlight(region(source, name))}</code></pre>
+    </details>
+  {/each}
+
+  <h2>What that buys you</h2>
+  <p class="sub">
+    No command registers a <code>--help</code> flag. The evaluator intercepts it
+    before argument binding and renders the signature, so these pages come from
+    the <code>summary</code> and <code>desc</code> strings above — printed by the
+    live engine on this page, not pasted in.
+  </p>
+  {#each helpPages as page (page.command)}
+    <details class="code help" open>
+      <summary>{page.command} --help</summary>
+      <pre><code>{@html page.html}</code></pre>
     </details>
   {/each}
 
@@ -189,6 +206,14 @@ task done 2`}</pre>
     color: #cdd6f4;
   }
   details.code code { font-size: 12.5px; line-height: 1.55; white-space: pre; }
+  /* The engine's own SGR codes, as emitted by the help renderer. */
+  details.help :global(.hb) { font-weight: 600; font-style: normal; }
+  details.help :global(.hd) { color: #6c7086; font-style: normal; }
+  details.help :global(.hc) { color: #89dceb; font-style: normal; }
+  details.help > summary {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    color: #a6e3a1;
+  }
   details.code :global(.c) { color: #6c7086; font-style: normal; }
   details.code :global(.s) { color: #a6e3a1; font-style: normal; }
   details.code :global(.k) { color: #cba6f7; font-style: normal; }

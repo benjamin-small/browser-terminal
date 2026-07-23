@@ -140,6 +140,15 @@ details.code .c { color: #6c7086; font-style: normal; }
 details.code .s { color: #a6e3a1; font-style: normal; }
 details.code .k { color: #cba6f7; font-style: normal; }
 
+/* The engine's own SGR codes, as emitted by the help renderer. */
+details.help .hb { font-weight: 600; font-style: normal; }
+details.help .hd { color: #6c7086; font-style: normal; }
+details.help .hc { color: #89dceb; font-style: normal; }
+details.help > summary {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--accent);
+}
+
 /* The deliberately-broken example, marked so it can't be mistaken for
    something to copy. */
 details.code.bad {

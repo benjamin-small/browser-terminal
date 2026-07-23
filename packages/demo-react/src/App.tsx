@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { BrowserTerminal } from 'browser-terminal';
 import { useCommand } from './useTerminal';
-import { highlight, region } from './code';
+import { ansiToHtml, highlight, region } from './code';
 // Shown on the page verbatim, so the example can't drift from the code.
 import hookSource from './useTerminal.ts?raw';
 import appSource from './App.tsx?raw';
@@ -12,6 +12,9 @@ export interface Task {
   done: boolean;
   priority: number;
 }
+
+/** Commands whose generated help is shown at the bottom of the page. */
+const HELP_FOR = ['task add', 'task done'];
 
 const SEED: Task[] = [
   { id: 1, title: 'wire up the terminal', done: true, priority: 2 },
@@ -72,21 +75,29 @@ export function App() {
   // `tasks` reads live component state; `task add` writes it. The hook keeps
   // a ref to the latest closure, so these always see current state without
   // re-registering on every render.
-  useCommand(bt, { name: 'tasks', summary: 'The current task list' }, () => tasks);
+  //
+  // The `summary` and `desc` strings are the command's documentation:
+  // `task add --help` renders them. Nothing registers `--help` — the
+  // evaluator intercepts it before binding, so the help page is whatever
+  // this signature says.
+  useCommand(bt, { name: 'tasks', summary: 'Show the current task list' }, () => tasks);
 
   useCommand(
     bt,
     {
       name: 'task add',
-      summary: 'Add a task',
-      required: [{ name: 'title', shape: 'str' }],
-      flags: [{ long: 'priority', short: 'p', shape: 'int', desc: '1-3' }],
+      summary: 'Add a task to the list',
+      required: [{ name: 'title', shape: 'str', desc: 'what needs doing' }],
+      flags: [
+        { long: 'priority', short: 'p', shape: 'int', desc: 'urgency, 1 (low) to 3 (high)' },
+        { long: 'done', short: 'd', desc: 'add it already checked off' },
+      ],
     },
     ({ positionals, flags }) => {
       const task: Task = {
         id: nextId.current++,
         title: String(positionals[0]),
-        done: false,
+        done: Boolean(flags.done),
         priority: Number(flags.priority ?? 1),
       };
       setTasks((t) => [...t, task]);
@@ -97,7 +108,11 @@ export function App() {
 
   useCommand(
     bt,
-    { name: 'task done', summary: 'Toggle a task', required: [{ name: 'id', shape: 'int' }] },
+    {
+      name: 'task done',
+      summary: 'Check a task off (or back on)',
+      required: [{ name: 'id', shape: 'int', desc: 'the id shown in the # column' }],
+    },
     ({ positionals }) => {
       const id = Number(positionals[0]);
       if (!tasks.some((t) => t.id === id)) {
@@ -110,7 +125,11 @@ export function App() {
 
   useCommand(
     bt,
-    { name: 'task rm', summary: 'Remove a task', required: [{ name: 'id', shape: 'int' }] },
+    {
+      name: 'task rm',
+      summary: 'Remove a task from the list',
+      required: [{ name: 'id', shape: 'int', desc: 'the id shown in the # column' }],
+    },
     ({ positionals }) => {
       const id = Number(positionals[0]);
       setTasks((t) => t.filter((x) => x.id !== id));
@@ -138,6 +157,27 @@ export function App() {
     return () => bt.unregisterCommand('tasks-stale');
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [bt]); // <- no `tasks` dep: this is the bug being demonstrated
+  // #endregion
+
+  // #region help
+  // Nothing here registers `--help`. Asking the engine for it — rather than
+  // pasting the output into the page — means what a visitor reads is
+  // generated from the signatures above and can't drift from them.
+  //
+  // This effect is declared *after* the useCommand calls on purpose: effects
+  // in one component run in declaration order, so the commands exist by the
+  // time we ask them to describe themselves.
+  const [help, setHelp] = useState<string[]>([]);
+  useEffect(() => {
+    if (!bt) return;
+    let live = true;
+    Promise.all(HELP_FOR.map((c) => bt.run(`${c} --help`))).then((texts) => {
+      if (live) setHelp(texts.map((t) => ansiToHtml(String(t).trimEnd())));
+    });
+    return () => {
+      live = false;
+    };
+  }, [bt]);
   // #endregion
 
   const remaining = tasks.filter((t) => !t.done).length;
@@ -168,7 +208,9 @@ export function App() {
 
       <h2>Try</h2>
       <pre>
-{`task add 'ship it' --priority 3
+{`task add --help    # every command gets this for free
+task add 'ship it' --priority 3
+task add 'already did this' --done
 tasks | filter {|t| !$t.done}
 tasks | sort-by priority --reverse | head 2
 tasks | filter {|t| $t.priority > 1} | map {|t| $t.title}
@@ -189,6 +231,23 @@ tasks-stale        # broken on purpose — still shows the seed list`}
         tone="bad"
       />
       <CodeBlock title="The useCommand hook (latest-ref pattern)" source={hookSource} name="hook" />
+
+      <h2>What that buys you</h2>
+      <p className="sub">
+        No command registers a <code>--help</code> flag. The evaluator intercepts
+        it before argument binding and renders the signature, so these pages come
+        from the <code>summary</code> and <code>desc</code> strings above —
+        printed by the live engine on this page, not pasted in.
+      </p>
+      {help.map((html, i) => (
+        <details className="code help" open key={HELP_FOR[i]}>
+          <summary>{HELP_FOR[i]} --help</summary>
+          <pre>
+            <code dangerouslySetInnerHTML={{ __html: html }} />
+          </pre>
+        </details>
+      ))}
+      <CodeBlock title="Asking the engine for its own help text" source={appSource} name="help" />
 
       <p className="note">
         <code>tasks</code> uses the <code>useCommand</code> latest-ref hook, so it always

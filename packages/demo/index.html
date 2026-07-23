@@ -131,6 +131,14 @@
       details.code .c { color: #6c7086; font-style: normal; }
       details.code .s { color: #a6e3a1; font-style: normal; }
       details.code .k { color: #cba6f7; font-style: normal; }
+      /* The engine's own SGR codes, as emitted by the help renderer. */
+      details.help .hb { font-weight: 600; font-style: normal; }
+      details.help .hd { color: #6c7086; font-style: normal; }
+      details.help .hc { color: #89dceb; font-style: normal; }
+      details.help > summary {
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        color: var(--accent);
+      }
     </style>
   </head>
   <body>
@@ -150,17 +158,20 @@
         <li><a href="https://github.com/tmux/tmux">tmux</a><span class="host">github.com</span></li>
         <li class="blank"><a href="https://example.com/"></a><span class="host">example.com</span></li>
       </ul>
-      <p class="count">6 links on this page / 1 with no text</p>
+      <p class="count">6 links here / 2 more in the intro / 1 with no text</p>
 
-      <h2>Try</h2>
+      <h2 id="try">Try</h2>
       <pre>
-links
+links --help       # every command gets this for free
+links rust         # the optional positional
+links --internal   # a switch
 links | filter {|o| $o.text != ''} | head 5
 links | map @host
 links | grep rust --on href
 links | sort-by text | head 3
 slow 5             # then Ctrl-C to abort it
-fail               # rich errors from TypeScript</pre>
+fail               # rich errors from TypeScript
+help               # every command, builtin and registered</pre>
 
       <h2>How it's implemented</h2>
       <p class="sub">
@@ -168,10 +179,21 @@ fail               # rich errors from TypeScript</pre>
       </p>
       <div id="source"></div>
 
+      <h2 id="help">What that buys you</h2>
+      <p class="sub">
+        No command registers a <code>--help</code> flag. The evaluator intercepts
+        it before argument binding and renders the signature, so the pages below
+        are generated from the <code>summary</code> and <code>desc</code> strings
+        in the code above — printed by the live engine on this page, not pasted in.
+      </p>
+      <div id="help-panels"></div>
+
       <p class="note">
         The same commands work in React and Svelte; those demos show how to reach
         component state from a command. Here there is no state to reach — the DOM
-        is the state.
+        is the state. This sentence holds the page's only same-origin links —
+        <a href="#try">jump to Try</a> and <a href="#help">jump to help</a> —
+        which is what <code>links --internal</code> narrows to.
       </p>
     </main>
 

@@ -12,21 +12,34 @@ export function registerTaskCommands(bt: BrowserTerminal): void {
   // #region commands
   // No hooks, refs, or cleanup: `store` is a module-level rune, so these
   // closures stay correct for the life of the page.
-  bt.registerCommand({ name: 'tasks', summary: 'The current task list' }, () => store.tasks);
+  //
+  // The `summary` and `desc` strings are the command's documentation:
+  // `task add --help` renders them. Nothing registers `--help` — the
+  // evaluator intercepts it before binding, so the help page is whatever
+  // this signature says.
+  bt.registerCommand({ name: 'tasks', summary: 'Show the current task list' }, () => store.tasks);
 
   bt.registerCommand(
     {
       name: 'task add',
-      summary: 'Add a task',
-      required: [{ name: 'title', shape: 'str' }],
-      flags: [{ long: 'priority', short: 'p', shape: 'int', desc: '1-3' }],
+      summary: 'Add a task to the list',
+      required: [{ name: 'title', shape: 'str', desc: 'what needs doing' }],
+      flags: [
+        { long: 'priority', short: 'p', shape: 'int', desc: 'urgency, 1 (low) to 3 (high)' },
+        { long: 'done', short: 'd', desc: 'add it already checked off' },
+      ],
     },
-    ({ positionals, flags }) => addTask(String(positionals[0]), Number(flags.priority ?? 1)),
+    ({ positionals, flags }) =>
+      addTask(String(positionals[0]), Number(flags.priority ?? 1), Boolean(flags.done)),
   );
   // #endregion
 
   bt.registerCommand(
-    { name: 'task done', summary: 'Toggle a task', required: [{ name: 'id', shape: 'int' }] },
+    {
+      name: 'task done',
+      summary: 'Check a task off (or back on)',
+      required: [{ name: 'id', shape: 'int', desc: 'the id shown in the # column' }],
+    },
     ({ positionals }) => {
       const id = Number(positionals[0]);
       if (!hasTask(id)) {
@@ -38,7 +51,11 @@ export function registerTaskCommands(bt: BrowserTerminal): void {
   );
 
   bt.registerCommand(
-    { name: 'task rm', summary: 'Remove a task', required: [{ name: 'id', shape: 'int' }] },
+    {
+      name: 'task rm',
+      summary: 'Remove a task from the list',
+      required: [{ name: 'id', shape: 'int', desc: 'the id shown in the # column' }],
+    },
     ({ positionals }) => {
       removeTask(Number(positionals[0]));
       return null;

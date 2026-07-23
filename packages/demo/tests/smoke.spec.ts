@@ -33,7 +33,8 @@ test('flagship pipeline: TS command → structured pipes → typed result', asyn
   const count = await page.evaluate(() =>
     window.bt.run("links --limit 20 | filter {|o| $o.text != ''} | length"),
   );
-  expect(count).toBe(5);
+  // The demo page is the fixture: 8 anchors, one of them with no text.
+  expect(count).toBe(7);
 
   const rows = (await page.evaluate(() =>
     window.bt.run("links | filter {|o| $o.text != ''} | head 2"),
@@ -52,7 +53,7 @@ test('grep filters with real regex and fails cleanly on bad patterns', async ({ 
   expect(await page.evaluate(() => window.bt.run("links | grep '^Rust' | length"))).toBe(1);
   expect(await page.evaluate(() => window.bt.run("links | grep 'rust|xterm' -i | length"))).toBe(2);
   expect(await page.evaluate(() => window.bt.run("links | grep org --on href | length"))).toBe(3);
-  expect(await page.evaluate(() => window.bt.run("links | grep '^Rust' -v | length"))).toBe(5);
+  expect(await page.evaluate(() => window.bt.run("links | grep '^Rust' -v | length"))).toBe(7);
 
   const err = await page.evaluate(() =>
     window.bt.run("links | grep '('").then(
@@ -74,7 +75,7 @@ test('selectors: inline functions, @named, and --on', async ({ page }) => {
     await page.evaluate(() =>
       window.bt.run("links | filter '(o) => o.text.length > 4' | length"),
     ),
-  ).toBe(4);
+  ).toBe(6);
   expect(
     await page.evaluate(() => window.bt.run("links | map '(o) => o.text' | head")),
   ).toBe('Rust language');
@@ -97,6 +98,31 @@ test('selectors: inline functions, @named, and --on', async ({ page }) => {
     ),
   );
   expect(err).toContain('did you mean `@host`');
+});
+
+test('--help is generated from the signature, and the page shows the real thing', async ({
+  page,
+}) => {
+  await page.goto('/');
+  await waitForTerminal(page);
+
+  // Nothing declares a `--help` flag; the evaluator intercepts it before
+  // binding, so the text can only have come from the registered signature.
+  const help = (await page.evaluate(() => window.bt.run('links --help'))) as string;
+  expect(help).toContain('Usage:');
+  // The command name is colored, so only the arg part is a contiguous run.
+  expect(help).toContain('[pattern] [flags]');
+  expect(help).toContain('stop after this many links');
+
+  // A command with no flags still gets a usage line rather than an error.
+  expect(await page.evaluate(() => window.bt.run('fail --help'))).toContain('Usage:');
+
+  // And the panels on the page are that same output, not a transcription.
+  const panels = page.locator('#help-panels details');
+  await expect(panels).toHaveCount(2);
+  await expect(panels.first()).toContainText('stop after this many links');
+  // The ANSI must have been converted, not printed raw.
+  await expect(panels.first()).not.toContainText('[1m');
 });
 
 test('prefix chord splits the pane', async ({ page }) => {

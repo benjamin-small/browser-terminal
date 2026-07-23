@@ -1,5 +1,5 @@
 import { BrowserTerminal } from 'browser-terminal';
-import { codePanel } from './code';
+import { codePanel, helpPanel } from './code';
 // The panel below shows this very file — `?raw` guarantees the example on
 // the page is the code that actually ran.
 import selfSource from './main.ts?raw';
@@ -21,16 +21,30 @@ async function main(): Promise<void> {
   // A page-DOM command in a few lines. Whatever you return is converted to
   // a structured value, so an array of objects renders as a table and can be
   // piped into `filter`, `sort-by`, `grep`, and friends.
+  //
+  // Everything below the function is documentation: `summary` and each
+  // `desc` are what `links --help` prints. You never register `--help` —
+  // the evaluator intercepts it before binding and renders the signature,
+  // so the only way to have a badly documented command is to leave these
+  // strings out.
   bt.registerCommand(
     {
       name: 'links',
-      summary: 'List links on the host page',
-      flags: [{ long: 'limit', short: 'l', shape: 'int', desc: 'max links' }],
+      summary: 'List the links on the host page as a table',
+      optional: [{ name: 'pattern', shape: 'str', desc: 'only links whose text contains this' }],
+      flags: [
+        { long: 'limit', short: 'l', shape: 'int', desc: 'stop after this many links (default 100)' },
+        { long: 'internal', short: 'i', desc: 'only links pointing at this origin' },
+      ],
     },
-    ({ flags }) =>
-      [...document.querySelectorAll('a')]
-        .slice(0, Number(flags.limit ?? 100))
-        .map((a) => ({ text: a.textContent?.trim() ?? '', href: a.href })),
+    ({ positionals, flags }) => {
+      const pattern = String(positionals[0] ?? '').toLowerCase();
+      return [...document.querySelectorAll('a')]
+        .map((a) => ({ text: a.textContent?.trim() ?? '', href: a.href }))
+        .filter((l) => !pattern || l.text.toLowerCase().includes(pattern))
+        .filter((l) => !flags.internal || l.href.startsWith(location.origin))
+        .slice(0, Number(flags.limit ?? 100));
+    },
   );
   // #endregion
 
@@ -41,8 +55,8 @@ async function main(): Promise<void> {
   bt.registerCommand(
     {
       name: 'slow',
-      summary: 'Counts for n seconds (Ctrl-C to abort)',
-      optional: [{ name: 'seconds', shape: 'int', desc: 'how long' }],
+      summary: 'Count once a second, printing as it goes (Ctrl-C to abort)',
+      optional: [{ name: 'seconds', shape: 'int', desc: 'how long to count for (default 5)' }],
     },
     async ({ positionals }, _input, { signal, emit }) => {
       const seconds = Number(positionals[0] ?? 5);
@@ -89,6 +103,14 @@ async function main(): Promise<void> {
     codePanel('Registering a command over the page DOM', selfSource, 'links'),
     codePanel('An async, cancellable command (slow)', selfSource, 'slow'),
     codePanel('A named selector function (@host)', selfSource, 'selector'),
+  );
+
+  // …and what that signature produces. Asking the engine rather than pasting
+  // the output means this panel cannot disagree with the code above it.
+  const help = document.getElementById('help-panels');
+  help?.append(
+    helpPanel('links --help', String(await bt.run('links --help'))),
+    helpPanel('slow --help', String(await bt.run('slow --help'))),
   );
 
   // Expose for programmatic-run experiments in the console.

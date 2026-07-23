@@ -29,17 +29,49 @@ export function region(source: string, name: string): string {
 const KEYWORDS =
   /\b(?:const|let|var|function|return|await|async|import|export|from|type|interface|new|if|else|throw|class)\b/;
 
+const escapeHtml = (s: string): string =>
+  s.replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' })[c] as string);
+
+/** The SGR codes the engine's help renderer actually emits. */
+const SGR: Record<string, string> = { '1': 'hb', '2': 'hd', '36': 'hc' };
+
+/**
+ * Render the engine's own ANSI output as HTML.
+ *
+ * Used to put real `--help` text on the page: it's produced by asking the
+ * live engine, so it reflects the signature that was actually registered
+ * rather than a screenshot that goes stale the moment a flag is added.
+ */
+export function ansiToHtml(text: string): string {
+  // Odd indices are the captured code lists, even indices the literal runs.
+  const parts = text.split(/\u001b\[([0-9;]*)m/);
+  let out = '';
+  let open = 0;
+  parts.forEach((part, i) => {
+    if (i % 2 === 0) {
+      out += escapeHtml(part);
+      return;
+    }
+    for (const code of part.split(';')) {
+      if (code === '0' || code === '') {
+        out += '</i>'.repeat(open);
+        open = 0;
+      } else if (SGR[code]) {
+        out += `<i class="${SGR[code]}">`;
+        open++;
+      }
+    }
+  });
+  return out + '</i>'.repeat(open);
+}
+
 /**
  * Minimal highlighter: comments, strings, keywords. One pass with an
  * alternation so precedence is correct — a `//` inside a string stays part
  * of the string, and keywords inside comments aren't re-marked.
  */
 export function highlight(code: string): string {
-  const escaped = code.replace(
-    /[&<>]/g,
-    (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' })[c] as string,
-  );
-  return escaped.replace(
+  return escapeHtml(code).replace(
     new RegExp(`(//[^\\n]*)|('[^'\\n]*'|"[^"\\n]*"|\`[^\`]*\`)|(${KEYWORDS.source})`, 'g'),
     (m, comment, str) =>
       comment ? `<i class="c">${m}</i>` : str ? `<i class="s">${m}</i>` : `<i class="k">${m}</i>`,
@@ -48,14 +80,29 @@ export function highlight(code: string): string {
 
 /** Build a labelled, highlighted code panel. */
 export function codePanel(title: string, source: string, name: string): HTMLElement {
+  return panel(title, 'code', highlight(region(source, name)));
+}
+
+/**
+ * Show what `<command> --help` prints, asked of the live engine.
+ *
+ * Nothing registers `--help`: the evaluator intercepts it before binding and
+ * renders the signature, so the page below is generated from the same
+ * metadata the command was declared with.
+ */
+export function helpPanel(title: string, ansi: string): HTMLElement {
+  return panel(title, 'code help', ansiToHtml(ansi.trimEnd()));
+}
+
+function panel(title: string, className: string, html: string): HTMLElement {
   const wrap = document.createElement('details');
   wrap.open = true;
-  wrap.className = 'code';
+  wrap.className = className;
   const summary = document.createElement('summary');
   summary.textContent = title;
   const pre = document.createElement('pre');
   const codeEl = document.createElement('code');
-  codeEl.innerHTML = highlight(region(source, name));
+  codeEl.innerHTML = html;
   pre.appendChild(codeEl);
   wrap.append(summary, pre);
   return wrap;

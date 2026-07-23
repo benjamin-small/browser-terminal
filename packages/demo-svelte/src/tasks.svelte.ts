@@ -31,8 +31,8 @@ export const store = $state({
   nextId: SEED.length + 1,
 });
 
-export function addTask(title: string, priority: number): Task {
-  const task: Task = { id: store.nextId++, title, done: false, priority };
+export function addTask(title: string, priority: number, done = false): Task {
+  const task: Task = { id: store.nextId++, title, done, priority };
   store.tasks = [...store.tasks, task];
   return task;
 }
