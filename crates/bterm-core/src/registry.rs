@@ -213,6 +213,33 @@ impl CommandRegistry {
         None
     }
 
+    /// Registered commands whose name starts with `prefix` plus a space,
+    /// as (full name, summary), sorted. Empty when `prefix` names no group.
+    pub fn subcommands(&self, prefix: &str) -> Vec<(String, String)> {
+        let head = format!("{prefix} ");
+        let mut subs: Vec<(String, String)> = self
+            .map
+            .iter()
+            .filter(|(name, _)| name.starts_with(&head))
+            .map(|(name, e)| (name.clone(), e.command.signature().summary.clone()))
+            .collect();
+        subs.sort();
+        subs
+    }
+
+    /// Rendered help when `words` names a group rather than a command —
+    /// what `task`, `mux --help`, and `mux window` print.
+    ///
+    /// Requires the *whole* head to be the group: `task nope` is a typo to
+    /// diagnose, not a reason to dump the group page. Only consulted after
+    /// `lookup` fails, so a group that later gains a command of its own name
+    /// keeps working — the command wins.
+    pub fn group_help(&self, words: &[String]) -> Option<String> {
+        let prefix = words.join(" ");
+        let subs = self.subcommands(&prefix);
+        (!subs.is_empty()).then(|| crate::signature::render_group_help(&prefix, &subs))
+    }
+
     pub fn names(&self) -> Vec<String> {
         let mut names: Vec<String> = self.map.keys().cloned().collect();
         names.sort();
@@ -226,6 +253,36 @@ impl CommandRegistry {
     /// Unknown-command diagnostic. Tries did-you-mean against multi-word
     /// prefixes first so `str upcsae` suggests `str upcase`, not nothing.
     pub fn unknown_command_error(&self, words: &[crate::ast::Spanned<String>]) -> ShellError {
+        // A known group with an unknown word after it is a wrong-subcommand
+        // mistake. Diagnosing it against its siblings beats the global
+        // did-you-mean, which used to answer `task lst` with something from
+        // the other end of the registry.
+        if words.len() >= 2 {
+            for take in (1..words.len()).rev() {
+                let group: Vec<&str> = words[..take].iter().map(|w| w.node.as_str()).collect();
+                let group = group.join(" ");
+                let subs = self.subcommands(&group);
+                if subs.is_empty() {
+                    continue;
+                }
+                let attempted = &words[take];
+                let err = ShellError::new(
+                    ErrorKind::UnknownCommand,
+                    format!("`{group}` has no subcommand `{}`", attempted.node),
+                )
+                .with_span(words[0].span.merge(attempted.span));
+                // Suggest by the subcommand's own last word, not its full name.
+                let tails: Vec<&str> = subs
+                    .iter()
+                    .map(|(n, _)| n[group.len() + 1..].split(' ').next().unwrap_or(""))
+                    .collect();
+                return match did_you_mean(&attempted.node, tails.iter().copied()) {
+                    Some(s) => err.with_help(format!("did you mean `{group} {s}`?")),
+                    None => err.with_help(format!("run `{group}` to list its subcommands")),
+                };
+            }
+        }
+
         let max_k = words.len().min(3);
         for take in (1..=max_k).rev() {
             let target = words[..take]

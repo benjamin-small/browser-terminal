@@ -55,8 +55,8 @@ await new Promise((r) => server.listen(PORT, r));
 
 const DEMOS = [
   { name: 'vanilla', probe: "links | filter {|o| $o.text != ''} | length" },
-  { name: 'react', probe: 'tasks | length' },
-  { name: 'svelte', probe: 'tasks | length' },
+  { name: 'react', probe: 'task list | length' },
+  { name: 'svelte', probe: 'task list | length' },
 ];
 
 const browser = await chromium.launch();

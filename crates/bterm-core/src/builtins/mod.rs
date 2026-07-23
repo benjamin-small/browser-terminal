@@ -880,8 +880,10 @@ mod tests {
 
     #[test]
     fn subcommand_typo_gets_did_you_mean() {
+        // Since `str` resolves as a group, the diagnostic can name it rather
+        // than reporting the whole phrase as one unknown command.
         let err = eval("str upcsae hi").expect_err("typo");
-        assert!(err.msg.contains("unknown command `str upcsae`"), "{}", err.msg);
+        assert!(err.msg.contains("`str` has no subcommand `upcsae`"), "{}", err.msg);
         assert_eq!(err.help.as_deref(), Some("did you mean `str upcase`?"));
     }
 
@@ -1090,6 +1092,42 @@ mod tests {
     fn malformed_closures_report_clearly() {
         assert!(eval_any("echo 1 | map {|o| $o.a").is_err(), "unterminated closure");
         assert!(eval_any("echo 1 | map {$o}").is_err(), "missing parameters");
+    }
+
+    #[test]
+    fn a_group_name_lists_its_subcommands() {
+        // `mux` is not a command; before groups existed it was an unknown
+        // command whose did-you-mean pointed at `map`.
+        let out = eval("mux").expect("group help");
+        let text = match out {
+            Value::Str(s) => s,
+            other => panic!("expected rendered help, got {other:?}"),
+        };
+        assert!(text.contains("`mux` is a command group"), "{text}");
+        assert!(text.contains("mux split"), "{text}");
+        assert!(text.contains("Split the active pane"), "{text}");
+        // Groups nest: `mux window` is itself a group.
+        assert!(eval("mux window").is_ok(), "nested group");
+        // And --help on a group is the same page, not an arity error.
+        assert_eq!(eval("mux --help").expect("group --help"), Value::Str(text));
+    }
+
+    #[test]
+    fn unknown_subcommand_suggests_a_sibling_not_a_stranger() {
+        let err = eval("mux windo").expect_err("bad subcommand");
+        assert!(err.msg.contains("`mux` has no subcommand `windo`"), "{}", err.msg);
+        assert_eq!(err.help.as_deref(), Some("did you mean `mux window`?"));
+
+        // Nothing close: point at the group listing rather than guess.
+        let err = eval("str frobnicate").expect_err("bad subcommand");
+        assert_eq!(err.help.as_deref(), Some("run `str` to list its subcommands"));
+    }
+
+    #[test]
+    fn a_real_command_wins_over_the_group_page() {
+        // `to json` exists and `to` is a group; resolving the command must
+        // still take priority over listing.
+        assert_eq!(eval("echo 1 | to json").expect("eval"), Value::Str("1".into()));
     }
 
     #[test]

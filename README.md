@@ -166,6 +166,39 @@ links | filter {|o| $o.text.length > 4}
 `filter` closures, its text operators are `grep`, and it had its own operator
 vocabulary to memorize. Two tools beat three.)
 
+### Command groups
+
+A name containing a space *is* the subcommand mechanism — resolution takes the
+longest matching prefix, so `task add` and `task list` are ordinary commands
+that happen to share a first word. Nothing declares the group:
+
+```ts
+bt.registerCommand({ name: 'task list', summary: 'Show the current task list' }, …);
+bt.registerCommand({ name: 'task add',  summary: 'Add a task to the list' },     …);
+```
+
+Naming the group prints its contents, and a wrong subcommand is diagnosed
+against its siblings rather than the whole registry:
+
+```
+❯ task
+`task` is a command group.
+
+Usage: task <subcommand> [args] [flags]
+
+Subcommands:
+  task add   Add a task to the list
+  task list  Show the current task list
+
+❯ task lst
+error: `task` has no subcommand `lst`
+help: did you mean `task list`?
+```
+
+Groups nest (`mux window new` puts a group under a group), and a command
+always wins over a group page — registering `task` itself would shadow the
+listing, not conflict with it.
+
 ### Selectors: `--on`, `map`, `filter`
 
 Anywhere a command needs to know *which part* of an item to look at, it takes
@@ -261,7 +294,7 @@ Architecture spec:
 ## Driving component state
 
 Commands are plain functions, so a command can read and write your app's state
-directly — `tasks | filter {|t| !$t.done}` over live component data.
+directly — `task list | filter {|t| !$t.done}` over live component data.
 
 **React** needs one indirection. A command outlives the render that registered
 it, so a captured closure goes stale immediately; adding state to the effect's
@@ -280,16 +313,16 @@ function useCommand(bt, spec, fn) {
 }
 ```
 
-The React demo ships a deliberately-broken `tasks-stale` command next to the
-correct one so you can see the difference: after adding a task, `tasks` reports
-4 and `tasks-stale` still reports 3.
+The React demo ships a deliberately-broken `task stale` command next to the
+correct one so you can see the difference: after adding a task, `task list`
+reports 4 and `task stale` still reports 3.
 
 **Svelte** needs none of it. A module-level `$state` rune lives outside any
 component, so commands registered once at startup stay correct forever:
 
 ```ts
 export const store = $state({ tasks: [] });
-bt.registerCommand({ name: 'tasks' }, () => store.tasks);
+bt.registerCommand({ name: 'task list' }, () => store.tasks);
 ```
 
 Same story for any external store (Zustand, Redux, Jotai) — if you have one,
@@ -309,6 +342,6 @@ just test-e2e   # Playwright smoke suite
 just pack       # npm pack dry-run
 ```
 
-Current wasm size: ~432 KB raw, ~190 KB gzipped. `just size` runs a
+Current wasm size: ~438 KB raw, ~193 KB gzipped. `just size` runs a
 `twiggy` audit; see the design spec for the measured breakdown and why the
 original 350 KB target is not reachable without cutting features.

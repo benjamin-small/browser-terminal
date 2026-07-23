@@ -66,6 +66,9 @@ single best dev-loop accelerator.
 `twiggy` at milestone 7.
 
 > **Measured (post-closures): 432 KB raw / 190 KB gzipped — target unmet.**
+> Command groups later added 7.2 KB raw / 3.0 KB gzipped, for a current
+> **438 KB / 193 KB**. The cost is real but bought a feature, not waste:
+> group listing, nested groups, and sibling-aware subcommand diagnostics.
 > A full `twiggy` audit (`just size`) found **no hot spot to cut**: the largest
 > single function is 5.9 KB and ~48% of the binary is spread across 2,500+
 > items under 1% each. Build flags are exhausted — `-Oz --converge` plus every

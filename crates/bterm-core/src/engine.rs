@@ -356,6 +356,10 @@ impl<A: EngineAccess> CommandSource for EngineCommands<A> {
         self.0.with(|e| e.registry.lookup(words))
     }
 
+    fn group_help(&self, words: &[String]) -> Option<String> {
+        self.0.with(|e| e.registry.group_help(words))
+    }
+
     fn unknown_command_error(&self, words: &[crate::ast::Spanned<String>]) -> ShellError {
         self.0.with(|e| e.registry.unknown_command_error(words))
     }

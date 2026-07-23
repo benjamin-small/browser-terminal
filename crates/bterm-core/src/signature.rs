@@ -167,6 +167,38 @@ impl Signature {
     }
 }
 
+/// Help for a command *group* — a name like `task` or `mux` that isn't a
+/// command itself but prefixes several that are.
+///
+/// Multi-word names are the subcommand mechanism (`str upcase` is just a
+/// name containing a space), which means a group has no signature of its own
+/// to render. Without this, `mux` was an unknown command whose did-you-mean
+/// pointed at `map`: the shell knew about `mux split` and still couldn't
+/// admit that `mux` meant anything.
+///
+/// `subs` is (full name, summary), sorted by the caller.
+pub fn render_group_help(group: &str, subs: &[(String, String)]) -> String {
+    const BOLD: &str = "\x1b[1m";
+    const DIM: &str = "\x1b[2m";
+    const CYAN: &str = "\x1b[36m";
+    const RESET: &str = "\x1b[0m";
+
+    let width = subs.iter().map(|(n, _)| n.len()).max().unwrap_or(0).max(12);
+
+    let mut out = format!("`{group}` is a command group.\n\n");
+    out.push_str(&format!(
+        "{BOLD}Usage:{RESET} {CYAN}{group}{RESET} <subcommand> [args] [flags]\n"
+    ));
+    out.push_str(&format!("\n{BOLD}Subcommands:{RESET}\n"));
+    for (name, summary) in subs {
+        out.push_str(&format!("  {CYAN}{name:<width$}{RESET} {summary}\n"));
+    }
+    out.push_str(&format!(
+        "\n{DIM}Run `{group} <subcommand> --help` for a subcommand's own page.{RESET}\n"
+    ));
+    out
+}
+
 /// A call after binding: evaluated, coerced values in place.
 #[derive(Clone)]
 pub struct BoundCall {

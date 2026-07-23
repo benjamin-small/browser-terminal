@@ -117,6 +117,20 @@ test('--help is generated from the signature, and the page shows the real thing'
   // A command with no flags still gets a usage line rather than an error.
   expect(await page.evaluate(() => window.bt.run('fail --help'))).toContain('Usage:');
 
+  // A group name is not a command, but naming it lists what's under it —
+  // `mux` used to be an unknown command that suggested `map`.
+  const group = (await page.evaluate(() => window.bt.run('mux'))) as string;
+  expect(group).toContain('`mux` is a command group');
+  expect(group).toContain('mux split');
+  const typo = await page.evaluate(() =>
+    window.bt.run('mux spilt').then(
+      () => 'resolved?!',
+      (e: Error) => e.message,
+    ),
+  );
+  expect(typo).toContain('`mux` has no subcommand `spilt`');
+  expect(typo).toContain('did you mean `mux split`');
+
   // And the panels on the page are that same output, not a transcription.
   const panels = page.locator('#help-panels details');
   await expect(panels).toHaveCount(2);

@@ -13,11 +13,15 @@ export function registerTaskCommands(bt: BrowserTerminal): void {
   // No hooks, refs, or cleanup: `store` is a module-level rune, so these
   // closures stay correct for the life of the page.
   //
+  // A name with a space in it *is* the subcommand mechanism: registering
+  // `task list` and `task add` makes `task` a group, so bare `task` lists
+  // them. There is no group object to declare and nothing to attach to.
+  //
   // The `summary` and `desc` strings are the command's documentation:
   // `task add --help` renders them. Nothing registers `--help` — the
   // evaluator intercepts it before binding, so the help page is whatever
   // this signature says.
-  bt.registerCommand({ name: 'tasks', summary: 'Show the current task list' }, () => store.tasks);
+  bt.registerCommand({ name: 'task list', summary: 'Show the current task list' }, () => store.tasks);
 
   bt.registerCommand(
     {
@@ -43,7 +47,7 @@ export function registerTaskCommands(bt: BrowserTerminal): void {
     ({ positionals }) => {
       const id = Number(positionals[0]);
       if (!hasTask(id)) {
-        throw { message: `no task ${id}`, help: 'run `tasks` to see ids' };
+        throw { message: `no task ${id}`, help: 'run `task list` to see ids' };
       }
       toggleTask(id);
       return null;

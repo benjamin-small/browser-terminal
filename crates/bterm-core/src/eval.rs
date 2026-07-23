@@ -14,12 +14,19 @@ use std::rc::Rc;
 pub trait CommandSource {
     /// Longest-prefix resolution over leading barewords → (command, words consumed).
     fn lookup(&self, words: &[String]) -> Option<(Rc<dyn Command>, usize)>;
+    /// Rendered group page when `words` prefixes commands without being one
+    /// (`task`, `mux window`). Checked only after `lookup` fails.
+    fn group_help(&self, words: &[String]) -> Option<String>;
     fn unknown_command_error(&self, words: &[crate::ast::Spanned<String>]) -> ShellError;
 }
 
 impl CommandSource for CommandRegistry {
     fn lookup(&self, words: &[String]) -> Option<(Rc<dyn Command>, usize)> {
         CommandRegistry::lookup(self, words)
+    }
+
+    fn group_help(&self, words: &[String]) -> Option<String> {
+        CommandRegistry::group_help(self, words)
     }
 
     fn unknown_command_error(&self, words: &[crate::ast::Spanned<String>]) -> ShellError {
@@ -32,6 +39,10 @@ impl CommandSource for CommandRegistry {
 impl CommandSource for std::cell::RefCell<CommandRegistry> {
     fn lookup(&self, words: &[String]) -> Option<(Rc<dyn Command>, usize)> {
         self.borrow().lookup(words)
+    }
+
+    fn group_help(&self, words: &[String]) -> Option<String> {
+        self.borrow().group_help(words)
     }
 
     fn unknown_command_error(&self, words: &[crate::ast::Spanned<String>]) -> ShellError {
@@ -79,9 +90,15 @@ async fn eval_call(
     scope: &Scope,
 ) -> Result<PipelineData, ShellError> {
     let words: Vec<String> = call.words.iter().map(|w| w.node.clone()).collect();
-    let (cmd, consumed) = source
-        .lookup(&words)
-        .ok_or_else(|| source.unknown_command_error(&call.words))?;
+    let (cmd, consumed) = match source.lookup(&words) {
+        Some(hit) => hit,
+        // Not a command — but it may be a group, in which case naming it
+        // (with or without `--help`) should list what lives under it.
+        None => match source.group_help(&words) {
+            Some(help) => return Ok(PipelineData::Rendered(help)),
+            None => return Err(source.unknown_command_error(&call.words)),
+        },
+    };
 
     // `--help` intercepted before binding, so a malformed call still gets help.
     if wants_help(call) {

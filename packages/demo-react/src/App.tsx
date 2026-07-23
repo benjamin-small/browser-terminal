@@ -72,15 +72,20 @@ export function App() {
   // --- commands, all reading/writing live component state ---
 
   // #region commands
-  // `tasks` reads live component state; `task add` writes it. The hook keeps
-  // a ref to the latest closure, so these always see current state without
-  // re-registering on every render.
+  // `task list` reads live component state; `task add` writes it. The hook
+  // keeps a ref to the latest closure, so these always see current state
+  // without re-registering on every render.
+  //
+  // A name with a space in it *is* the subcommand mechanism: registering
+  // `task list` and `task add` makes `task` a group, so bare `task` lists
+  // them. There is no group object to declare — no `add_subparsers()`, no
+  // parent to attach to.
   //
   // The `summary` and `desc` strings are the command's documentation:
   // `task add --help` renders them. Nothing registers `--help` — the
   // evaluator intercepts it before binding, so the help page is whatever
   // this signature says.
-  useCommand(bt, { name: 'tasks', summary: 'Show the current task list' }, () => tasks);
+  useCommand(bt, { name: 'task list', summary: 'Show the current task list' }, () => tasks);
 
   useCommand(
     bt,
@@ -116,7 +121,7 @@ export function App() {
     ({ positionals }) => {
       const id = Number(positionals[0]);
       if (!tasks.some((t) => t.id === id)) {
-        throw { message: `no task ${id}`, help: 'run `tasks` to see ids' };
+        throw { message: `no task ${id}`, help: 'run `task list` to see ids' };
       }
       setTasks((t) => t.map((x) => (x.id === id ? { ...x, done: !x.done } : x)));
       return null;
@@ -151,10 +156,10 @@ export function App() {
   useEffect(() => {
     if (!bt) return;
     bt.registerCommand(
-      { name: 'tasks-stale', summary: 'BROKEN on purpose: stale closure demo' },
+      { name: 'task stale', summary: 'BROKEN on purpose: the stale-closure demo' },
       () => tasks,
     );
-    return () => bt.unregisterCommand('tasks-stale');
+    return () => bt.unregisterCommand('task stale');
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [bt]); // <- no `tasks` dep: this is the bug being demonstrated
   // #endregion
@@ -208,15 +213,16 @@ export function App() {
 
       <h2>Try</h2>
       <pre>
-{`task add --help    # every command gets this for free
+{`task               # a group: lists its subcommands
+task add --help    # every command gets this for free
 task add 'ship it' --priority 3
 task add 'already did this' --done
-tasks | filter {|t| !$t.done}
-tasks | sort-by priority --reverse | head 2
-tasks | filter {|t| $t.priority > 1} | map {|t| $t.title}
+task list | filter {|t| !$t.done}
+task list | sort-by priority --reverse | head 2
+task list | filter {|t| $t.priority > 1} | map {|t| $t.title}
 task done 2
 
-tasks-stale        # broken on purpose — still shows the seed list`}
+task stale         # broken on purpose — still shows the seed list`}
       </pre>
       <h2>How it's implemented</h2>
       <p className="sub">
@@ -225,7 +231,7 @@ tasks-stale        # broken on purpose — still shows the seed list`}
       </p>
       <CodeBlock title="Registering commands over useState" source={appSource} name="commands" />
       <CodeBlock
-        title="✗ The trap: registering the naive way (this is tasks-stale)"
+        title="✗ The trap: registering the naive way (this is `task stale`)"
         source={appSource}
         name="stale"
         tone="bad"
@@ -250,9 +256,10 @@ tasks-stale        # broken on purpose — still shows the seed list`}
       <CodeBlock title="Asking the engine for its own help text" source={appSource} name="help" />
 
       <p className="note">
-        <code>tasks</code> uses the <code>useCommand</code> latest-ref hook, so it always
-        sees current state. <code>tasks-stale</code> was registered the naive way and is
-        frozen at mount — the trap the hook exists to solve.
+        <code>task list</code> uses the <code>useCommand</code> latest-ref hook, so it
+        always sees current state. <code>task stale</code> was registered the naive way
+        and is frozen at mount — the trap the hook exists to solve. Both are in the same
+        group, so <code>task</code> lists them side by side.
       </p>
     </main>
   );

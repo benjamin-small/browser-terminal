@@ -36,12 +36,13 @@
   <p class="count">{remaining} remaining / {store.tasks.length} total</p>
 
   <h2>Try</h2>
-  <pre>{`task add --help    # every command gets this for free
+  <pre>{`task               # a group: lists its subcommands
+task add --help    # every command gets this for free
 task add 'ship it' --priority 3
 task add 'already did this' --done
-tasks | filter {|t| !$t.done}
-tasks | sort-by priority --reverse | head 2
-tasks | map @slug
+task list | filter {|t| !$t.done}
+task list | sort-by priority --reverse | head 2
+task list | map @slug
 task done 2`}</pre>
   <h2>How it's implemented</h2>
   <p class="sub">Extracted from this page's own source at build time — not a transcription.</p>
