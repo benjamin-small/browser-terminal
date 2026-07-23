@@ -25,6 +25,7 @@ const SEED: Task[] = [
   { id: 3, title: 'compare with React', done: false, priority: 1 },
 ];
 
+// #region store
 export const store = $state({
   tasks: SEED,
   nextId: SEED.length + 1,
@@ -35,6 +36,7 @@ export function addTask(title: string, priority: number): Task {
   store.tasks = [...store.tasks, task];
   return task;
 }
+// #endregion
 
 export function toggleTask(id: number): void {
   store.tasks = store.tasks.map((t) => (t.id === id ? { ...t, done: !t.done } : t));

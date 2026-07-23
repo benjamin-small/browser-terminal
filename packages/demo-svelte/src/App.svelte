@@ -1,5 +1,14 @@
 <script lang="ts">
   import { store } from './tasks.svelte';
+  import { highlight, region } from './code';
+  // Real source, extracted at build time — the example can't drift.
+  import commandsSource from './commands.ts?raw';
+  import storeSource from './tasks.svelte.ts?raw';
+
+  const panels = [
+    ['Registering commands over a rune store', commandsSource, 'commands'],
+    ['The store itself (module-level $state)', storeSource, 'store'],
+  ] as const;
 
   // Derived from the same signal the shell commands mutate.
   const remaining = $derived(store.tasks.filter((t) => !t.done).length);
@@ -31,6 +40,15 @@ tasks | filter {|t| !$t.done}
 tasks | sort-by priority --reverse | head 2
 tasks | map @slug
 task done 2`}</pre>
+  <h2>How it's implemented</h2>
+  <p class="sub">Extracted from this page's own source at build time — not a transcription.</p>
+  {#each panels as [title, source, name] (name)}
+    <details class="code" open>
+      <summary>{title}</summary>
+      <pre><code>{@html highlight(region(source, name))}</code></pre>
+    </details>
+  {/each}
+
   <p class="note">
     Compare with the React demo on :5174 — there, commands must reach state through a
     latest-ref hook, because <code>useState</code> is scoped to a render. A Svelte rune
@@ -144,4 +162,34 @@ task done 2`}</pre>
     color: #9399b2;
     font-size: 13px;
   }
+  .sub {
+    color: #6c7086;
+    font-size: 13px;
+    margin-top: -0.4rem;
+  }
+  details.code {
+    border: 1px solid #313244;
+    border-radius: 8px;
+    background: #181825;
+    margin: 0.75rem 0;
+    overflow: hidden;
+  }
+  details.code > summary {
+    cursor: pointer;
+    padding: 0.6rem 0.9rem;
+    font-size: 0.85rem;
+    user-select: none;
+  }
+  details.code > summary:hover { background: #1e1e2e; }
+  details.code pre {
+    margin: 0;
+    padding: 0.9rem;
+    border-top: 1px solid #313244;
+    border-radius: 0;
+    color: #cdd6f4;
+  }
+  details.code code { font-size: 12.5px; line-height: 1.55; white-space: pre; }
+  details.code :global(.c) { color: #6c7086; font-style: normal; }
+  details.code :global(.s) { color: #a6e3a1; font-style: normal; }
+  details.code :global(.k) { color: #cba6f7; font-style: normal; }
 </style>

@@ -108,3 +108,34 @@ pre {
   color: var(--dim);
   font-size: 13px;
 }
+
+.sub {
+  color: #6c7086;
+  font-size: 13px;
+  margin-top: -0.4rem;
+}
+details.code {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #181825;
+  margin: 0.75rem 0;
+  overflow: hidden;
+}
+details.code > summary {
+  cursor: pointer;
+  padding: 0.6rem 0.9rem;
+  font-size: 0.85rem;
+  user-select: none;
+}
+details.code > summary:hover { background: #1e1e2e; }
+details.code pre {
+  margin: 0;
+  padding: 0.9rem;
+  border-top: 1px solid var(--line);
+  border-radius: 0;
+  color: var(--fg);
+}
+details.code code { font-size: 12.5px; line-height: 1.55; white-space: pre; }
+details.code .c { color: #6c7086; font-style: normal; }
+details.code .s { color: #a6e3a1; font-style: normal; }
+details.code .k { color: #cba6f7; font-style: normal; }

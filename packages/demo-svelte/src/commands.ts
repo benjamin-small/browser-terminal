@@ -9,6 +9,9 @@ import type { BrowserTerminal } from 'browser-terminal';
 import { addTask, hasTask, removeTask, store, toggleTask } from './tasks.svelte';
 
 export function registerTaskCommands(bt: BrowserTerminal): void {
+  // #region commands
+  // No hooks, refs, or cleanup: `store` is a module-level rune, so these
+  // closures stay correct for the life of the page.
   bt.registerCommand({ name: 'tasks', summary: 'The current task list' }, () => store.tasks);
 
   bt.registerCommand(
@@ -20,6 +23,7 @@ export function registerTaskCommands(bt: BrowserTerminal): void {
     },
     ({ positionals, flags }) => addTask(String(positionals[0]), Number(flags.priority ?? 1)),
   );
+  // #endregion
 
   bt.registerCommand(
     { name: 'task done', summary: 'Toggle a task', required: [{ name: 'id', shape: 'int' }] },

@@ -27,6 +27,7 @@ import type { BrowserTerminal, CommandFn, CommandSpec, SelectorFn } from 'browse
  * `spec.name` changes — the description of a command is static in practice,
  * while its *implementation* closes over state that changes every render.
  */
+// #region hook
 export function useCommand(
   bt: BrowserTerminal | null,
   spec: CommandSpec,
@@ -49,6 +50,7 @@ export function useCommand(
     return () => bt.unregisterCommand(name);
   }, [bt, spec.name]);
 }
+// #endregion
 
 /** Same pattern for `@name` selector functions (`map @slug`). */
 export function useSelectorFn(

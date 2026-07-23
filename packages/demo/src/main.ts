@@ -1,4 +1,8 @@
 import { BrowserTerminal } from 'browser-terminal';
+import { codePanel } from './code';
+// The panel below shows this very file — `?raw` guarantees the example on
+// the page is the code that actually ran.
+import selfSource from './main.ts?raw';
 
 /**
  * The single-file build inlines the wasm and hands it over on `globalThis`
@@ -13,7 +17,10 @@ async function main(): Promise<void> {
     wasmBinary: inlinedWasm,
   });
 
-  // The flagship demo: a page-DOM command in a few lines.
+  // #region links
+  // A page-DOM command in a few lines. Whatever you return is converted to
+  // a structured value, so an array of objects renders as a table and can be
+  // piped into `filter`, `sort-by`, `grep`, and friends.
   bt.registerCommand(
     {
       name: 'links',
@@ -25,6 +32,7 @@ async function main(): Promise<void> {
         .slice(0, Number(flags.limit ?? 100))
         .map((a) => ({ text: a.textContent?.trim() ?? '', href: a.href })),
   );
+  // #endregion
 
   // Async + cancellable + progressive output, for testing Ctrl-C.
   bt.registerCommand(
@@ -57,7 +65,10 @@ async function main(): Promise<void> {
     },
   );
 
-  // A CSP-safe named selector: usable as `@host` in map/filter/--on.
+  // #region selector
+  // A named selector function, usable as `@host` anywhere a selector is
+  // accepted: `links | map @host`. Needs no eval, so it works under a
+  // strict Content-Security-Policy.
   bt.registerFn('host', (item) => {
     const href = (item as { href?: string })?.href ?? '';
     try {
@@ -66,6 +77,14 @@ async function main(): Promise<void> {
       return '';
     }
   });
+  // #endregion
+
+  // Show the real wiring on the page.
+  const host = document.getElementById('source');
+  host?.append(
+    codePanel('How the `links` command is registered', selfSource, 'links'),
+    codePanel('A named selector function (@host)', selfSource, 'selector'),
+  );
 
   // Expose for programmatic-run experiments in the console.
   (window as unknown as { bt: BrowserTerminal }).bt = bt;

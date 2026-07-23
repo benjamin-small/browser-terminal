@@ -1,6 +1,10 @@
 import { useEffect, useRef, useState } from 'react';
 import { BrowserTerminal } from 'browser-terminal';
 import { useCommand } from './useTerminal';
+import { highlight, region } from './code';
+// Shown on the page verbatim, so the example can't drift from the code.
+import hookSource from './useTerminal.ts?raw';
+import appSource from './App.tsx?raw';
 
 export interface Task {
   id: number;
@@ -14,6 +18,17 @@ const SEED: Task[] = [
   { id: 2, title: 'drive React state from a pipeline', done: false, priority: 3 },
   { id: 3, title: 'compare with Svelte', done: false, priority: 1 },
 ];
+
+function CodeBlock({ title, source, name }: { title: string; source: string; name: string }) {
+  return (
+    <details className="code" open>
+      <summary>{title}</summary>
+      <pre>
+        <code dangerouslySetInnerHTML={{ __html: highlight(region(source, name)) }} />
+      </pre>
+    </details>
+  );
+}
 
 export function App() {
   const [bt, setBt] = useState<BrowserTerminal | null>(null);
@@ -43,6 +58,10 @@ export function App() {
 
   // --- commands, all reading/writing live component state ---
 
+  // #region commands
+  // `tasks` reads live component state; `task add` writes it. The hook keeps
+  // a ref to the latest closure, so these always see current state without
+  // re-registering on every render.
   useCommand(bt, { name: 'tasks', summary: 'The current task list' }, () => tasks);
 
   useCommand(
@@ -64,6 +83,7 @@ export function App() {
       return task;
     },
   );
+  // #endregion
 
   useCommand(
     bt,
@@ -137,6 +157,14 @@ task done 2
 
 tasks-stale        # broken on purpose — still shows the seed list`}
       </pre>
+      <h2>How it's implemented</h2>
+      <p className="sub">
+        Extracted from this page's own source at build time — not a
+        transcription.
+      </p>
+      <CodeBlock title="Registering commands over useState" source={appSource} name="commands" />
+      <CodeBlock title="The useCommand hook (latest-ref pattern)" source={hookSource} name="hook" />
+
       <p className="note">
         <code>tasks</code> uses the <code>useCommand</code> latest-ref hook, so it always
         sees current state. <code>tasks-stale</code> was registered the naive way and is
