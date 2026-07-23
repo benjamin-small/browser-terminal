@@ -511,8 +511,9 @@ pub async fn execute_line<A: EngineAccess>(access: A, pane: u32, line: String, r
 
 /// Programmatic execution (the TS `run()` API): parse and evaluate a line,
 /// returning the final pipeline's value without touching the pane's prompt
-/// or rendering anything. Commands' `ctx.emit` output still reaches the
-/// pane.
+/// or rendering anything. Commands' `ctx.emit` output is currently discarded
+/// (wired to a `NullSink`) rather than reaching the pane; Task 7 replaces
+/// this with a sink that captures it for the caller instead.
 pub async fn eval_to_value<A: EngineAccess>(
     access: A,
     pane: u32,

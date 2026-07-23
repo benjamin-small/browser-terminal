@@ -26,8 +26,12 @@ impl Record {
     }
 }
 
-/// Destination for diagnostics. Synchronous by design: implementations are
-/// called from inside `with_engine` borrows, where awaiting is forbidden.
+/// Destination for diagnostics. Synchronous by design: a command's `run`
+/// future may call `write` from contexts where awaiting is not an option
+/// (e.g. a synchronous JS callback), so the trait cannot require one. A
+/// `PaneSink` implementation is expected to take its own short engine borrow
+/// inside `write` rather than relying on one already being held — no borrow
+/// is held at the call site itself.
 pub trait Sink {
     fn write(&self, record: Record);
 }

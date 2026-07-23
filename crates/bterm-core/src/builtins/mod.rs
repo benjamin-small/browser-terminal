@@ -895,8 +895,31 @@ mod tests {
         assert!(err.msg.contains("NaN"));
     }
 
+    /// Writes to both diagnostic channels so the wiring from `ExecContext`
+    /// through `eval_call` into a command can be asserted, not assumed.
+    struct Noisy;
+    impl Command for Noisy {
+        fn signature(&self) -> &Signature {
+            static SIG: std::sync::OnceLock<Signature> = std::sync::OnceLock::new();
+            SIG.get_or_init(|| Signature::build("noisy", "writes to log and err"))
+        }
+        fn run(
+            &self,
+            ctx: ExecContext,
+            _call: BoundCall,
+            _input: PipelineData,
+        ) -> LocalBoxFuture<Result<PipelineData, ShellError>> {
+            ctx.sink.write(crate::sink::Record::Log("progress".into()));
+            ctx.sink.write(crate::sink::Record::Err("warning".into()));
+            ready(Ok(PipelineData::Value(Value::Int(1))))
+        }
+    }
+
     #[test]
     fn a_command_writes_diagnostics_to_the_context_sink() {
+        let mut registry = CommandRegistry::new();
+        registry.register_builtin(Rc::new(Noisy));
+
         let sink = Rc::new(crate::sink::CollectingSink::new());
         let ctx = ExecContext {
             host: Rc::new(TestHost),
@@ -905,10 +928,19 @@ mod tests {
             pane: 0,
             run_id: 0,
         };
-        ctx.sink.write(crate::sink::Record::Log("hello".into()));
-        ctx.sink.write(crate::sink::Record::Err("bad".into()));
-        assert_eq!(sink.log_lines(), vec!["hello"]);
-        assert_eq!(sink.err_lines(), vec!["bad"]);
+        let out = parse("noisy");
+        assert!(out.errors.is_empty(), "{:?}", out.errors);
+        let (mut results, error) = block_on(eval_line(&out.line, &registry, &ctx, &Scope::new()));
+        assert!(error.is_none(), "{:?}", error);
+
+        assert_eq!(sink.log_lines(), vec!["progress"]);
+        assert_eq!(sink.err_lines(), vec!["warning"]);
+        // Diagnostics must not leak into the data channel — that is the
+        // whole point of having a separate sink.
+        assert_eq!(
+            results.pop().map(PipelineData::into_value),
+            Some(Value::Int(1))
+        );
     }
 
     #[test]
