@@ -73,18 +73,38 @@ separate concern.
 ### The sink
 
 ```rust
-pub enum Record {
-    Log(String),
-    Err(String),
+pub enum Channel { Log, Err }
+
+/// Text is sanitized on construction, so a `Record` cannot hold an escape
+/// sequence.
+pub struct Record { channel: Channel, text: String }
+
+impl Record {
+    pub fn log(text: impl AsRef<str>) -> Self { /* sanitizes */ }
+    pub fn err(text: impl AsRef<str>) -> Self { /* sanitizes */ }
 }
 
 pub trait Sink {
     fn write(&self, record: Record);
     /// Resolves when the sink can accept more. Pane sinks use this to
     /// throttle; capturing and test sinks return immediately.
+    /// **Deferred to stage 6** — until there is an await site, an
+    /// always-ready async method is complexity for nothing.
     fn ready(&self) -> LocalBoxFuture<()>;
 }
 ```
+
+> **Amended during stage 1.** `Record` was originally specified as an enum
+> with public `Log(String)` / `Err(String)` variants, with sanitization
+> living in `PaneSink`. A security test caught the flaw: only the terminal
+> sink sanitized, so `bt.run()`'s `{ log, err }` came back with escape
+> sequences intact, and a caller putting them into their own UI or terminal
+> received raw page-controlled text. An enum with public variants can always
+> be constructed directly, so no constructor could be made mandatory — hence
+> a struct with private fields. Sanitizing once at construction makes
+> "diagnostics leaving the engine are escape-clean" a property of the type
+> rather than something each sink must remember, which is the same reasoning
+> that gives channel 1 no write API.
 
 Three implementations, chosen once at pipeline start and carried on
 `ExecContext`:
