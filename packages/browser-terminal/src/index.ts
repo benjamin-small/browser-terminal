@@ -9,7 +9,7 @@
  */
 import init, { BtermCore } from './wasm/bterm_wasm.js';
 import { PaneManager } from './panes.js';
-import { PanelHost } from './panels.js';
+import { PanelHost, type PanelMode } from './panels.js';
 import type { Effects, EngineEvent, HostMsg, LayoutSnapshot } from './events.js';
 import type { CommandFn, CommandSpec, SelectorFn, Value } from './types.js';
 
@@ -24,6 +24,7 @@ export type {
   SessionInfo,
   WindowInfo,
 } from './events.js';
+export type { PanelMode } from './panels.js';
 export type {
   CommandArgs,
   CommandCtx,
@@ -54,6 +55,17 @@ export interface CreateOptions {
   /** Add a window-level Ctrl+` toggle for the panel (off by default — the
    * library adds no global listeners unless asked). */
   globalToggle?: boolean;
+  /**
+   * How the panel sits on the page. `'right'` (default) docks it full-height
+   * to that edge and reflows the page's content beside it; `'float'` gives
+   * the draggable window. Switchable at runtime via the header button or
+   * `setPanelMode()`.
+   */
+  dock?: PanelMode;
+  /** Docked width in px (default 480); drag the inner edge to change it. */
+  dockWidth?: number;
+  /** Element padded to make room when docked. Defaults to `document.body`. */
+  dockTarget?: HTMLElement;
 }
 
 let instanceLive = false;
@@ -90,12 +102,18 @@ export class BrowserTerminal {
     let panel: PanelHost | null = null;
     let mount = opts.mount;
     if (!mount) {
-      panel = new PanelHost({
-        dispatch: (msg: HostMsg) => core.dispatch(msg),
-        runCommand: (cmd: string) => {
-          (self.run(cmd) as Promise<unknown>).catch(() => {});
+      panel = new PanelHost(
+        {
+          dispatch: (msg: HostMsg) => core.dispatch(msg),
+          runCommand: (cmd: string) => {
+            (self.run(cmd) as Promise<unknown>).catch(() => {});
+          },
+          // The panel's box changed; xterm must re-measure or the grid
+          // keeps the old column count.
+          resized: () => paneManager.fitAll(),
         },
-      });
+        { mode: opts.dock, width: opts.dockWidth, dockTarget: opts.dockTarget },
+      );
       mount = panel.contentEl;
     }
 
@@ -196,6 +214,19 @@ export class BrowserTerminal {
     }
     const pane = this.lastSnapshot?.active_pane ?? 0;
     return this.core.run(pane, line) as Promise<Value>;
+  }
+
+  /**
+   * Dock the panel to an edge (page content reflows beside it) or pop it
+   * out into a floating window. No-op when you supplied your own `mount`.
+   */
+  setPanelMode(mode: PanelMode): void {
+    this.panel?.setMode(mode);
+  }
+
+  /** Current panel mode, or `null` with a custom `mount`. */
+  get panelMode(): PanelMode | null {
+    return this.panel?.panelMode ?? null;
   }
 
   /** The latest layout snapshot (sessions, windows, pane rects). */

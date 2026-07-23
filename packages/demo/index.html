@@ -7,10 +7,13 @@
     <style>
       body {
         font-family: system-ui, sans-serif;
-        max-width: 720px;
-        margin: 2rem auto;
-        padding: 0 1rem 400px;
+        margin: 0;
         line-height: 1.6;
+      }
+      main {
+        max-width: 720px;
+        margin: 0 auto;
+        padding: 2rem 1rem 4rem;
       }
       h1 { font-size: 1.6rem; }
       a { color: #4f6ef7; }
@@ -50,6 +53,7 @@
     </style>
   </head>
   <body>
+    <main>
     <h1>browser-terminal demo host page</h1>
     <p>
       This is an ordinary web page. The floating panel at the bottom is a
@@ -72,6 +76,7 @@
       source of this page, extracted at build time — not a transcription.
     </p>
     <div id="source"></div>
+    </main>
 
     <script type="module" src="/src/main.ts"></script>
   </body>

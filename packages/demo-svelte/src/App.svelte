@@ -69,7 +69,7 @@ task done 2`}</pre>
   main {
     max-width: 680px;
     margin: 3rem auto;
-    padding: 0 1.25rem 420px;
+    padding: 0 1.25rem 4rem;
   }
   h1 {
     font-size: 1.5rem;

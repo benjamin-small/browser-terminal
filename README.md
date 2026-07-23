@@ -52,8 +52,10 @@ const count = await bt.run("links | filter {|o| $o.text != ''} | length");  // �
 - **tmux surface**: `Ctrl-B` prefix — `%`/`"` split, `c`/`n`/`p` windows,
   `x` kill, `o`/arrows focus, `z` zoom, `(`/`)`/`s` sessions, `d` hide.
   Every keybinding is just a shell command (`mux split --right`, `session new`).
-- **Floating panel**: Shadow-DOM isolated (no CSS bleed either way), drag by
-  header, edge resize, divider drag, window tabs, session pill dock,
+- **Docked or floating panel**: docks full-height to a screen edge by
+  default, reflowing your page's content beside it instead of covering it —
+  or pop it out into a draggable, edge-resizable window. Shadow-DOM isolated
+  (no CSS bleed either way), with window tabs, a session pill dock, and
   minimize-to-pill. No global listeners unless you opt into `globalToggle`.
 - **Real shell feel**: sync keystroke echo (no async hop), line editor with
   history/cursor ops, caret diagnostics with did-you-mean, bracketed paste
@@ -107,6 +109,9 @@ const bt = await BrowserTerminal.create({
   mount?: HTMLElement;        // bring your own container (skips panel chrome)
   wasmUrl?: string | URL;     // custom .wasm location
   globalToggle?: boolean;     // opt-in Ctrl+` show/hide
+  dock?: 'right' | 'left' | 'float';  // default 'right'
+  dockWidth?: number;         // default 480, drag the inner edge to change
+  dockTarget?: HTMLElement;   // what gets padded; default document.body
 });
 
 bt.registerCommand(spec, (args, input, ctx) => value | Promise<value>);
@@ -119,6 +124,8 @@ bt.registerFn(name, (item) => value);  // usable as @name in any selector
 bt.unregisterFn(name);
 bt.run(line): Promise<Value>;  // programmatic execution, typed result
 bt.snapshot;                   // sessions/windows/pane rects
+bt.setPanelMode('float');      // pop out; 'right'/'left' to dock again
+bt.panelMode;                  // current mode
 bt.show(); bt.hide(); bt.toggle(); bt.dispose();
 ```
 
