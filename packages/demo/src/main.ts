@@ -49,16 +49,18 @@ async function main(): Promise<void> {
   // #endregion
 
   // #region slow
-  // Async, cancellable, and progressively printing. `signal` is a real
-  // AbortSignal wired to Ctrl-C, so a hung command can never wedge the pane;
-  // `emit` writes a line immediately instead of waiting for the return value.
+  // Async, cancellable, and progressively printing on two separate channels.
+  // `log` is progress, `err` is a warning rendered red — neither enters the
+  // pipe, so `slow 5 | length` is unaffected by anything printed. `signal`
+  // is a real AbortSignal wired to Ctrl-C, so a hung command can never wedge
+  // the pane.
   bt.registerCommand(
     {
       name: 'slow',
       summary: 'Count once a second, printing as it goes (Ctrl-C to abort)',
       optional: [{ name: 'seconds', shape: 'int', desc: 'how long to count for (default 5)' }],
     },
-    async ({ positionals }, _input, { signal, emit }) => {
+    async ({ positionals }, _input, { signal, log, err }) => {
       const seconds = Number(positionals[0] ?? 5);
       for (let i = 1; i <= seconds; i++) {
         await new Promise((resolve, reject) => {
@@ -68,7 +70,10 @@ async function main(): Promise<void> {
             reject(new DOMException('aborted', 'AbortError'));
           });
         });
-        emit(`tick ${i}/${seconds}`);
+        log(`tick ${i}/${seconds}`);
+      }
+      if (seconds > 3) {
+        err(`${seconds}s is a long time to block a pipeline`);
       }
       return `done after ${seconds}s`;
     },

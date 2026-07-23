@@ -169,7 +169,8 @@ links | filter {|o| $o.text != ''} | head 5
 links | map @host
 links | grep rust --on href
 links | sort-by text | head 3
-slow 5             # then Ctrl-C to abort it
+slow 5             # log is plain, err is red; Ctrl-C aborts
+slow 5 | length    # diagnostics never enter the pipe
 fail               # rich errors from TypeScript
 mux                # a command group: lists its subcommands
 help               # every command, builtin and registered</pre>
