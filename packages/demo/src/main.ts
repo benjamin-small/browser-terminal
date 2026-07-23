@@ -109,8 +109,8 @@ async function main(): Promise<void> {
   // the output means this panel cannot disagree with the code above it.
   const help = document.getElementById('help-panels');
   help?.append(
-    helpPanel('links --help', String(await bt.run('links --help'))),
-    helpPanel('slow --help', String(await bt.run('slow --help'))),
+    helpPanel('links --help', String((await bt.run('links --help')).value)),
+    helpPanel('slow --help', String((await bt.run('slow --help')).value)),
   );
 
   // Expose for programmatic-run experiments in the console.

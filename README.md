@@ -37,7 +37,7 @@ Then, in the terminal panel:
 And from host-page code, the terminal doubles as a scripting engine:
 
 ```ts
-const count = await bt.run("links | filter {|o| $o.text != ''} | length");  // → 5
+const { value } = await bt.run("links | filter {|o| $o.text != ''} | length");  // → 7
 ```
 
 ## Features
@@ -122,7 +122,10 @@ bt.registerCommand(spec, (args, input, ctx) => value | Promise<value>);
 bt.unregisterCommand(name);
 bt.registerFn(name, (item) => value);  // usable as @name in any selector
 bt.unregisterFn(name);
-bt.run(line): Promise<Value>;  // programmatic execution, typed result
+bt.run(line): Promise<{ value: Value; log: string[]; err: string[] }>;  // programmatic execution
+// `log`/`err` are the diagnostics a pane would normally render (ctx.log/ctx.err,
+// caret errors, …); a programmatic run collects them into these arrays instead
+// of printing to the pane, so a background call never writes on the user's terminal.
 bt.snapshot;                   // sessions/windows/pane rects
 bt.setPanelMode('float');      // pop out; 'right'/'left' to dock again
 bt.panelMode;                  // current mode

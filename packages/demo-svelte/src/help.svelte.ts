@@ -26,7 +26,7 @@ export async function loadHelp(bt: BrowserTerminal, commands: string[]): Promise
   const pages = await Promise.all(
     commands.map(async (command) => ({
       command,
-      html: ansiToHtml(String(await bt.run(`${command} --help`)).trimEnd()),
+      html: ansiToHtml(String((await bt.run(`${command} --help`)).value).trimEnd()),
     })),
   );
   helpPages.push(...pages);

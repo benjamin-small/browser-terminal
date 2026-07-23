@@ -176,8 +176,8 @@ export function App() {
   useEffect(() => {
     if (!bt) return;
     let live = true;
-    Promise.all(HELP_FOR.map((c) => bt.run(`${c} --help`))).then((texts) => {
-      if (live) setHelp(texts.map((t) => ansiToHtml(String(t).trimEnd())));
+    Promise.all(HELP_FOR.map((c) => bt.run(`${c} --help`))).then((results) => {
+      if (live) setHelp(results.map((r) => ansiToHtml(String(r.value).trimEnd())));
     });
     return () => {
       live = false;

@@ -8,7 +8,7 @@ import { expect, test } from '@playwright/test';
 declare global {
   interface Window {
     bt: {
-      run(line: string): Promise<unknown>;
+      run(line: string): Promise<{ value: unknown; log: string[]; err: string[] }>;
       dispose(): void;
     };
   }
@@ -27,17 +27,21 @@ async function waitForTerminal(page: import('@playwright/test').Page) {
   );
 }
 
+// A `value(line)` helper would run inside `page.evaluate` — in the browser,
+// not in this Node scope — so it can't be a module-level const here. Each
+// value-reading call below inlines `.then((r) => r.value)` instead.
+
 test('flagship pipeline: TS command → structured pipes → typed result', async ({ page }) => {
   await page.goto('/');
   await waitForTerminal(page);
   const count = await page.evaluate(() =>
-    window.bt.run("links --limit 20 | filter {|o| $o.text != ''} | length"),
+    window.bt.run("links --limit 20 | filter {|o| $o.text != ''} | length").then((r) => r.value),
   );
   // The demo page is the fixture: 8 anchors, one of them with no text.
   expect(count).toBe(7);
 
   const rows = (await page.evaluate(() =>
-    window.bt.run("links | filter {|o| $o.text != ''} | head 2"),
+    window.bt.run("links | filter {|o| $o.text != ''} | head 2").then((r) => r.value),
   )) as Array<{ text: string; href: string }>;
   expect(rows).toHaveLength(2);
   expect(rows[0]).toHaveProperty('text');
@@ -50,10 +54,22 @@ test('grep filters with real regex and fails cleanly on bad patterns', async ({ 
 
   // Anchors and alternation are regex, not literals — proving the browser's
   // native RegExp is wired in rather than substring matching.
-  expect(await page.evaluate(() => window.bt.run("links | grep '^Rust' | length"))).toBe(1);
-  expect(await page.evaluate(() => window.bt.run("links | grep 'rust|xterm' -i | length"))).toBe(2);
-  expect(await page.evaluate(() => window.bt.run("links | grep org --on href | length"))).toBe(3);
-  expect(await page.evaluate(() => window.bt.run("links | grep '^Rust' -v | length"))).toBe(7);
+  expect(
+    await page.evaluate(() => window.bt.run("links | grep '^Rust' | length").then((r) => r.value)),
+  ).toBe(1);
+  expect(
+    await page.evaluate(() =>
+      window.bt.run("links | grep 'rust|xterm' -i | length").then((r) => r.value),
+    ),
+  ).toBe(2);
+  expect(
+    await page.evaluate(() =>
+      window.bt.run("links | grep org --on href | length").then((r) => r.value),
+    ),
+  ).toBe(3);
+  expect(
+    await page.evaluate(() => window.bt.run("links | grep '^Rust' -v | length").then((r) => r.value)),
+  ).toBe(7);
 
   const err = await page.evaluate(() =>
     window.bt.run("links | grep '('").then(
@@ -63,7 +79,7 @@ test('grep filters with real regex and fails cleanly on bad patterns', async ({ 
   );
   expect(err).toContain('invalid regex pattern');
   // The engine must survive an invalid pattern.
-  expect(await page.evaluate(() => window.bt.run('echo 42'))).toBe(42);
+  expect(await page.evaluate(() => window.bt.run('echo 42').then((r) => r.value))).toBe(42);
 });
 
 test('selectors: inline functions, @named, and --on', async ({ page }) => {
@@ -73,21 +89,25 @@ test('selectors: inline functions, @named, and --on', async ({ page }) => {
   // Inline lambdas project and filter, and compose with everything else.
   expect(
     await page.evaluate(() =>
-      window.bt.run("links | filter '(o) => o.text.length > 4' | length"),
+      window.bt.run("links | filter '(o) => o.text.length > 4' | length").then((r) => r.value),
     ),
   ).toBe(6);
   expect(
-    await page.evaluate(() => window.bt.run("links | map '(o) => o.text' | head")),
+    await page.evaluate(() =>
+      window.bt.run("links | map '(o) => o.text' | head").then((r) => r.value),
+    ),
   ).toBe('Rust language');
 
   // `--on` narrows what a command looks at while keeping whole rows.
   expect(
-    await page.evaluate(() => window.bt.run("links | grep '^Rust' --on text | map href")),
+    await page.evaluate(() =>
+      window.bt.run("links | grep '^Rust' --on text | map href").then((r) => r.value),
+    ),
   ).toEqual(['https://www.rust-lang.org/']);
 
   // A registered function needs no eval — the CSP-safe path.
   expect(
-    await page.evaluate(() => window.bt.run("links | map @host | head")),
+    await page.evaluate(() => window.bt.run("links | map @host | head").then((r) => r.value)),
   ).toBe('www.rust-lang.org');
 
   // A bad selector name is a clean, suggestive error.
@@ -108,18 +128,22 @@ test('--help is generated from the signature, and the page shows the real thing'
 
   // Nothing declares a `--help` flag; the evaluator intercepts it before
   // binding, so the text can only have come from the registered signature.
-  const help = (await page.evaluate(() => window.bt.run('links --help'))) as string;
+  const help = (await page.evaluate(() =>
+    window.bt.run('links --help').then((r) => r.value),
+  )) as string;
   expect(help).toContain('Usage:');
   // The command name is colored, so only the arg part is a contiguous run.
   expect(help).toContain('[pattern] [flags]');
   expect(help).toContain('stop after this many links');
 
   // A command with no flags still gets a usage line rather than an error.
-  expect(await page.evaluate(() => window.bt.run('fail --help'))).toContain('Usage:');
+  expect(
+    await page.evaluate(() => window.bt.run('fail --help').then((r) => r.value)),
+  ).toContain('Usage:');
 
   // A group name is not a command, but naming it lists what's under it —
   // `mux` used to be an unknown command that suggested `map`.
-  const group = (await page.evaluate(() => window.bt.run('mux'))) as string;
+  const group = (await page.evaluate(() => window.bt.run('mux').then((r) => r.value))) as string;
   expect(group).toContain('`mux` is a command group');
   expect(group).toContain('mux split');
   const typo = await page.evaluate(() =>

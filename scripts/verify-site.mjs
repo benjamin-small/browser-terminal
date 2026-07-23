@@ -81,7 +81,7 @@ for (const demo of DEMOS) {
     value = await page.evaluate(async (line) => {
       const bt = window.bt;
       if (!bt) throw new Error('window.bt missing');
-      return await bt.run(line);
+      return (await bt.run(line)).value;
     }, demo.probe);
     ok = typeof value === 'number' && value > 0;
   } catch (e) {
