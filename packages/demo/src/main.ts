@@ -34,7 +34,10 @@ async function main(): Promise<void> {
   );
   // #endregion
 
-  // Async + cancellable + progressive output, for testing Ctrl-C.
+  // #region slow
+  // Async, cancellable, and progressively printing. `signal` is a real
+  // AbortSignal wired to Ctrl-C, so a hung command can never wedge the pane;
+  // `emit` writes a line immediately instead of waiting for the return value.
   bt.registerCommand(
     {
       name: 'slow',
@@ -56,6 +59,7 @@ async function main(): Promise<void> {
       return `done after ${seconds}s`;
     },
   );
+  // #endregion
 
   // A rich-error demo: `fail` shows help in the caret renderer.
   bt.registerCommand(
@@ -82,7 +86,8 @@ async function main(): Promise<void> {
   // Show the real wiring on the page.
   const host = document.getElementById('source');
   host?.append(
-    codePanel('How the `links` command is registered', selfSource, 'links'),
+    codePanel('Registering a command over the page DOM', selfSource, 'links'),
+    codePanel('An async, cancellable command (slow)', selfSource, 'slow'),
     codePanel('A named selector function (@host)', selfSource, 'selector'),
   );
 
