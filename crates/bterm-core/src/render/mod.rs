@@ -110,6 +110,15 @@ fn cell_text(s: &str) -> String {
     strip_escapes(s, false)
 }
 
+/// Display text for an untrusted diagnostic line (`ctx.log` / `ctx.err`).
+///
+/// Single-line and escape-free: a command's diagnostic is page-controlled
+/// text, so it must not be able to move the cursor, clear the screen, or
+/// inject colour codes into the styling the sink applies around it.
+pub fn diagnostic_text(s: &str) -> String {
+    cell_text(s)
+}
+
 fn format_float(f: f64) -> String {
     if f.fract() == 0.0 && f.abs() < 1e15 {
         format!("{f:.1}")
@@ -416,5 +425,13 @@ mod tests {
         let out = strip_ansi(&render(&v, 80));
         assert!(out.contains("(2 empty records)"), "{out}");
         assert!(!out.contains('┌'));
+    }
+
+    #[test]
+    fn diagnostic_text_is_stripped_to_one_line() {
+        // A page-controlled diagnostic must not be able to clear the screen
+        // or smuggle colour codes into our styling.
+        let hostile = "\x1b[2J\x1b[Hcleared\nsecond line";
+        assert_eq!(diagnostic_text(hostile), "cleared second line");
     }
 }
