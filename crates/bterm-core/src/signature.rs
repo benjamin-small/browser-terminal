@@ -414,6 +414,33 @@ pub fn bind(
                 }
             }
             Arg::Flag { name, long, span, value } => {
+                // A bundled short cluster (`-iv`) expands to `-i -v`. Only
+                // switches may bundle: a value-taking flag inside a bundle
+                // has nowhere to receive its value, so that is a clear error
+                // rather than a silently dropped letter.
+                if !*long && name.chars().count() > 1 {
+                    if value.is_some() {
+                        return Err(ShellError::new(
+                            ErrorKind::Binding,
+                            format!("`-{name}` bundles short flags, so it cannot take a value"),
+                        )
+                        .with_span(*span));
+                    }
+                    for ch in name.chars() {
+                        let letter = ch.to_string();
+                        let spec = find_flag(sig, &letter, false, *span)?;
+                        if spec.shape.is_some() {
+                            return Err(ShellError::new(
+                                ErrorKind::Binding,
+                                format!("`-{ch}` takes a value, so it can't be bundled in `-{name}`"),
+                            )
+                            .with_span(*span)
+                            .with_help(format!("pass it on its own, e.g. `-{ch} <value>`")));
+                        }
+                        flags.insert(spec.long.clone(), Value::Bool(true));
+                    }
+                    continue;
+                }
                 let spec = find_flag(sig, name, *long, *span)?;
                 let long_name = spec.long.clone();
                 match spec.shape {
@@ -555,6 +582,7 @@ mod tests {
             .optional_arg("pattern", Shape::Str, "substring filter")
             .flag("limit", Some('l'), Some(Shape::Int), "max results")
             .flag("all", Some('a'), None, "include empty links")
+            .flag("verbose", Some('v'), None, "print more")
     }
 
     fn call(src: &str) -> Call {
@@ -587,6 +615,29 @@ mod tests {
     fn short_flag_resolves_to_long_name() {
         let b = bind_src("links -l 3").expect("bind");
         assert_eq!(b.flag("limit"), Some(&Value::Int(3)));
+    }
+
+    #[test]
+    fn bundled_short_switches_expand() {
+        // `-av` is `-a -v`, the GNU habit everyone's fingers already have.
+        let b = bind_src("links -av").expect("bind");
+        assert!(b.has_flag("all"));
+        assert!(b.has_flag("verbose"));
+    }
+
+    #[test]
+    fn a_value_flag_cannot_be_bundled() {
+        // `-l` takes a value, so it has nowhere to receive it inside a
+        // bundle — a clear error beats silently dropping the `v`.
+        let err = bind_src("links -lv").expect_err("should fail");
+        assert!(err.msg.contains("takes a value"), "{}", err.msg);
+        assert!(err.msg.contains("-l"), "{}", err.msg);
+    }
+
+    #[test]
+    fn an_unknown_letter_in_a_bundle_is_diagnosed() {
+        let err = bind_src("links -ax").expect_err("should fail");
+        assert!(err.msg.contains("unknown flag"), "{}", err.msg);
     }
 
     #[test]

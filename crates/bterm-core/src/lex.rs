@@ -199,10 +199,12 @@ pub fn lex(src: &str) -> Result<Vec<Token>, ShellError> {
                     tokens.push(token);
                     i += consumed;
                 } else if after.is_some_and(|ch| ch.is_alphabetic()) {
-                    // Short flag: single letter only; `-v2.1`-style barewords
-                    // stay barewords.
+                    // Short flag or a bundle of them (`-i`, `-iv`). An
+                    // all-letters run is a flag cluster that `bind` expands
+                    // against the signature; anything with a digit or dot
+                    // (`-v2.1`) stays a bareword, since it isn't a flag name.
                     let word: String = rest[1..].chars().take_while(|&ch| is_bareword_char(ch)).collect();
-                    if word.chars().count() == 1 {
+                    if word.chars().all(|ch| ch.is_ascii_alphabetic()) {
                         tokens.push(Token {
                             kind: TokenKind::Flag { name: word.clone(), long: false, has_eq: false },
                             span: Span::new(start, start + 1 + word.len() as u32),
