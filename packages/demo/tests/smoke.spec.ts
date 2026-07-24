@@ -62,9 +62,17 @@ test('grep filters with real regex and fails cleanly on bad patterns', async ({ 
 
   // Anchors and alternation are regex, not literals — proving the browser's
   // native RegExp is wired in rather than substring matching.
+  //
+  // Batch-model note (stage 3, streaming): a stream of exactly one item is
+  // indistinguishable from a bare scalar at a collecting boundary (see
+  // `stream::collect` / docs/superpowers/specs/2026-07-24-streaming-commands-design.md),
+  // so counting a single-row grep match via `| length` now hits a type
+  // error instead of yielding 1 — that's the documented, approved edge
+  // case ("`echo 5 | length`-class edges may change"), not a regression.
+  // Assert the anchored match directly instead of counting it.
   expect(
-    await page.evaluate(() => window.bt.run("links | grep '^Rust' | length").then((r) => r.value)),
-  ).toBe(1);
+    await page.evaluate(() => window.bt.run("links | grep '^Rust'").then((r) => r.value)),
+  ).toMatchObject({ text: 'Rust language' });
   expect(
     await page.evaluate(() =>
       window.bt.run("links | grep 'rust|xterm' -i | length").then((r) => r.value),
@@ -107,11 +115,17 @@ test('selectors: inline functions, @named, and --on', async ({ page }) => {
   ).toBe('Rust language');
 
   // `--on` narrows what a command looks at while keeping whole rows.
+  //
+  // Batch-model note (stage 3, streaming): `grep` here matches exactly one
+  // row, so the stream reaching the terminal collector has exactly one
+  // item — same rule that unwraps a no-arg `head` to a scalar rather than
+  // a 1-list (see docs/superpowers/specs/2026-07-24-streaming-commands-design.md).
+  // Was `.toEqual([...])` pre-streaming; now the bare string is correct.
   expect(
     await page.evaluate(() =>
       window.bt.run("links | grep '^Rust' --on text | map href").then((r) => r.value),
     ),
-  ).toEqual(['https://www.rust-lang.org/']);
+  ).toBe('https://www.rust-lang.org/');
 
   // A registered function needs no eval — the CSP-safe path.
   expect(
@@ -336,4 +350,30 @@ test('a failed run still hands back the diagnostics it wrote', async ({ page }) 
   // ...and it carries what the command managed to write first.
   expect(result.log).toEqual(['step one ok']);
   expect(result.err).toEqual(['about to fail']);
+});
+
+test('watch streams DOM events and head terminates it', async ({ page }) => {
+  await page.goto('/');
+  await waitForTerminal(page);
+
+  const done = page.evaluate(() =>
+    window.bt.run('watch click | map type | head 3').then((r) => r.value),
+  );
+
+  await page.waitForTimeout(200);
+  for (let i = 0; i < 4; i++) {
+    await page.mouse.click(10, 10);
+    await page.waitForTimeout(40);
+  }
+
+  const value = await done;
+  expect(value).toEqual(['click', 'click', 'click']);
+
+  // The listener must be gone and the source must still work cleanly.
+  const again = page.evaluate(() =>
+    window.bt.run('watch click | head 1').then((r) => r.value),
+  );
+  await page.waitForTimeout(150);
+  await page.mouse.click(10, 10);
+  expect(await again).toEqual({ type: 'click', target: expect.any(String) });
 });

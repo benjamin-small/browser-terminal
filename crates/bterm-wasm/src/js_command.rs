@@ -120,30 +120,35 @@ impl Command for JsCommand {
                         .map_err(|e| js_error_to_shell(&e, span, &name))?;
                     let value = js_to_value(&value_js)
                         .map_err(|msg| ShellError::runtime(format!("`{name}`: {msg}")).with_span(span))?;
+                    // Downstream closed (e.g. `head`): stop the generator so its
+                    // finally runs (listeners/resources released).
+                    //
+                    // Note: this does NOT fire `ctx.signal` -- that only fires on
+                    // Ctrl-C/dispose via `abort_pane`. An in-flight
+                    // `fetch(..., { signal: ctx.signal })` between yields is
+                    // therefore not cancelled by a downstream `head` closing the
+                    // channel, only by Ctrl-C. Known, documented limitation; the
+                    // generator's `finally` (via `return()`) is the cleanup path
+                    // for downstream close.
                     if bterm_core::stream::flatten(PipelineData::Value(value), &output).await.is_err() {
-                        // Downstream closed (e.g. `head`): stop the generator so
-                        // its finally runs (listeners/resources released).
-                        //
-                        // Note: this does NOT fire `ctx.signal` -- that only
-                        // fires on Ctrl-C/dispose via `abort_pane`. An in-flight
-                        // `fetch(..., { signal: ctx.signal })` between yields is
-                        // therefore not cancelled by a downstream `head` closing
-                        // the channel, only by Ctrl-C. Known, documented
-                        // limitation; the generator's `finally` (via `return()`)
-                        // is the cleanup path for downstream close.
-                        if let Ok(ret) = js_sys::Reflect::get(&iterator, &JsValue::from_str("return")) {
-                            if ret.is_function() {
-                                let ret_fn = js_sys::Function::from(ret);
-                                if let Ok(p) = ret_fn.call0(&iterator) {
-                                    // Await the return() so finally completes
-                                    // before we drop the closures below.
-                                    let _ = wasm_bindgen_futures::JsFuture::from(
-                                        js_sys::Promise::resolve(&p),
-                                    )
-                                    .await;
-                                }
-                            }
-                        }
+                        stop_iterator(&iterator).await;
+                        break;
+                    }
+                    // The send above only proves the channel had buffer space,
+                    // not that downstream is still reading: a collecting
+                    // consumer like `head N` can reach its limit and drop its
+                    // receiver only *after* actually processing what we just
+                    // sent, which happens on its own turn of the driver's poll
+                    // pass, not before. `yield_once` hands control back so that
+                    // turn happens before we ask the generator for the next
+                    // item. Without it, a live source (`watch`) would block on
+                    // a pull downstream no longer wants, waiting on a real-world
+                    // event (e.g. a second click) that may never come, and
+                    // `head N` could never terminate an infinite/live upstream
+                    // as the streaming design promises.
+                    yield_once().await;
+                    if output.is_closed() {
+                        stop_iterator(&iterator).await;
                         break;
                     }
                 }
@@ -168,6 +173,43 @@ impl Command for JsCommand {
             Ok(())
         })
     }
+}
+
+/// Call an async iterator's `return()`, if it has one, and await the result
+/// so its `finally` block (listener/resource cleanup) completes before the
+/// caller proceeds. Shared by both places the streaming loop decides to stop
+/// early: a failed send, and a downstream close discovered after the fact.
+async fn stop_iterator(iterator: &JsValue) {
+    if let Ok(ret) = js_sys::Reflect::get(iterator, &JsValue::from_str("return")) {
+        if ret.is_function() {
+            let ret_fn = js_sys::Function::from(ret);
+            if let Ok(p) = ret_fn.call0(iterator) {
+                let _ = wasm_bindgen_futures::JsFuture::from(js_sys::Promise::resolve(&p)).await;
+            }
+        }
+    }
+}
+
+/// Hand control back to `pipeline::drive`'s poll pass exactly once.
+///
+/// `drive` polls every stage once per pass regardless of whether earlier
+/// stages returned `Ready` or `Pending`, so a self-wake-then-`Pending` here
+/// lets a downstream stage that can finish synchronously (e.g. `head N`
+/// hitting its limit) actually run and drop its receiver within the same
+/// pass, rather than leaving `output.is_closed()` stale until some unrelated
+/// future event happens to re-poll us.
+async fn yield_once() {
+    let mut yielded = false;
+    std::future::poll_fn(move |cx| {
+        if yielded {
+            std::task::Poll::Ready(())
+        } else {
+            yielded = true;
+            cx.waker().wake_by_ref();
+            std::task::Poll::Pending
+        }
+    })
+    .await
 }
 
 /// Map a thrown/rejected JS value to a ShellError. `Error` instances and

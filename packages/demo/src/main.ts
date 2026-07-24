@@ -102,12 +102,51 @@ async function main(): Promise<void> {
   });
   // #endregion
 
+  // #region watch
+  // A live source: streams DOM events as they happen. `head N` closing the
+  // stream removes the listener, so `watch click | head 3` stops after three
+  // clicks and leaves no listener behind.
+  bt.registerCommand(
+    {
+      name: 'watch',
+      summary: 'Stream DOM events off the page (Ctrl-C or a downstream `head` stops it)',
+      optional: [{ name: 'event', shape: 'str', desc: 'event type, default click' }],
+    },
+    async function* ({ positionals }, _input, ctx) {
+      const type = String(positionals[0] ?? 'click');
+      const queue: Array<{ type: string; target: string }> = [];
+      let wake: (() => void) | null = null;
+      const onEvent = (e: Event) => {
+        queue.push({ type: e.type, target: (e.target as Element)?.tagName ?? '' });
+        wake?.();
+      };
+      document.addEventListener(type, onEvent);
+      ctx.signal.addEventListener('abort', () => {
+        document.removeEventListener(type, onEvent);
+        wake?.();
+      });
+      try {
+        while (!ctx.signal.aborted) {
+          if (queue.length === 0) {
+            await new Promise<void>((r) => (wake = r));
+            continue;
+          }
+          yield queue.shift();
+        }
+      } finally {
+        document.removeEventListener(type, onEvent);
+      }
+    },
+  );
+  // #endregion
+
   // Show the real wiring on the page.
   const host = document.getElementById('source');
   host?.append(
     codePanel('Registering a command over the page DOM', selfSource, 'links'),
     codePanel('An async, cancellable command (slow)', selfSource, 'slow'),
     codePanel('A named selector function (@host)', selfSource, 'selector'),
+    codePanel('A live streaming source (watch)', selfSource, 'watch'),
   );
 
   // …and what that signature produces. Asking the engine rather than pasting
