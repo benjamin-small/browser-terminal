@@ -7,6 +7,7 @@ use crate::ast::{Call, Line, Pipeline};
 use crate::error::ShellError;
 use crate::registry::{Command, CommandRegistry, ExecContext, PipelineData};
 use crate::signature::{bind, wants_help, Scope};
+use std::cell::RefCell;
 use std::rc::Rc;
 
 /// Resolves command names. `lookup` is synchronous and must not hold any
@@ -69,17 +70,120 @@ pub async fn eval_line(
     (results, None)
 }
 
+/// Evaluate a pipeline by running every stage as a concurrent future joined
+/// by bounded channels.
+///
+/// Every command still collects its whole input, so a stage cannot start
+/// before its predecessor finishes and the output is identical to the
+/// sequential version this replaced. What changes is the transport: the
+/// machinery for streaming stages is in place and exercised, so a later
+/// stage adds streaming commands rather than rebuilding how stages talk.
 pub async fn eval_pipeline(
     pipeline: &Pipeline,
     source: &impl CommandSource,
     ctx: &ExecContext,
     scope: &Scope,
 ) -> Result<PipelineData, ShellError> {
-    let mut data = PipelineData::Empty;
-    for call in &pipeline.calls {
-        data = eval_call(call, data, source, ctx, scope).await?;
+    // A single call has no channel to build; keep the direct path so the
+    // common case pays nothing for machinery it cannot use.
+    if pipeline.calls.len() == 1 {
+        return eval_call(&pipeline.calls[0], PipelineData::Empty, source, ctx, scope).await;
     }
-    Ok(data)
+
+    let outcome: Rc<RefCell<Option<PipelineData>>> = Rc::new(RefCell::new(None));
+    let failure: Rc<RefCell<Option<ShellError>>> = Rc::new(RefCell::new(None));
+
+    let mut stages: Vec<crate::pipeline::BoxedStage<'_>> = Vec::new();
+    let mut upstream: Option<crate::chan::Receiver> = None;
+
+    for (idx, call) in pipeline.calls.iter().enumerate() {
+        let last = idx + 1 == pipeline.calls.len();
+        let rx = upstream.take();
+        let (tx, next_rx) = if last {
+            (None, None)
+        } else {
+            let (tx, rx) = crate::chan::channel(STAGE_BUFFER);
+            (Some(tx), Some(rx))
+        };
+        upstream = next_rx;
+
+        stages.push(Box::pin(run_stage(
+            call,
+            rx,
+            tx,
+            source,
+            ctx,
+            scope,
+            last.then(|| outcome.clone()),
+            failure.clone(),
+        )));
+    }
+
+    crate::pipeline::drive(stages).await;
+
+    if let Some(err) = failure.borrow_mut().take() {
+        return Err(err);
+    }
+    let result = outcome.borrow_mut().take().unwrap_or(PipelineData::Empty);
+    Ok(result)
+}
+
+/// Items a stage may buffer before its producer is made to wait. The bound
+/// is what makes memory usage independent of how fast a producer runs.
+const STAGE_BUFFER: usize = 64;
+
+/// One stage: drain the upstream channel, run the command, hand the result
+/// downstream (or to `outcome`, for the last stage).
+///
+/// The first error wins and stops the pipeline; later stages find their
+/// channel closed and return without overwriting it with a symptom.
+#[allow(clippy::too_many_arguments)]
+async fn run_stage(
+    call: &Call,
+    upstream: Option<crate::chan::Receiver>,
+    downstream: Option<crate::chan::Sender>,
+    source: &impl CommandSource,
+    ctx: &ExecContext,
+    scope: &Scope,
+    outcome: Option<Rc<RefCell<Option<PipelineData>>>>,
+    failure: Rc<RefCell<Option<ShellError>>>,
+) {
+    // Collect the whole upstream. Every command still wants its complete
+    // input; streaming commands arrive in a later stage of this project.
+    let input = match upstream {
+        None => PipelineData::Empty,
+        Some(mut rx) => {
+            let mut last = PipelineData::Empty;
+            while let Some(item) = rx.recv().await {
+                last = item;
+            }
+            last
+        }
+    };
+
+    // An earlier stage already failed; do not run, and do not overwrite its
+    // error with a downstream symptom.
+    if failure.borrow().is_some() {
+        return;
+    }
+
+    match eval_call(call, input, source, ctx, scope).await {
+        Ok(data) => match (downstream, outcome) {
+            (Some(tx), _) => {
+                // Err means the consumer went away, which is not this
+                // stage's problem to report.
+                let _ = tx.send(data).await;
+            }
+            (None, Some(slot)) => *slot.borrow_mut() = Some(data),
+            (None, None) => {}
+        },
+        Err(err) => {
+            let mut slot = failure.borrow_mut();
+            if slot.is_none() {
+                *slot = Some(err);
+            }
+        }
+    }
 }
 
 async fn eval_call(
