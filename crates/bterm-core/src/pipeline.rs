@@ -59,6 +59,12 @@ impl Wake for NudgeWaker {
 /// which keeps claiming progress without making any cannot hold the thread.
 /// On the browser's single thread that would be a frozen tab -- no
 /// rendering, no input, no way for Ctrl-C's abort to run.
+///
+/// Expect this to be hit routinely once streaming lands: draining real
+/// volume through a 64-slot channel needs more than 64 passes, so the
+/// driver will yield periodically under load. That is the cap working, not
+/// a stall — each yield costs one executor round-trip and keeps the page
+/// responsive.
 const MAX_PASSES_PER_POLL: usize = 64;
 
 /// Poll every stage until all complete.

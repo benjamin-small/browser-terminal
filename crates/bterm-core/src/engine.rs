@@ -874,9 +874,18 @@ mod tests {
         assert!(out.contains("\x1b[31m"), "err not styled: {out:?}");
     }
 
-    /// Takes an engine borrow on every poll and yields in between, so that
-    /// if the driver ever polled two stages while one held a borrow, the
-    /// second would panic with "already borrowed".
+    /// Takes an engine borrow on every poll and yields in between.
+    ///
+    /// Honest about what this proves *today*: not much. Two commands cannot
+    /// currently be in flight at once — a stage drains and closes its
+    /// upstream before the next one runs — and `EngineAccess::with`'s
+    /// signature already makes a borrow escaping across an await a compile
+    /// error rather than a runtime one. So this cannot presently fail.
+    ///
+    /// It is here as insurance for stage 3, where streaming stages consume
+    /// partial input and genuinely do overlap. At that point an overlapping
+    /// borrow becomes reachable, and this fixture is what would catch it —
+    /// as a panic, not a failed assertion.
     struct Borrower(Rc<RefCell<Engine>>);
     impl Command for Borrower {
         fn signature(&self) -> &Signature {
