@@ -148,15 +148,26 @@ async fn run_stage(
     outcome: Option<Rc<RefCell<Option<PipelineData>>>>,
     failure: Rc<RefCell<Option<ShellError>>>,
 ) {
-    // Collect the whole upstream. Every command still wants its complete
-    // input; streaming commands arrive in a later stage of this project.
     let input = match upstream {
         None => PipelineData::Empty,
         Some(mut rx) => {
+            // Collect the whole upstream. Every command still wants its
+            // complete input; streaming commands arrive in a later stage.
+            //
+            // Keeping only the last item is correct *because* nothing sends
+            // more than one yet. The assert is here so that a future
+            // streaming producer fails loudly in debug rather than silently
+            // dropping everything but its final item.
             let mut last = PipelineData::Empty;
+            let mut count = 0usize;
             while let Some(item) = rx.recv().await {
                 last = item;
+                count += 1;
             }
+            debug_assert!(
+                count <= 1,
+                "a stage sent {count} items, but collecting stages keep only the last"
+            );
             last
         }
     };
@@ -300,10 +311,29 @@ mod tests {
         }
     }
 
+    /// Always fails, so error propagation through the channel wiring can be
+    /// asserted rather than assumed.
+    struct Boom;
+    impl Command for Boom {
+        fn signature(&self) -> &Signature {
+            static SIG: std::sync::OnceLock<Signature> = std::sync::OnceLock::new();
+            SIG.get_or_init(|| Signature::build("boom", "always fails"))
+        }
+        fn run(
+            &self,
+            _ctx: ExecContext,
+            _call: BoundCall,
+            _input: PipelineData,
+        ) -> LocalBoxFuture<Result<PipelineData, ShellError>> {
+            ready(Err(ShellError::runtime("boom")))
+        }
+    }
+
     fn registry() -> CommandRegistry {
         let mut r = CommandRegistry::new();
         r.register_builtin(Rc::new(Emit));
         r.register_builtin(Rc::new(Double));
+        r.register_builtin(Rc::new(Boom));
         r
     }
 
@@ -349,6 +379,25 @@ mod tests {
         let err = eval("emti 1").expect_err("should fail");
         assert!(err.msg.contains("unknown command `emti`"));
         assert_eq!(err.help.as_deref(), Some("did you mean `emit`?"));
+    }
+
+    #[test]
+    fn a_failing_stage_stops_the_pipeline_and_keeps_its_own_error() {
+        // The first error wins: a later stage must not overwrite it with a
+        // downstream symptom of the same failure.
+        let err = eval("emit 1 | boom | double").expect_err("boom should fail");
+        assert!(err.msg.contains("boom"), "wrong error survived: {}", err.msg);
+    }
+
+    #[test]
+    fn a_three_stage_pipeline_threads_values_end_to_end() {
+        // Two channels, three stages: proves the wiring is not accidentally
+        // correct only for the single-channel case.
+        let out = eval("emit 5 | double | double").expect("eval");
+        assert_eq!(
+            out.into_iter().last().map(PipelineData::into_value),
+            Some(Value::Int(20))
+        );
     }
 
     #[test]
