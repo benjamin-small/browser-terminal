@@ -45,6 +45,38 @@ fn cmd(sig: Signature, run_fn: RunFn) -> Rc<dyn Command> {
     Rc::new(Builtin { sig, run_fn })
 }
 
+/// A command that transforms its input stream item by item.
+type StreamFn = fn(
+    ExecContext,
+    BoundCall,
+    crate::chan::Receiver,
+    crate::chan::Sender,
+) -> crate::registry::LocalBoxFuture<Result<(), ShellError>>;
+
+struct StreamingBuiltin {
+    sig: Signature,
+    run_fn: StreamFn,
+}
+
+impl Command for StreamingBuiltin {
+    fn signature(&self) -> &Signature {
+        &self.sig
+    }
+    fn run(
+        &self,
+        ctx: ExecContext,
+        call: BoundCall,
+        input: crate::chan::Receiver,
+        output: crate::chan::Sender,
+    ) -> crate::registry::LocalBoxFuture<Result<(), ShellError>> {
+        (self.run_fn)(ctx, call, input, output)
+    }
+}
+
+fn streaming(sig: Signature, run_fn: StreamFn) -> Rc<dyn Command> {
+    Rc::new(StreamingBuiltin { sig, run_fn })
+}
+
 pub fn register_all(registry: &mut CommandRegistry) {
     registry.register_builtin(cmd(
         Signature::build("echo", "Return the given values").rest_arg("values", Shape::Any, "values to return"),
@@ -74,7 +106,7 @@ pub fn register_all(registry: &mut CommandRegistry) {
             .flag("invert", Some('v'), None, "keep items that return false instead"),
         filter,
     ));
-    registry.register_builtin(cmd(
+    registry.register_builtin(streaming(
         Signature::build("head", "Take the first row (or first n rows)")
             .optional_arg("n", Shape::Int, "how many rows"),
         head,
@@ -468,15 +500,30 @@ fn take_n(call: &BoundCall) -> Result<Option<usize>, ShellError> {
     }
 }
 
-fn head(_ctx: ExecContext, call: BoundCall, input: PipelineData) -> Result<PipelineData, ShellError> {
-    let n = take_n(&call)?;
-    match input.into_value() {
-        Value::List(items) => Ok(PipelineData::Value(match n {
-            None => items.into_iter().next().unwrap_or(Value::Null),
-            Some(n) => Value::List(items.into_iter().take(n).collect()),
-        })),
-        other => Err(type_err("head", "a list", &other)),
-    }
+fn head(
+    _ctx: ExecContext,
+    call: BoundCall,
+    mut input: crate::chan::Receiver,
+    output: crate::chan::Sender,
+) -> crate::registry::LocalBoxFuture<Result<(), ShellError>> {
+    Box::pin(async move {
+        let n = take_n(&call)?;
+        let limit = n.unwrap_or(1);
+        let mut taken = 0usize;
+        while taken < limit {
+            match input.recv().await {
+                Some(item) => {
+                    if output.send(item).await.is_err() {
+                        return Ok(()); // downstream closed us early too
+                    }
+                    taken += 1;
+                }
+                None => break, // upstream ended before we hit the limit
+            }
+        }
+        // Dropping `input` here closes the upstream, stopping the producer.
+        Ok(())
+    })
 }
 
 fn tail(_ctx: ExecContext, call: BoundCall, input: PipelineData) -> Result<PipelineData, ShellError> {
@@ -1279,5 +1326,64 @@ mod tests {
     fn quoted_true_stays_string_bareword_true_is_bool() {
         assert_eq!(eval("echo 'true'").expect("eval"), Value::Str("true".into()));
         assert_eq!(eval("echo true").expect("eval"), Value::Bool(true));
+    }
+
+    /// Emits ints 1.. forever, recording how many it managed to send. A
+    /// downstream `head` closing the channel is what stops it.
+    struct Counter(std::rc::Rc<std::cell::Cell<i64>>);
+    impl Command for Counter {
+        fn signature(&self) -> &Signature {
+            static SIG: std::sync::OnceLock<Signature> = std::sync::OnceLock::new();
+            SIG.get_or_init(|| Signature::build("counter", "emits forever"))
+        }
+        fn run(
+            &self,
+            _ctx: ExecContext,
+            _call: BoundCall,
+            _input: crate::chan::Receiver,
+            output: crate::chan::Sender,
+        ) -> crate::registry::LocalBoxFuture<Result<(), ShellError>> {
+            let sent = self.0.clone();
+            Box::pin(async move {
+                let mut n = 0i64;
+                loop {
+                    n += 1;
+                    if output.send(PipelineData::Value(Value::Int(n))).await.is_err() {
+                        sent.set(n - 1); // the last send failed: head closed us
+                        return Ok(());
+                    }
+                }
+            })
+        }
+    }
+
+    #[test]
+    fn head_terminates_an_infinite_producer() {
+        let sent = std::rc::Rc::new(std::cell::Cell::new(0));
+        let mut registry = CommandRegistry::new();
+        register_all(&mut registry);
+        registry.register_builtin(Rc::new(Counter(sent.clone())));
+
+        let ctx = ExecContext {
+            host: Rc::new(TestHost),
+            sink: Rc::new(crate::sink::NullSink),
+            width: 80,
+            pane: 0,
+            run_id: 0,
+        };
+        let out = parse("counter | head 3");
+        assert!(out.errors.is_empty(), "{:?}", out.errors);
+        let (mut results, error) =
+            block_on(eval_line(&out.line, &registry, &ctx, &Scope::new()));
+        assert!(error.is_none(), "{:?}", error);
+        assert_eq!(
+            results.pop().map(PipelineData::into_value),
+            Some(Value::List(vec![Value::Int(1), Value::Int(2), Value::Int(3)]))
+        );
+        // The producer must have stopped, not run away. With STAGE_BUFFER=64
+        // it may get a bufferful ahead, but it must be bounded and must have
+        // observed the close.
+        assert!(sent.get() >= 3, "produced too few: {}", sent.get());
+        assert!(sent.get() < 1000, "producer did not stop: {}", sent.get());
     }
 }
