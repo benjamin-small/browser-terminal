@@ -82,10 +82,78 @@ impl Command for JsCommand {
             let resolved = wasm_bindgen_futures::JsFuture::from(js_sys::Promise::resolve(&returned))
                 .await
                 .map_err(|e| js_error_to_shell(&e, span, &name))?;
-            drop(log);
-            drop(err);
-            drop(emit);
 
+            // Streaming: an async iterable (async generator) yields items over
+            // time. `head` closing the channel makes us call the iterator's
+            // return(), so the generator's finally runs -- that is where a
+            // watch-style command removes its DOM listener.
+            let async_iter_sym = js_sys::Symbol::async_iterator();
+            let iter_getter = js_sys::Reflect::get(&resolved, async_iter_sym.as_ref()).ok();
+            let is_async_iterable = iter_getter.as_ref().is_some_and(|f| f.is_function());
+
+            if is_async_iterable {
+                let getter = js_sys::Function::from(
+                    js_sys::Reflect::get(&resolved, async_iter_sym.as_ref())
+                        .map_err(|e| js_error_to_shell(&e, span, &name))?,
+                );
+                let iterator = getter
+                    .call0(&resolved)
+                    .map_err(|e| js_error_to_shell(&e, span, &name))?;
+                let next_fn = js_sys::Function::from(
+                    js_sys::Reflect::get(&iterator, &JsValue::from_str("next"))
+                        .map_err(|e| js_error_to_shell(&e, span, &name))?,
+                );
+                loop {
+                    let next_call = next_fn
+                        .call0(&iterator)
+                        .map_err(|e| js_error_to_shell(&e, span, &name))?;
+                    let step = wasm_bindgen_futures::JsFuture::from(js_sys::Promise::resolve(&next_call))
+                        .await
+                        .map_err(|e| js_error_to_shell(&e, span, &name))?;
+                    let done = js_sys::Reflect::get(&step, &JsValue::from_str("done"))
+                        .map(|v| v.is_truthy())
+                        .unwrap_or(true);
+                    if done {
+                        break;
+                    }
+                    let value_js = js_sys::Reflect::get(&step, &JsValue::from_str("value"))
+                        .map_err(|e| js_error_to_shell(&e, span, &name))?;
+                    let value = js_to_value(&value_js)
+                        .map_err(|msg| ShellError::runtime(format!("`{name}`: {msg}")).with_span(span))?;
+                    if bterm_core::stream::flatten(PipelineData::Value(value), &output).await.is_err() {
+                        // Downstream closed (e.g. `head`): stop the generator so
+                        // its finally runs (listeners/resources released).
+                        //
+                        // Note: this does NOT fire `ctx.signal` -- that only
+                        // fires on Ctrl-C/dispose via `abort_pane`. An in-flight
+                        // `fetch(..., { signal: ctx.signal })` between yields is
+                        // therefore not cancelled by a downstream `head` closing
+                        // the channel, only by Ctrl-C. Known, documented
+                        // limitation; the generator's `finally` (via `return()`)
+                        // is the cleanup path for downstream close.
+                        if let Ok(ret) = js_sys::Reflect::get(&iterator, &JsValue::from_str("return")) {
+                            if ret.is_function() {
+                                let ret_fn = js_sys::Function::from(ret);
+                                if let Ok(p) = ret_fn.call0(&iterator) {
+                                    // Await the return() so finally completes
+                                    // before we drop the closures below.
+                                    let _ = wasm_bindgen_futures::JsFuture::from(
+                                        js_sys::Promise::resolve(&p),
+                                    )
+                                    .await;
+                                }
+                            }
+                        }
+                        break;
+                    }
+                }
+                drop(log);
+                drop(err);
+                drop(emit);
+                return Ok(());
+            }
+
+            // Not an async iterable: the existing collecting path.
             let pd = if resolved.is_undefined() {
                 PipelineData::Empty
             } else {
@@ -94,6 +162,9 @@ impl Command for JsCommand {
                 PipelineData::Value(value)
             };
             let _ = bterm_core::stream::flatten(pd, &output).await;
+            drop(log);
+            drop(err);
+            drop(emit);
             Ok(())
         })
     }
