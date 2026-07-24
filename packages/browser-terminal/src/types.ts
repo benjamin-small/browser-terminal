@@ -91,3 +91,18 @@ export interface RunResult {
   /** Channel 2 lines, in order. */
   err: string[];
 }
+
+/**
+ * What `run()` rejects with: an ordinary `Error` that also carries whatever
+ * the pipeline wrote before it failed, including on Ctrl-C.
+ *
+ * It stays an `Error` — rather than resolving with an `error` field — so
+ * `try`/`catch` and `instanceof` keep working and a failure cannot be
+ * missed by an `await` that never checks.
+ */
+export interface RunError extends Error {
+  /** Channel 3 lines written before the failure. */
+  log: string[];
+  /** Channel 2 lines written before the failure. */
+  err: string[];
+}

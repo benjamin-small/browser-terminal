@@ -102,6 +102,21 @@ fn string_array(lines: &[String]) -> js_sys::Array {
     lines.iter().map(|s| JsValue::from_str(s)).collect()
 }
 
+/// Build `run()`'s rejection: a real `Error` carrying whatever the pipeline
+/// wrote before it failed.
+///
+/// A failure is exactly when the log leading up to it matters most, so
+/// rejecting with only a message throws away the useful part. It stays an
+/// `Error` rather than becoming a resolved `{ error }` object because a
+/// promise that resolves on failure invites callers to miss it — `await`
+/// with no check would silently continue.
+fn run_rejection(msg: &str, sink: &bterm_core::sink::CollectingSink) -> JsValue {
+    let e = js_sys::Error::new(msg);
+    let _ = js_sys::Reflect::set(&e, &JsValue::from_str("log"), &string_array(&sink.log_lines()));
+    let _ = js_sys::Reflect::set(&e, &JsValue::from_str("err"), &string_array(&sink.err_lines()));
+    e.into()
+}
+
 /// Spawn one submitted line as an abortable task, tracked in the task
 /// registry so Ctrl-C / dispose can cancel it.
 fn spawn_pipeline(pane: u32, line: String) {
@@ -307,7 +322,10 @@ impl BtermCore {
     /// resolve with `{ value, log, err }` — the final structured value
     /// plus whatever the pipeline wrote to its two diagnostic channels (no
     /// prompt echo, no pane render, nothing written to the terminal).
-    /// Rejects with an Error whose message is the shell error.
+    ///
+    /// Rejects with an `Error` whose message is the shell error and which
+    /// also carries `log` and `err` — a failed run keeps the diagnostics it
+    /// wrote on the way down.
     pub fn run(&self, pane: u32, line: String) -> js_sys::Promise {
         if !engine_alive() {
             return js_sys::Promise::reject(&JsValue::from_str(
@@ -355,9 +373,11 @@ impl BtermCore {
                         if let Some(help) = &err.help {
                             msg.push_str(&format!(" ({help})"));
                         }
-                        Err(js_sys::Error::new(&msg).into())
+                        Err(run_rejection(&msg, &sink))
                     }
-                    Err(_aborted) => Err(js_sys::Error::new("aborted").into()),
+                    // Ctrl-C keeps what the command managed to print — the
+                    // partial log is usually why you interrupted it.
+                    Err(_aborted) => Err(run_rejection("aborted", &sink)),
                 }
             } else {
                 Err(js_sys::Error::new("AbortController unavailable").into())

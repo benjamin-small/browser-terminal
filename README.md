@@ -117,15 +117,18 @@ const bt = await BrowserTerminal.create({
 bt.registerCommand(spec, (args, input, ctx) => value | Promise<value>);
 //  spec: { name, summary?, required?, optional?, rest?, flags? }
 //  args: { positionals: Value[], flags: Record<string, Value> }
-//  ctx:  { signal: AbortSignal, emit(line: string): void }
+//  ctx:  { signal: AbortSignal, log(line), err(line), emit(line) }
+//        log = progress (plain), err = warning (red); neither enters the pipe.
+//        emit is a retained alias for log.
 //  throw { message, help? } for rich diagnostics
 bt.unregisterCommand(name);
 bt.registerFn(name, (item) => value);  // usable as @name in any selector
 bt.unregisterFn(name);
 bt.run(line): Promise<{ value: Value; log: string[]; err: string[] }>;  // programmatic execution
-// `log`/`err` are the diagnostics a pane would normally render (ctx.log/ctx.err,
-// caret errors, …); a programmatic run collects them into these arrays instead
-// of printing to the pane, so a background call never writes on the user's terminal.
+// `log`/`err` are what ctx.log/ctx.err wrote. A programmatic run collects them
+// instead of printing, so a background call never writes on the user's terminal.
+// On failure or Ctrl-C it rejects with an Error carrying the same two arrays —
+// a failed run keeps the log that led up to it.
 bt.snapshot;                   // sessions/windows/pane rects
 bt.setPanelMode('float');      // pop out; 'right'/'left' to dock again
 bt.panelMode;                  // current mode

@@ -32,6 +32,7 @@ export type {
   CommandSpec,
   FlagSpec,
   PosArg,
+  RunError,
   RunResult,
   SelectorFn,
   Shape,
@@ -211,6 +212,10 @@ export class BrowserTerminal {
    * instead of printing, so a background call (e.g. from a `useEffect`)
    * never writes on whatever pane happens to be active; the caller decides
    * what, if anything, to surface.
+   *
+   * Rejects with a {@link RunError} on failure or Ctrl-C — an ordinary
+   * `Error` that also carries the `log` and `err` written before things
+   * went wrong, which is when they are most worth having.
    */
   run(line: string): Promise<RunResult> {
     if (this.disposed) {

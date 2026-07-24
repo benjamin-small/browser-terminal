@@ -304,3 +304,36 @@ test('SECURITY: a page-controlled diagnostic cannot clear the terminal', async (
   expect(result.err[0]).not.toContain('[2J');
   expect(result.err[0]).toBe('PAYLOAD second');
 });
+
+test('a failed run still hands back the diagnostics it wrote', async ({ page }) => {
+  await page.goto('/');
+  await waitForTerminal(page);
+
+  // A failure is exactly when the log leading up to it matters most, so
+  // rejecting with only the message would throw away the useful part.
+  const result = await page.evaluate(() => {
+    window.bt.registerCommand({ name: 'loud-fail', summary: 'probe' }, (_a, _i, ctx) => {
+      ctx.log('step one ok');
+      ctx.err('about to fail');
+      throw { message: 'it broke', help: 'this is the demo failure' };
+    });
+    return window.bt.run('loud-fail').then(
+      () => ({ resolved: true }),
+      (e: Error & { log?: string[]; err?: string[] }) => ({
+        resolved: false,
+        message: e.message,
+        isError: e instanceof Error,
+        log: e.log,
+        err: e.err,
+      }),
+    );
+  });
+
+  expect(result.resolved).toBe(false);
+  // Still a real Error, so `catch` and `instanceof` keep working.
+  expect(result.isError).toBe(true);
+  expect(result.message).toContain('it broke');
+  // ...and it carries what the command managed to write first.
+  expect(result.log).toEqual(['step one ok']);
+  expect(result.err).toEqual(['about to fail']);
+});
