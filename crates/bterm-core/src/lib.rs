@@ -17,6 +17,7 @@ pub mod lex;
 pub mod matcher;
 pub mod mux;
 pub mod parse;
+pub mod pipeline;
 pub mod protocol;
 pub mod registry;
 pub mod render;

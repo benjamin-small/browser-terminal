@@ -231,4 +231,40 @@ mod tests {
         );
         assert_eq!(tx.len(), 1, "the bound was exceeded");
     }
+
+    #[test]
+    fn a_parked_sender_resumes_once_the_consumer_drains() {
+        // Four items through a two-slot buffer: the producer must park and
+        // be woken more than once. This is the wakeup path a no-op waker
+        // would otherwise silently break.
+        let (tx, mut rx) = channel(2);
+        let sent = std::rc::Rc::new(std::cell::Cell::new(0));
+        let seen = std::rc::Rc::new(std::cell::Cell::new(0));
+
+        let producer = {
+            let sent = sent.clone();
+            async move {
+                for n in 1..=4 {
+                    tx.send(item(n)).await.expect("send");
+                    sent.set(sent.get() + 1);
+                }
+            }
+        };
+        let consumer = {
+            let seen = seen.clone();
+            async move {
+                while rx.recv().await.is_some() {
+                    seen.set(seen.get() + 1);
+                }
+            }
+        };
+
+        block_on(crate::pipeline::drive(vec![
+            Box::pin(producer),
+            Box::pin(consumer),
+        ]));
+
+        assert_eq!(sent.get(), 4, "producer did not finish");
+        assert_eq!(seen.get(), 4, "consumer did not see everything");
+    }
 }
