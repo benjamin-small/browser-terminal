@@ -119,23 +119,40 @@ pub async fn eval_pipeline(
     // is the intended "trust drops once consumed" rule. This is the outer
     // boundary instead: the renderer needs to know a single surviving item
     // was `Rendered` (pre-styled help/table text) rather than a `Value` to
-    // print it verbatim instead of running it through `render()`. A single
-    // command's own `flatten` call produces either all-`Value` items (a
-    // `List` unrolled, or one scalar) or exactly one `Rendered` item — never
-    // a mix — so only the N == 1 case needs the tag preserved; N > 1 is
-    // always `Value` items and collects the same way `stream::collect` would.
+    // print it verbatim instead of running it through `render()`.
+    //
+    // A pure help/text stream reaching this boundary (e.g. `cmd --help`,
+    // now sent as one `Rendered` item per line) stays trusted text, joined
+    // back into a single `Rendered` block and printed verbatim — so a bare
+    // `cmd --help` looks the same as before streaming. Anything else
+    // collects as: 0 items -> Empty, 1 item -> that item (tag preserved), N
+    // items -> a `Value::List` (the same way `stream::collect` would).
     let outcome_for_collector = outcome.clone();
     stages.push(Box::pin(async move {
         let mut items: Vec<PipelineData> = Vec::new();
         while let Some(item) = upstream.recv().await {
             items.push(item);
         }
-        let collected = match items.len() {
-            0 => PipelineData::Empty,
-            1 => items.into_iter().next().expect("len checked above"),
-            _ => PipelineData::Value(Value::List(
-                items.into_iter().map(PipelineData::into_value).collect(),
-            )),
+        let all_rendered = !items.is_empty()
+            && items.iter().all(|i| matches!(i, PipelineData::Rendered(_)));
+        let collected = if all_rendered {
+            let joined = items
+                .into_iter()
+                .map(|i| match i {
+                    PipelineData::Rendered(s) => s,
+                    _ => String::new(),
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            PipelineData::Rendered(joined)
+        } else {
+            match items.len() {
+                0 => PipelineData::Empty,
+                1 => items.into_iter().next().expect("len checked above"),
+                _ => PipelineData::Value(Value::List(
+                    items.into_iter().map(PipelineData::into_value).collect(),
+                )),
+            }
         };
         *outcome_for_collector.borrow_mut() = collected;
     }));
@@ -193,7 +210,7 @@ async fn eval_call(
         // (with or without `--help`) should list what lives under it.
         None => match source.group_help(&words) {
             Some(help) => {
-                let _ = output.send(PipelineData::Rendered(help)).await;
+                send_lines(&help, &output).await;
                 return Ok(());
             }
             None => return Err(source.unknown_command_error(&call.words)),
@@ -202,12 +219,23 @@ async fn eval_call(
 
     // `--help` intercepted before binding, so a malformed call still gets help.
     if wants_help(call) {
-        let _ = output.send(PipelineData::Rendered(cmd.signature().render_help())).await;
+        send_lines(&cmd.signature().render_help(), &output).await;
         return Ok(());
     }
 
     let bound = bind(cmd.signature(), &call.words[consumed..], call, scope)?;
     cmd.run(ctx.clone(), bound, input, output).await
+}
+
+/// Send trusted, pre-styled text downstream as one `Rendered` item per line,
+/// so `cmd --help | grep flag` filters lines. A downstream stage consuming
+/// these gets plain `Str` (via `into_value`), which is where the trust drops.
+async fn send_lines(text: &str, output: &crate::chan::Sender) {
+    for line in text.lines() {
+        if output.send(PipelineData::Rendered(line.to_string())).await.is_err() {
+            return;
+        }
+    }
 }
 
 /// Minimal executor for native use (CLI, tests). Core builtins complete
@@ -409,6 +437,60 @@ mod tests {
                 assert!(s.contains('\x1b'), "help keeps its ANSI styling");
             }
             other => panic!("expected rendered help text, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn help_streams_lines_so_grep_can_filter_them() {
+        let mut registry = CommandRegistry::new();
+        crate::builtins::register_all(&mut registry);
+        let ctx = ExecContext {
+            host: Rc::new(NullHost),
+            sink: Rc::new(crate::sink::NullSink),
+            width: 80,
+            pane: 0,
+            run_id: 0,
+        };
+        // `sort-by --help` has a `--reverse` line; grep keeps only it.
+        let out = crate::parse::parse("sort-by --help | grep reverse");
+        assert!(out.errors.is_empty(), "{:?}", out.errors);
+        let (mut results, error) =
+            block_on(eval_line(&out.line, &registry, &ctx, &Scope::new()));
+        assert!(error.is_none(), "{:?}", error);
+        let value = results.pop().map(PipelineData::into_value).unwrap_or(Value::Null);
+        let text = match value {
+            Value::Str(s) => s,
+            Value::List(items) => items.iter().map(|v| v.as_str().unwrap_or("")).collect::<Vec<_>>().join("\n"),
+            other => panic!("unexpected: {other:?}"),
+        };
+        assert!(text.contains("reverse"), "no reverse line: {text:?}");
+        assert!(!text.contains("Usage"), "did not filter to one line: {text:?}");
+    }
+
+    #[test]
+    fn bare_help_still_renders_as_one_block() {
+        let mut registry = CommandRegistry::new();
+        crate::builtins::register_all(&mut registry);
+        let ctx = ExecContext {
+            host: Rc::new(NullHost),
+            sink: Rc::new(crate::sink::NullSink),
+            width: 80,
+            pane: 0,
+            run_id: 0,
+        };
+        let out = crate::parse::parse("sort-by --help");
+        assert!(out.errors.is_empty(), "{:?}", out.errors);
+        let (mut results, error) =
+            block_on(eval_line(&out.line, &registry, &ctx, &Scope::new()));
+        assert!(error.is_none(), "{:?}", error);
+        // A bare --help stays one Rendered block (verbatim, styled), NOT a
+        // table of lines.
+        match results.pop() {
+            Some(PipelineData::Rendered(s)) => {
+                assert!(s.contains("Usage"), "help text missing: {s:?}");
+                assert!(s.contains("reverse"), "flags missing: {s:?}");
+            }
+            other => panic!("expected one Rendered block, got {other:?}"),
         }
     }
 }
