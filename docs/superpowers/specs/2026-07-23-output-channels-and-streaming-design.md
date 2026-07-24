@@ -354,6 +354,13 @@ Stage 2 is deliberate: the risky part (concurrent stages, wakers,
 backpressure) goes in while behaviour is provably identical. If the suite
 passes unchanged, the transport is sound before any semantics move.
 
+> **Size note, recorded after stage 2.** The bounded channel plus concurrent
+> stage driver moved wasm from 438188 bytes (~438 KB raw, ~193 KB gzipped) to
+> 447388 bytes (~447 KB raw, ~197 KB gzipped) — a ~9.2 KB raw increase for
+> hand-rolled MPSC plumbing and the round-robin driver, with behaviour
+> unchanged (all 185 native tests and all 11 Playwright tests pass
+> untouched). See README.md for the current headline number.
+
 ## Testing
 
 The test sink makes all of this native and deterministic — round-robin

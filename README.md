@@ -348,6 +348,6 @@ just test-e2e   # Playwright smoke suite
 just pack       # npm pack dry-run
 ```
 
-Current wasm size: ~438 KB raw, ~193 KB gzipped. `just size` runs a
+Current wasm size: ~447 KB raw, ~197 KB gzipped. `just size` runs a
 `twiggy` audit; see the design spec for the measured breakdown and why the
 original 350 KB target is not reachable without cutting features.
