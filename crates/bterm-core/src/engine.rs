@@ -873,4 +873,54 @@ mod tests {
         assert!(out.contains("careful"), "err missing from pane: {out:?}");
         assert!(out.contains("\x1b[31m"), "err not styled: {out:?}");
     }
+
+    /// Takes an engine borrow on every poll and yields in between, so that
+    /// if the driver ever polled two stages while one held a borrow, the
+    /// second would panic with "already borrowed".
+    struct Borrower(Rc<RefCell<Engine>>);
+    impl Command for Borrower {
+        fn signature(&self) -> &Signature {
+            static SIG: std::sync::OnceLock<Signature> = std::sync::OnceLock::new();
+            SIG.get_or_init(|| Signature::build("borrower", "borrows the engine"))
+        }
+        fn run(
+            &self,
+            _ctx: ExecContext,
+            _call: BoundCall,
+            _input: PipelineData,
+        ) -> LocalBoxFuture<Result<PipelineData, ShellError>> {
+            let access = self.0.clone();
+            Box::pin(async move {
+                let mut yielded = false;
+                std::future::poll_fn(|cx| {
+                    // A short borrow, released before the yield — the
+                    // discipline the whole design rests on.
+                    let sessions = access.with(|e| e.mux.sessions.len());
+                    assert!(sessions > 0);
+                    if yielded {
+                        std::task::Poll::Ready(())
+                    } else {
+                        yielded = true;
+                        cx.waker().wake_by_ref();
+                        std::task::Poll::Pending
+                    }
+                })
+                .await;
+                Ok(PipelineData::Value(Value::Int(1)))
+            })
+        }
+    }
+
+    #[test]
+    fn concurrent_stages_never_hold_overlapping_engine_borrows() {
+        let access = engine();
+        access.with(|e| {
+            e.registry.register_builtin(Rc::new(Borrower(access.clone())));
+        });
+        // Three stages, each borrowing on every poll and yielding between.
+        // An overlapping borrow panics rather than failing an assertion.
+        let events = feed_and_run(&access, "borrower | borrower | borrower\r");
+        let out = output_text(&events);
+        assert!(out.contains('1'), "pipeline produced no output: {out:?}");
+    }
 }
