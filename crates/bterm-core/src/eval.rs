@@ -72,13 +72,16 @@ pub async fn eval_line(
 }
 
 /// Evaluate a pipeline by running every stage as a concurrent future joined
-/// by bounded channels.
+/// by bounded channels: each stage's `Receiver` is the previous stage's
+/// `Sender`, so a stage can start consuming as soon as its predecessor sends
+/// anything, rather than waiting for it to finish.
 ///
-/// Every command still collects its whole input, so a stage cannot start
-/// before its predecessor finishes and the output is identical to the
-/// sequential version this replaced. What changes is the transport: the
-/// machinery for streaming stages is in place and exercised, so a later
-/// stage adds streaming commands rather than rebuilding how stages talk.
+/// Every builtin today is still a *collecting* command — the `Builtin`
+/// adapter drains its whole input before running and flattens its whole
+/// result back out — so a fully-collected pipeline's output is unchanged
+/// from the sequential version this replaced. A later stage adds streaming
+/// commands that read and write item-by-item instead, without needing any
+/// change here: they just don't drain before producing.
 pub async fn eval_pipeline(
     pipeline: &Pipeline,
     source: &impl CommandSource,

@@ -1133,15 +1133,13 @@ mod tests {
     fn grep_no_matches_yields_empty_list() {
         // Two rows, not one, so the *source* survives the channel as a real
         // list (see the batch-model note above) and it is genuinely `grep`
-        // that empties it. But the emptied result is itself now
-        // indistinguishable from `Empty` on the wire — `flatten` of an
-        // empty `List` sends zero items, exactly like `PipelineData::Empty`
-        // — so `length` sees a `Value::Null`, not a zero-length list, and
-        // errors rather than computing 0. Symmetric to the singleton-list
-        // collapse above, just at the zero end.
-        let err = eval(r#"echo '[{"a":"x"},{"a":"y"}]' | from json | grep zzz | length"#)
-            .expect_err("an emptied stream collapses to Empty, not a zero-length list");
-        assert!(err.msg.contains("expects a list or string"), "{}", err.msg);
+        // that empties it. An emptied stream collects back as an empty
+        // `List`, not `Empty` — only the pipeline's terminal boundary treats
+        // zero items as "no value" — so `length` sees `[]` and correctly
+        // returns 0, exactly as before the streaming-commands change.
+        let v = eval(r#"echo '[{"a":"x"},{"a":"y"}]' | from json | grep zzz | length"#)
+            .expect("eval");
+        assert_eq!(v, Value::Int(0));
     }
 
     #[test]

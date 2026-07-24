@@ -28,16 +28,21 @@ pub async fn flatten(data: PipelineData, tx: &Sender) -> Result<(), Closed> {
 
 /// Gather a whole stream back into one value for a collecting command. N
 /// items become a `List`; exactly one item stays that value (unwrapped, so
-/// `echo 5` is a scalar, not `[5]`); zero items are `Empty`. `Rendered`
-/// items degrade to `Str` via `into_value`, which is where a trusted stream
-/// loses its trust on consumption.
+/// `echo 5` is a scalar, not `[5]`); zero items become an empty `List`.
+/// `Rendered` items degrade to `Str` via `into_value`, which is where a
+/// trusted stream loses its trust on consumption.
 pub async fn collect(rx: &mut Receiver) -> PipelineData {
     let mut items: Vec<Value> = Vec::new();
     while let Some(item) = rx.recv().await {
         items.push(item.into_value());
     }
     match items.len() {
-        0 => PipelineData::Empty,
+        // An emptied stream is an empty collection, not "no value" -- so a
+        // downstream `length`/`map`/`filter` sees `[]` and works on it,
+        // rather than seeing Null and erroring. Only the terminal boundary
+        // (eval_pipeline's own collector) keeps 0 items as Empty, since there
+        // it means "this pipeline produced nothing to render".
+        0 => PipelineData::Value(Value::List(Vec::new())),
         1 => PipelineData::Value(items.into_iter().next().unwrap_or(Value::Null)),
         _ => PipelineData::Value(Value::List(items)),
     }
@@ -129,11 +134,15 @@ mod tests {
     }
 
     #[test]
-    fn collect_empty_stream_is_empty() {
+    fn collect_empty_stream_is_an_empty_list() {
+        // Not `Empty`: a stage that empties a stream (e.g. `grep` with no
+        // matches) must still look like a zero-length collection to the
+        // next collecting command, not "no input at all". Only the
+        // pipeline's terminal collector treats 0 items as `Empty`.
         let (tx, mut rx) = channel(8);
         block_on(async {
             drop(tx);
-            assert_eq!(collect(&mut rx).await, PipelineData::Empty);
+            assert_eq!(collect(&mut rx).await.into_value(), Value::List(vec![]));
         });
     }
 }
