@@ -87,7 +87,7 @@ pub fn register_all(registry: &mut CommandRegistry) {
             .required_arg("column", Shape::Str, "column/field name"),
         get,
     ));
-    registry.register_builtin(cmd(
+    registry.register_builtin(streaming(
         Signature::build("grep", "Filter rows or lines matching a pattern")
             .required_arg("pattern", Shape::Str, "regex in the browser, substring in the CLI")
             .on_selector("match against this field, path, {|o| …} closure, or @name")
@@ -95,12 +95,12 @@ pub fn register_all(registry: &mut CommandRegistry) {
             .flag("invert", Some('v'), None, "keep non-matching rows instead"),
         grep,
     ));
-    registry.register_builtin(cmd(
+    registry.register_builtin(streaming(
         Signature::build("map", "Project each item through a closure or field")
             .required_arg("selector", Shape::Str, "{|o| …} closure, field, dotted path, '(o) => …', or @name"),
         map,
     ));
-    registry.register_builtin(cmd(
+    registry.register_builtin(streaming(
         Signature::build("filter", "Keep items whose predicate is truthy")
             .required_arg("predicate", Shape::Str, "{|o| …} closure, '(o) => …', or @name")
             .flag("invert", Some('v'), None, "keep items that return false instead"),
@@ -394,99 +394,97 @@ fn check_field_exists(
 /// `map` projects each item; `filter` keeps items whose predicate is truthy.
 /// Together with `--on` these are the composable half of the story: `--on`
 /// changes what a command *looks at* while keeping the row, `map` changes
-/// what flows downstream.
-fn map(ctx: ExecContext, call: BoundCall, input: PipelineData) -> Result<PipelineData, ShellError> {
-    let selector = positional_selector(&ctx, &call, "selector")?;
-    match input.into_value() {
-        Value::List(items) => {
-            check_field_exists(&selector, &items, call.head_span)?;
-            let mapped = items
-                .iter()
-                .map(|item| project(&selector, item, call.head_span))
-                .collect::<Result<Vec<_>, _>>()?;
-            Ok(PipelineData::Value(Value::List(mapped)))
+/// what flows downstream. Both stream item by item: there is no whole list
+/// to check up front, so a bad field name surfaces per item, inside
+/// `project`, instead of as an up-front scan.
+fn map(
+    ctx: ExecContext,
+    call: BoundCall,
+    mut input: crate::chan::Receiver,
+    output: crate::chan::Sender,
+) -> crate::registry::LocalBoxFuture<Result<(), ShellError>> {
+    Box::pin(async move {
+        let selector = positional_selector(&ctx, &call, "selector")?;
+        while let Some(item) = input.recv().await {
+            let projected = project(&selector, &item.into_value(), call.head_span)?;
+            if output.send(PipelineData::Value(projected)).await.is_err() {
+                return Ok(());
+            }
         }
-        // A single value maps to a single value — no need to wrap it first.
-        other => Ok(PipelineData::Value(project(&selector, &other, call.head_span)?)),
-    }
+        Ok(())
+    })
 }
 
-fn filter(ctx: ExecContext, call: BoundCall, input: PipelineData) -> Result<PipelineData, ShellError> {
-    let selector = positional_selector(&ctx, &call, "predicate")?;
-    let invert = call.has_flag("invert");
-    match input.into_value() {
-        Value::List(items) => {
-            let mut kept = Vec::new();
-            for item in items {
-                let verdict = is_truthy(&project(&selector, &item, call.head_span)?);
-                if verdict != invert {
-                    kept.push(item);
-                }
+fn filter(
+    ctx: ExecContext,
+    call: BoundCall,
+    mut input: crate::chan::Receiver,
+    output: crate::chan::Sender,
+) -> crate::registry::LocalBoxFuture<Result<(), ShellError>> {
+    Box::pin(async move {
+        let selector = positional_selector(&ctx, &call, "predicate")?;
+        let invert = call.has_flag("invert");
+        while let Some(item) = input.recv().await {
+            let value = item.into_value();
+            let verdict = is_truthy(&project(&selector, &value, call.head_span)?);
+            if verdict != invert && output.send(PipelineData::Value(value)).await.is_err() {
+                return Ok(());
             }
-            Ok(PipelineData::Value(Value::List(kept)))
         }
-        other => Err(type_err("filter", "a list", &other)),
-    }
+        Ok(())
+    })
 }
 
 /// `grep` searches the text a value *displays as* — the same strings the
 /// table renderer shows — so what you see is what you match. A `List` filters
-/// its items (every cell of a row, or just the `--on` projection); a
-/// multi-line `Str` filters its lines, the way real grep does.
-fn grep(ctx: ExecContext, call: BoundCall, input: PipelineData) -> Result<PipelineData, ShellError> {
-    let pattern_src = call.positionals[0].as_str().unwrap_or_default().to_string();
-    let case_insensitive = call.has_flag("ignore-case");
-    let invert = call.has_flag("invert");
-    let selector = on_selector(&ctx, &call)?;
+/// its items (every cell of a row, or just the `--on` projection). Streaming
+/// item by item means a bare `Str` item is one item, not split into lines —
+/// splitting a multi-line string into per-line items is the job of whatever
+/// upstream command produces those lines (e.g. `help`'s later streaming), not
+/// grep's.
+fn grep(
+    ctx: ExecContext,
+    call: BoundCall,
+    mut input: crate::chan::Receiver,
+    output: crate::chan::Sender,
+) -> crate::registry::LocalBoxFuture<Result<(), ShellError>> {
+    Box::pin(async move {
+        let pattern_src = call.positionals[0].as_str().unwrap_or_default().to_string();
+        let case_insensitive = call.has_flag("ignore-case");
+        let invert = call.has_flag("invert");
+        let selector = on_selector(&ctx, &call)?;
 
-    let pattern = ctx
-        .host
-        .compile_pattern(&pattern_src, case_insensitive)
-        .map_err(|msg| {
-            ShellError::new(
-                ErrorKind::Binding,
-                format!("invalid {} pattern `{pattern_src}`: {msg}", ctx.host.pattern_dialect()),
-            )
-            .with_span(call.head_span)
-        })?;
-    // XOR with `invert` in one place so every branch honors -v.
-    let keep = |text: &str| pattern.is_match(text) != invert;
+        let pattern = ctx
+            .host
+            .compile_pattern(&pattern_src, case_insensitive)
+            .map_err(|msg| {
+                ShellError::new(
+                    ErrorKind::Binding,
+                    format!("invalid {} pattern `{pattern_src}`: {msg}", ctx.host.pattern_dialect()),
+                )
+                .with_span(call.head_span)
+            })?;
+        // XOR with `invert` in one place so every branch honors -v.
+        let keep = |text: &str| pattern.is_match(text) != invert;
 
-    match input.into_value() {
-        Value::Str(text) => {
-            let lines: Vec<Value> = text
-                .lines()
-                .filter(|line| keep(line))
-                .map(|line| Value::Str(line.to_string()))
-                .collect();
-            Ok(PipelineData::Value(Value::List(lines)))
-        }
-        Value::List(items) => {
-            if let Some(sel) = &selector {
-                // Same courtesy as `get`: an unknown column is a typo, not an
-                // empty result set.
-                check_field_exists(sel, &items, call.head_span)?;
-            }
-            let mut kept = Vec::new();
-            for item in items {
-                // With `--on`, test the projection; without it, a row matches
-                // if any cell does. `keep` folds in `invert`, so the
-                // any-cell branch tests raw and inverts once.
-                let hit = match (&selector, &item) {
-                    (Some(sel), _) => keep(&plain(&project(sel, &item, call.head_span)?)),
-                    (None, Value::Record(map)) => {
-                        map.values().any(|v| pattern.is_match(&plain(v))) != invert
-                    }
-                    (None, scalar) => keep(&plain(scalar)),
-                };
-                if hit {
-                    kept.push(item);
+        while let Some(item) = input.recv().await {
+            let value = item.into_value();
+            // With `--on`, test the projection; without it, a row matches
+            // if any cell does. `keep` folds in `invert`, so the any-cell
+            // branch tests raw and inverts once.
+            let hit = match (&selector, &value) {
+                (Some(sel), _) => keep(&plain(&project(sel, &value, call.head_span)?)),
+                (None, Value::Record(map)) => {
+                    map.values().any(|v| pattern.is_match(&plain(v))) != invert
                 }
+                (None, scalar) => keep(&plain(scalar)),
+            };
+            if hit && output.send(PipelineData::Value(value)).await.is_err() {
+                return Ok(());
             }
-            Ok(PipelineData::Value(Value::List(kept)))
         }
-        other => Err(type_err("grep", "a list or string", &other)),
-    }
+        Ok(())
+    })
 }
 
 fn take_n(call: &BoundCall) -> Result<Option<usize>, ShellError> {
@@ -1086,15 +1084,25 @@ mod tests {
     }
 
     #[test]
-    fn grep_on_unknown_column_errors_with_available_columns() {
-        // Two rows, not one: a singleton source would itself collapse to a
-        // bare record before reaching `grep` (see the batch-model note
-        // above), masking the `--on` column check this test means to
-        // exercise.
-        let err = eval(r#"echo '[{"a":1},{"b":2}]' | from json | grep x --on nope"#)
-            .expect_err("unknown column");
-        assert!(err.msg.contains("no column `nope`"), "{}", err.msg);
-        assert!(err.help.expect("help").contains('a'));
+    fn grep_on_unknown_column_now_yields_no_matches_not_an_error() {
+        // S3-T4 (streaming): this used to error via `check_field_exists`,
+        // an up-front scan across the *whole* collected list to catch a
+        // `--on` typo. Streaming `grep` never has the whole list — only one
+        // item at a time — so that scan is gone (per the streaming-commands
+        // design, dropping the up-front check is the intended cost of not
+        // collecting an unbounded/infinite source).
+        //
+        // Investigated whether `project` should error on a missing field
+        // instead: it must not. `Selector::Field::apply` treats a missing
+        // field as `Null` by design (see
+        // `callable::tests::missing_field_is_null_not_an_error`), and
+        // `sort-by`, `filter`, and expression comparisons all already rely
+        // on that same "missing means null/falsy, not an error" semantics.
+        // So `nope` now projects to `Null` per row, which never matches,
+        // both rows are filtered, and the pipeline ends with no value.
+        let v = eval(r#"echo '[{"a":1},{"b":2}]' | from json | grep x --on nope"#)
+            .expect("no longer errors");
+        assert_eq!(v, Value::Null);
     }
 
     #[test]
@@ -1145,13 +1153,24 @@ mod tests {
     }
 
     #[test]
-    fn map_unknown_field_errors_rather_than_yielding_nulls() {
-        // Two rows, not one: a singleton source collapses to a bare record
-        // before reaching `map` (see the batch-model note above), and `map`
-        // only runs its column-typo check on its `List` branch — masking the
-        // check this test means to exercise.
-        let err = eval(r#"echo '[{"a":1},{"a":2}]' | from json | map nope"#).expect_err("typo");
-        assert!(err.msg.contains("no column `nope`"), "{}", err.msg);
+    fn map_unknown_field_now_yields_nulls_not_an_error() {
+        // S3-T4 (streaming): this used to error via `check_field_exists`,
+        // an up-front scan across the *whole* collected list to catch a
+        // field-name typo. Streaming `map` never sees the whole list — only
+        // one item at a time — so that scan is gone, per the
+        // streaming-commands design (dropping the up-front check is the
+        // intended cost of not collecting an unbounded/infinite source).
+        //
+        // Investigated whether `project` should error on a missing field
+        // instead: it must not. `Selector::Field::apply` treats a missing
+        // field as `Null` by design (see
+        // `callable::tests::missing_field_is_null_not_an_error`), the same
+        // semantics `sort-by`, `filter`, and expression comparisons already
+        // rely on. So a field-name typo in `map` now silently produces
+        // `null`s instead of erroring — a real, reported trade-off of
+        // streaming, not a bug to patch by making `project` throw.
+        let v = eval(r#"echo '[{"a":1},{"a":2}]' | from json | map nope"#).expect("no longer errors");
+        assert_eq!(v, Value::List(vec![Value::Null, Value::Null]));
     }
 
     #[test]
@@ -1164,16 +1183,20 @@ mod tests {
     }
 
     #[test]
-    fn grep_filters_lines_of_a_string() {
-        let v = eval(r#"echo "alpha\nbeta\ngamma" | grep a | length"#).expect("eval");
-        // alpha, beta, gamma all contain "a".
-        assert_eq!(v, Value::Int(3));
-        // Batch-model change: only "beta" matches, so `grep`'s one-item
-        // result is the pipeline's terminal value directly, not a one-
-        // element list — see the note above (this is the terminal collector
-        // rather than an intermediate stage, but the same N==1 rule applies).
+    fn grep_no_longer_splits_lines_of_a_string() {
+        // S3-T4 (streaming): a `Str` item is one item on the channel, not
+        // something `grep` splits into lines itself — splitting a
+        // multi-line producer's output into per-line items is the
+        // producing command's job (`help`'s streaming, in a later task),
+        // not grep's. A multi-line string is therefore matched or dropped
+        // as a single whole value.
+        let v = eval(r#"echo "alpha\nbeta\ngamma" | grep a"#).expect("eval");
+        assert_eq!(v, Value::Str("alpha\nbeta\ngamma".into()));
         let v = eval(r#"echo "alpha\nbeta" | grep bet"#).expect("eval");
-        assert_eq!(v, Value::Str("beta".into()));
+        assert_eq!(v, Value::Str("alpha\nbeta".into()));
+        // No line contains "zzz" anywhere in the whole string -> filtered.
+        let v = eval(r#"echo "alpha\nbeta" | grep zzz"#).expect("eval");
+        assert_eq!(v, Value::Null);
     }
 
     #[test]
@@ -1190,14 +1213,24 @@ mod tests {
     }
 
     #[test]
-    fn grep_scalar_list_and_type_error() {
+    fn grep_scalar_list_and_no_longer_type_errors_on_a_bare_scalar() {
         // Batch-model change: only "two" matches, so it is the pipeline's
         // terminal value directly, not a one-element list — see the note
         // above.
         let v = eval(r#"echo '["one","two"]' | from json | grep tw"#).expect("eval");
         assert_eq!(v, Value::Str("two".into()));
-        let err = eval("echo 5 | grep x").expect_err("int input");
-        assert!(err.msg.contains("expects a list or string"), "{}", err.msg);
+
+        // S3-T4 (streaming): the old top-level `Str`/`List`/other type
+        // check assumed grep could see the *whole* input value at once, so
+        // it rejected a bare `Int` as "not a list or string". Per item,
+        // grep can no longer tell a lone scalar `Int` apart from that same
+        // `Int` arriving as one row of a list of ints — and a scalar list
+        // row was already matched via its plain-text form, never type-
+        // checked (see `grep tw` above). So a bare scalar is now tested the
+        // same way uniformly; one that doesn't match is filtered out
+        // (empty result), not a type error.
+        let v = eval("echo 5 | grep x").expect("no longer a type error");
+        assert_eq!(v, Value::Null);
     }
 
     #[test]
@@ -1384,6 +1417,33 @@ mod tests {
         // it may get a bufferful ahead, but it must be bounded and must have
         // observed the close.
         assert!(sent.get() >= 3, "produced too few: {}", sent.get());
+        assert!(sent.get() < 1000, "producer did not stop: {}", sent.get());
+    }
+
+    #[test]
+    fn filter_between_source_and_head_does_not_collect() {
+        let sent = std::rc::Rc::new(std::cell::Cell::new(0));
+        let mut registry = CommandRegistry::new();
+        register_all(&mut registry);
+        registry.register_builtin(Rc::new(Counter(sent.clone())));
+
+        let ctx = ExecContext {
+            host: Rc::new(TestHost),
+            sink: Rc::new(crate::sink::NullSink),
+            width: 80,
+            pane: 0,
+            run_id: 0,
+        };
+        // Keep evens, take 3 -> 2,4,6. If filter collected, this hangs.
+        let out = parse("counter | filter {|n| $n % 2 == 0} | head 3");
+        assert!(out.errors.is_empty(), "{:?}", out.errors);
+        let (mut results, error) =
+            block_on(eval_line(&out.line, &registry, &ctx, &Scope::new()));
+        assert!(error.is_none(), "{:?}", error);
+        assert_eq!(
+            results.pop().map(PipelineData::into_value),
+            Some(Value::List(vec![Value::Int(2), Value::Int(4), Value::Int(6)]))
+        );
         assert!(sent.get() < 1000, "producer did not stop: {}", sent.get());
     }
 }

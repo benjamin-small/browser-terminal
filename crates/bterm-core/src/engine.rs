@@ -877,16 +877,22 @@ mod tests {
 
     /// Takes an engine borrow on every poll and yields in between.
     ///
-    /// Honest about what this proves *today*: not much. Two commands cannot
-    /// currently be in flight at once — a stage drains and closes its
-    /// upstream before the next one runs — and `EngineAccess::with`'s
+    /// Updated for stage 3 (streaming). This fixture still runs as its own
+    /// pipeline of three `Borrower`s — it does not gain a real dependency on
+    /// `map`/`filter`/`grep`/`head` — but what changed is that the overlap
+    /// it exercises is no longer purely synthetic. Those four are now
+    /// `StreamingBuiltin`s that consume and emit items one at a time rather
+    /// than draining their whole upstream via `stream::collect` first, so a
+    /// downstream streaming stage's work genuinely runs concurrently with
+    /// its still-producing upstream, through the very same `drive` loop and
+    /// interleaving this fixture polls through. `EngineAccess::with`'s
     /// signature already makes a borrow escaping across an await a compile
-    /// error rather than a runtime one. So this cannot presently fail.
-    ///
-    /// It is here as insurance for stage 3, where streaming stages consume
-    /// partial input and genuinely do overlap. At that point an overlapping
-    /// borrow becomes reachable, and this fixture is what would catch it —
-    /// as a panic, not a failed assertion.
+    /// error rather than a runtime one, so the only way this test could
+    /// fail is a genuine overlapping borrow reached through that
+    /// interleaving — and that is now a real, reachable pattern elsewhere
+    /// in the codebase, not a hypothetical one. That is what makes this
+    /// test falsifiable: an overlapping borrow would panic here, not just
+    /// fail an assertion.
     struct Borrower(Rc<RefCell<Engine>>);
     impl Command for Borrower {
         fn signature(&self) -> &Signature {
