@@ -79,11 +79,6 @@ impl CollectingSink {
         Self::default()
     }
 
-    /// Drain everything written so far.
-    pub fn take(&self) -> Vec<Record> {
-        std::mem::take(&mut self.records.borrow_mut())
-    }
-
     pub fn log_lines(&self) -> Vec<String> {
         self.lines(|r| matches!(r.channel(), Channel::Log))
     }
@@ -128,14 +123,6 @@ mod tests {
 
         assert_eq!(sink.log_lines(), vec!["progress", "more"]);
         assert_eq!(sink.err_lines(), vec!["uh oh"]);
-    }
-
-    #[test]
-    fn take_drains_so_a_sink_can_be_reused() {
-        let sink = CollectingSink::new();
-        sink.write(Record::log("one"));
-        assert_eq!(sink.take().len(), 1);
-        assert!(sink.take().is_empty());
     }
 
     #[test]
