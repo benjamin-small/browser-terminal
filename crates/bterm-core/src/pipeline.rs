@@ -51,17 +51,31 @@ impl Wake for NudgeWaker {
     }
 }
 
+/// Passes allowed within a single `poll` before yielding to the executor.
+///
+/// Returning `Pending` here is always safe: any stage that woke has already
+/// forwarded that wake to the real waker, so the executor re-polls us
+/// promptly and no progress is lost. The cap exists purely so that a stage
+/// which keeps claiming progress without making any cannot hold the thread.
+/// On the browser's single thread that would be a frozen tab -- no
+/// rendering, no input, no way for Ctrl-C's abort to run.
+const MAX_PASSES_PER_POLL: usize = 64;
+
 /// Poll every stage until all complete.
 ///
 /// Each pass polls all unfinished stages. If any woke during the pass —
 /// including a wake caused by another stage in the same pass — it loops
 /// again rather than returning Pending, because under a no-op waker that
-/// progress would otherwise be lost.
+/// progress would otherwise be lost. The loop is capped at
+/// `MAX_PASSES_PER_POLL`: a stage that keeps waking itself without ever
+/// completing (or yielding cleanly) would otherwise spin forever inside
+/// this one `poll` call, and on the browser's single thread that means a
+/// frozen tab.
 pub async fn drive(stages: Vec<BoxedStage<'_>>) {
     let mut stages: Vec<Option<BoxedStage<'_>>> = stages.into_iter().map(Some).collect();
 
     std::future::poll_fn(move |cx| {
-        loop {
+        for _ in 0..MAX_PASSES_PER_POLL {
             let nudge = Arc::new(NudgeWaker {
                 woken: AtomicBool::new(false),
                 outer: cx.waker().clone(),
@@ -88,6 +102,9 @@ pub async fn drive(stages: Vec<BoxedStage<'_>>) {
                 return Poll::Pending;
             }
         }
+        // Exhausted the budget while still making claimed progress: hand the
+        // thread back and let the executor decide when to return.
+        Poll::Pending
     })
     .await;
 }
@@ -147,5 +164,40 @@ mod tests {
         let first_b = seen.iter().position(|l| *l == "b").expect("b ran");
         let last_a = seen.iter().rposition(|l| *l == "a").expect("a ran");
         assert!(first_b < last_a, "stages did not interleave: {seen:?}");
+    }
+
+    #[test]
+    fn a_stage_that_never_stops_waking_itself_still_yields() {
+        // Without a pass cap this spins inside a single poll and, in a
+        // browser, freezes the tab -- no rendering, no input, no abort.
+        // Polling `drive` directly (rather than via block_on, which would
+        // loop forever by design) proves it hands the thread back.
+        use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
+
+        fn noop_waker() -> Waker {
+            fn raw() -> RawWaker {
+                fn clone(_: *const ()) -> RawWaker {
+                    raw()
+                }
+                fn noop(_: *const ()) {}
+                RawWaker::new(std::ptr::null(), &RawWakerVTable::new(clone, noop, noop, noop))
+            }
+            // SAFETY: every vtable entry is a no-op over a null pointer.
+            unsafe { Waker::from_raw(raw()) }
+        }
+
+        let greedy: BoxedStage<'static> = Box::pin(std::future::poll_fn(|cx| {
+            cx.waker().wake_by_ref();
+            Poll::Pending
+        }));
+
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let fut = drive(vec![greedy]);
+        let mut fut = std::pin::pin!(fut);
+        assert!(
+            matches!(fut.as_mut().poll(&mut cx), Poll::Pending),
+            "drive must yield rather than spin forever inside one poll"
+        );
     }
 }
