@@ -7,6 +7,7 @@ pub mod abort;
 pub mod ast;
 pub mod builtins;
 pub mod callable;
+pub mod chan;
 pub mod editor;
 pub mod engine;
 pub mod error;
