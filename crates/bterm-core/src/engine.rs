@@ -856,11 +856,12 @@ mod tests {
             &self,
             ctx: ExecContext,
             _call: BoundCall,
-            _input: PipelineData,
-        ) -> LocalBoxFuture<Result<PipelineData, ShellError>> {
+            _input: crate::chan::Receiver,
+            _output: crate::chan::Sender,
+        ) -> LocalBoxFuture<Result<(), ShellError>> {
             ctx.sink.write(Record::log("tick"));
             ctx.sink.write(Record::err("careful"));
-            crate::registry::ready(Ok(PipelineData::Empty))
+            crate::registry::ready(Ok(()))
         }
     }
 
@@ -896,8 +897,9 @@ mod tests {
             &self,
             _ctx: ExecContext,
             _call: BoundCall,
-            _input: PipelineData,
-        ) -> LocalBoxFuture<Result<PipelineData, ShellError>> {
+            _input: crate::chan::Receiver,
+            output: crate::chan::Sender,
+        ) -> LocalBoxFuture<Result<(), ShellError>> {
             let access = self.0.clone();
             Box::pin(async move {
                 let mut yielded = false;
@@ -915,7 +917,8 @@ mod tests {
                     }
                 })
                 .await;
-                Ok(PipelineData::Value(Value::Int(1)))
+                let _ = crate::stream::flatten(PipelineData::Value(Value::Int(1)), &output).await;
+                Ok(())
             })
         }
     }

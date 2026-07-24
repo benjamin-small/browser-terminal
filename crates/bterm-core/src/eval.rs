@@ -7,6 +7,7 @@ use crate::ast::{Call, Line, Pipeline};
 use crate::error::ShellError;
 use crate::registry::{Command, CommandRegistry, ExecContext, PipelineData};
 use crate::signature::{bind, wants_help, Scope};
+use crate::value::Value;
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -84,47 +85,64 @@ pub async fn eval_pipeline(
     ctx: &ExecContext,
     scope: &Scope,
 ) -> Result<PipelineData, ShellError> {
-    // A single call has no channel to build; keep the direct path so the
-    // common case pays nothing for machinery it cannot use.
-    if pipeline.calls.len() == 1 {
-        return eval_call(&pipeline.calls[0], PipelineData::Empty, source, ctx, scope).await;
-    }
-
-    let outcome: Rc<RefCell<Option<PipelineData>>> = Rc::new(RefCell::new(None));
+    let outcome: Rc<RefCell<PipelineData>> = Rc::new(RefCell::new(PipelineData::Empty));
     let failure: Rc<RefCell<Option<ShellError>>> = Rc::new(RefCell::new(None));
 
+    // The first stage's input is an already-closed empty stream.
+    let (empty_tx, empty_rx) = crate::chan::channel(1);
+    drop(empty_tx);
+
     let mut stages: Vec<crate::pipeline::BoxedStage<'_>> = Vec::new();
-    let mut upstream: Option<crate::chan::Receiver> = None;
+    let mut upstream = empty_rx;
 
-    for (idx, call) in pipeline.calls.iter().enumerate() {
-        let last = idx + 1 == pipeline.calls.len();
-        let rx = upstream.take();
-        let (tx, next_rx) = if last {
-            (None, None)
-        } else {
-            let (tx, rx) = crate::chan::channel(STAGE_BUFFER);
-            (Some(tx), Some(rx))
-        };
-        upstream = next_rx;
-
+    for call in pipeline.calls.iter() {
+        let (tx, rx) = crate::chan::channel(STAGE_BUFFER);
         stages.push(Box::pin(run_stage(
             call,
-            rx,
+            upstream,
             tx,
             source,
             ctx,
             scope,
-            last.then(|| outcome.clone()),
             failure.clone(),
         )));
+        upstream = rx;
     }
+
+    // Terminal collector: drain the last stage's output into `outcome`.
+    //
+    // Deliberately not `crate::stream::collect` — that helper is for a
+    // *collecting command's own input*, where degrading `Rendered` to `Str`
+    // is the intended "trust drops once consumed" rule. This is the outer
+    // boundary instead: the renderer needs to know a single surviving item
+    // was `Rendered` (pre-styled help/table text) rather than a `Value` to
+    // print it verbatim instead of running it through `render()`. A single
+    // command's own `flatten` call produces either all-`Value` items (a
+    // `List` unrolled, or one scalar) or exactly one `Rendered` item — never
+    // a mix — so only the N == 1 case needs the tag preserved; N > 1 is
+    // always `Value` items and collects the same way `stream::collect` would.
+    let outcome_for_collector = outcome.clone();
+    stages.push(Box::pin(async move {
+        let mut items: Vec<PipelineData> = Vec::new();
+        while let Some(item) = upstream.recv().await {
+            items.push(item);
+        }
+        let collected = match items.len() {
+            0 => PipelineData::Empty,
+            1 => items.into_iter().next().expect("len checked above"),
+            _ => PipelineData::Value(Value::List(
+                items.into_iter().map(PipelineData::into_value).collect(),
+            )),
+        };
+        *outcome_for_collector.borrow_mut() = collected;
+    }));
 
     crate::pipeline::drive(stages).await;
 
     if let Some(err) = failure.borrow_mut().take() {
         return Err(err);
     }
-    let result = outcome.borrow_mut().take().unwrap_or(PipelineData::Empty);
+    let result = std::mem::replace(&mut *outcome.borrow_mut(), PipelineData::Empty);
     Ok(result)
 }
 
@@ -132,96 +150,61 @@ pub async fn eval_pipeline(
 /// is what makes memory usage independent of how fast a producer runs.
 const STAGE_BUFFER: usize = 64;
 
-/// One stage: drain the upstream channel, run the command, hand the result
-/// downstream (or to `outcome`, for the last stage).
+/// One stage: run the command from `input` to `output`.
 ///
 /// The first error wins and stops the pipeline; later stages find their
 /// channel closed and return without overwriting it with a symptom.
 #[allow(clippy::too_many_arguments)]
 async fn run_stage(
     call: &Call,
-    upstream: Option<crate::chan::Receiver>,
-    downstream: Option<crate::chan::Sender>,
+    input: crate::chan::Receiver,
+    output: crate::chan::Sender,
     source: &impl CommandSource,
     ctx: &ExecContext,
     scope: &Scope,
-    outcome: Option<Rc<RefCell<Option<PipelineData>>>>,
     failure: Rc<RefCell<Option<ShellError>>>,
 ) {
-    let input = match upstream {
-        None => PipelineData::Empty,
-        Some(mut rx) => {
-            // Collect the whole upstream. Every command still wants its
-            // complete input; streaming commands arrive in a later stage.
-            //
-            // Keeping only the last item is correct *because* nothing sends
-            // more than one yet. The assert is here so that a future
-            // streaming producer fails loudly in debug rather than silently
-            // dropping everything but its final item.
-            let mut last = PipelineData::Empty;
-            let mut count = 0usize;
-            while let Some(item) = rx.recv().await {
-                last = item;
-                count += 1;
-            }
-            debug_assert!(
-                count <= 1,
-                "a stage sent {count} items, but collecting stages keep only the last"
-            );
-            last
-        }
-    };
-
-    // An earlier stage already failed; do not run, and do not overwrite its
-    // error with a downstream symptom.
     if failure.borrow().is_some() {
         return;
     }
-
-    match eval_call(call, input, source, ctx, scope).await {
-        Ok(data) => match (downstream, outcome) {
-            (Some(tx), _) => {
-                // Err means the consumer went away, which is not this
-                // stage's problem to report.
-                let _ = tx.send(data).await;
-            }
-            (None, Some(slot)) => *slot.borrow_mut() = Some(data),
-            (None, None) => {}
-        },
-        Err(err) => {
-            let mut slot = failure.borrow_mut();
-            if slot.is_none() {
-                *slot = Some(err);
-            }
+    if let Err(err) = eval_call(call, input, output, source, ctx, scope).await {
+        let mut slot = failure.borrow_mut();
+        if slot.is_none() {
+            *slot = Some(err);
         }
     }
 }
 
 async fn eval_call(
     call: &Call,
-    input: PipelineData,
+    input: crate::chan::Receiver,
+    output: crate::chan::Sender,
     source: &impl CommandSource,
     ctx: &ExecContext,
     scope: &Scope,
-) -> Result<PipelineData, ShellError> {
+) -> Result<(), ShellError> {
     let words: Vec<String> = call.words.iter().map(|w| w.node.clone()).collect();
     let (cmd, consumed) = match source.lookup(&words) {
         Some(hit) => hit,
         // Not a command — but it may be a group, in which case naming it
         // (with or without `--help`) should list what lives under it.
         None => match source.group_help(&words) {
-            Some(help) => return Ok(PipelineData::Rendered(help)),
+            Some(help) => {
+                let _ = output.send(PipelineData::Rendered(help)).await;
+                return Ok(());
+            }
             None => return Err(source.unknown_command_error(&call.words)),
         },
     };
 
     // `--help` intercepted before binding, so a malformed call still gets help.
     if wants_help(call) {
-        return Ok(PipelineData::Rendered(cmd.signature().render_help()));
+        let _ = output.send(PipelineData::Rendered(cmd.signature().render_help())).await;
+        return Ok(());
     }
 
     let bound = bind(cmd.signature(), &call.words[consumed..], call, scope)?;
-    cmd.run(ctx.clone(), bound, input).await
+    cmd.run(ctx.clone(), bound, input, output).await
 }
 
 /// Minimal executor for native use (CLI, tests). Core builtins complete
@@ -284,10 +267,15 @@ mod tests {
             &self,
             _ctx: ExecContext,
             call: BoundCall,
-            _input: PipelineData,
-        ) -> LocalBoxFuture<Result<PipelineData, ShellError>> {
+            mut input: crate::chan::Receiver,
+            output: crate::chan::Sender,
+        ) -> LocalBoxFuture<Result<(), ShellError>> {
             let n = call.positionals[0].as_int().unwrap_or(0);
-            ready(Ok(PipelineData::Value(Value::Int(n))))
+            Box::pin(async move {
+                let _ = crate::stream::collect(&mut input).await;
+                let _ = crate::stream::flatten(PipelineData::Value(Value::Int(n)), &output).await;
+                Ok(())
+            })
         }
     }
 
@@ -301,13 +289,18 @@ mod tests {
             &self,
             _ctx: ExecContext,
             _call: BoundCall,
-            input: PipelineData,
-        ) -> LocalBoxFuture<Result<PipelineData, ShellError>> {
-            let out = match input.into_value() {
-                Value::Int(n) => Value::Int(n * 2),
-                other => other,
-            };
-            ready(Ok(PipelineData::Value(out)))
+            mut input: crate::chan::Receiver,
+            output: crate::chan::Sender,
+        ) -> LocalBoxFuture<Result<(), ShellError>> {
+            Box::pin(async move {
+                let collected = crate::stream::collect(&mut input).await;
+                let out = match collected.into_value() {
+                    Value::Int(n) => Value::Int(n * 2),
+                    other => other,
+                };
+                let _ = crate::stream::flatten(PipelineData::Value(out), &output).await;
+                Ok(())
+            })
         }
     }
 
@@ -323,8 +316,9 @@ mod tests {
             &self,
             _ctx: ExecContext,
             _call: BoundCall,
-            _input: PipelineData,
-        ) -> LocalBoxFuture<Result<PipelineData, ShellError>> {
+            _input: crate::chan::Receiver,
+            _output: crate::chan::Sender,
+        ) -> LocalBoxFuture<Result<(), ShellError>> {
             ready(Err(ShellError::runtime("boom")))
         }
     }

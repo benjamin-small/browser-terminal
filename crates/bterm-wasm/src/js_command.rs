@@ -28,8 +28,9 @@ impl Command for JsCommand {
         &self,
         ctx: ExecContext,
         call: BoundCall,
-        input: PipelineData,
-    ) -> LocalBoxFuture<Result<PipelineData, ShellError>> {
+        mut input: bterm_core::chan::Receiver,
+        output: bterm_core::chan::Sender,
+    ) -> LocalBoxFuture<Result<(), ShellError>> {
         let func = self.func.clone();
         let name = self.sig.name.clone();
         Box::pin(async move {
@@ -47,7 +48,8 @@ impl Command for JsCommand {
             let _ = js_sys::Reflect::set(&args, &JsValue::from_str("positionals"), &positionals);
             let _ = js_sys::Reflect::set(&args, &JsValue::from_str("flags"), &flags);
 
-            let input_js = value_to_js(&input.into_value());
+            let collected = bterm_core::stream::collect(&mut input).await;
+            let input_js = value_to_js(&collected.into_value());
 
             let ctx_obj = js_sys::Object::new();
             if let Some(signal) = crate::tasks::signal_for(ctx.run_id) {
@@ -84,12 +86,15 @@ impl Command for JsCommand {
             drop(err);
             drop(emit);
 
-            if resolved.is_undefined() {
-                return Ok(PipelineData::Empty);
-            }
-            let value = js_to_value(&resolved)
-                .map_err(|msg| ShellError::runtime(format!("`{name}`: {msg}")).with_span(span))?;
-            Ok(PipelineData::Value(value))
+            let pd = if resolved.is_undefined() {
+                PipelineData::Empty
+            } else {
+                let value = js_to_value(&resolved)
+                    .map_err(|msg| ShellError::runtime(format!("`{name}`: {msg}")).with_span(span))?;
+                PipelineData::Value(value)
+            };
+            let _ = bterm_core::stream::flatten(pd, &output).await;
+            Ok(())
         })
     }
 }

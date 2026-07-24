@@ -132,12 +132,16 @@ pub struct ExecContext {
 
 pub trait Command {
     fn signature(&self) -> &Signature;
+    /// Read items from `input`, write items to `output`. A collecting
+    /// command reads its whole input and writes one result (via the
+    /// `Builtin` adapter); a streaming command transforms item by item.
     fn run(
         &self,
         ctx: ExecContext,
         call: BoundCall,
-        input: PipelineData,
-    ) -> LocalBoxFuture<Result<PipelineData, ShellError>>;
+        input: crate::chan::Receiver,
+        output: crate::chan::Sender,
+    ) -> LocalBoxFuture<Result<(), ShellError>>;
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
