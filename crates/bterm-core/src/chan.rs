@@ -180,4 +180,55 @@ mod tests {
             assert_eq!(tx.len(), 1);
         });
     }
+
+    #[test]
+    fn dropping_the_receiver_tells_the_producer_to_stop() {
+        // This is the mechanism behind `head 5` terminating an infinite
+        // source: the consumer goes away and the next send fails.
+        let (tx, rx) = channel(4);
+        block_on(async {
+            tx.send(item(1)).await.expect("first send");
+            drop(rx);
+            assert!(tx.is_closed());
+            assert_eq!(tx.send(item(2)).await, Err(Closed));
+        });
+    }
+
+    #[test]
+    fn a_send_into_a_full_buffer_does_not_complete() {
+        // Backpressure, without needing a driver yet: poll the send future
+        // once against a full buffer and confirm it parks rather than
+        // over-filling. The end-to-end drain case lands in Task 3, once
+        // there is something able to run both halves at once.
+        use std::future::Future;
+        use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
+
+        fn noop_waker() -> Waker {
+            fn raw() -> RawWaker {
+                fn clone(_: *const ()) -> RawWaker {
+                    raw()
+                }
+                fn noop(_: *const ()) {}
+                RawWaker::new(std::ptr::null(), &RawWakerVTable::new(clone, noop, noop, noop))
+            }
+            // SAFETY: every vtable entry is a no-op over a null pointer.
+            unsafe { Waker::from_raw(raw()) }
+        }
+
+        let (tx, _rx) = channel(1);
+        block_on(async {
+            tx.send(item(1)).await.expect("first send fills the buffer");
+        });
+        assert_eq!(tx.len(), 1);
+
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let fut = tx.send(item(2));
+        let mut fut = std::pin::pin!(fut);
+        assert!(
+            matches!(fut.as_mut().poll(&mut cx), Poll::Pending),
+            "a full buffer must park the sender, not grow"
+        );
+        assert_eq!(tx.len(), 1, "the bound was exceeded");
+    }
 }
