@@ -276,3 +276,30 @@ Roughly, dependency-ordered:
 | Buffer loses output on early exit / error | Flush-at-command-end invariant, tested for the dropped-without-flush case |
 | Borrow-across-await via the new async `ready()` | Same discipline as everywhere: `with_engine` closures never await; sink `ready()` awaits with no engine borrow held |
 | wasm growth | Measured and recorded, as in prior stages |
+
+## Known limitations, as shipped
+
+**A failing command's buffered tail prints below its error, not above it.**
+`JsCommand::run` drains at the stage boundary, but an early `?` skips that
+drain, so the tail is emitted from `tasks::flush_buffers` at the run's end —
+after `execute_line` has already rendered the error. Nothing is lost; the
+order is wrong, and only on the error path in a pane. `run()` is unaffected,
+since it collects both channels into arrays.
+
+Draining on every exit path means wrapping the whole `JsCommand::run` body so
+the drain survives a `?`. Declined deliberately: that reindent touches every
+`RefCell` site in the file, each spelled `let tail = …;` rather than
+`if let Some(t) = …borrow_mut()` precisely because the collapsed form holds a
+borrow across a `sink.write` that re-enters JS and panics. Churning all of
+them to reorder one cosmetic case is a bad trade.
+
+**The pane is not an authentication surface.** Page-controlled data can paint
+multi-line, column-0, prompt-shaped text. This predates the writer API —
+`echo '"…\n…"' | from json` suffices, because `Value::Str` rendering keeps
+newlines by design. The raw writer adds SGR, which makes such a forgery
+byte-exact rather than merely shaped. Removing `\n` from the allowlist would
+close neither hole (`\r` + `\x1b[K` + SGR reproduce `prompt_line()` exactly,
+with no newline) and would break line mode, which passes its delimiter
+through to the sanitizer. If prompt forgery ever needs addressing, it belongs
+at the prompt — a reserved glyph, or moving the prompt out of the character
+stream — not in the allowlist.

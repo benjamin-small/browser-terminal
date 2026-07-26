@@ -292,6 +292,24 @@ impl Command for JsCommand {
                 // guarantee; this is the nicety on top of it, and running
                 // both is safe because a second `finish()` on a drained
                 // buffer yields nothing.
+                //
+                // KNOWN, DELIBERATE: because an early `?` skips this drain,
+                // a command that buffers and then throws has its tail
+                // emitted from `tasks::finish` — which runs *after*
+                // `execute_line` has rendered the error — so in a pane that
+                // partial output lands below the error rather than above it,
+                // where a shell would put it. Nothing is lost; only the
+                // order is wrong, and only on the error path.
+                //
+                // Fixing it means draining on every exit path, i.e. wrapping
+                // this whole body so the drain runs after a `?` too. That was
+                // weighed and declined: the reindent touches every RefCell
+                // site below, each of which is deliberately spelled
+                // `let tail = …;` rather than `if let Some(t) = …borrow_mut()`
+                // because the collapsed form holds the borrow across a
+                // `sink.write` that re-enters JS and panics. Churning all of
+                // them to reorder one cosmetic case is a bad trade. If you
+                // do take it on, re-read that borrow rule first.
                 let tail_log = log_buf.borrow_mut().finish();
                 if let Some(text) = tail_log {
                     ctx.sink.write(Record::raw_log(text));
