@@ -89,6 +89,30 @@ async fn tick() {
     let _ = JsFuture::from(p).await;
 }
 
+/// Sentinel resolution value for `within_a_second` — a run never produces it.
+const NEVER_SETTLED: &str = "__bterm_never_settled";
+
+/// Await `p`, yielding `None` if it is still pending a second from now.
+///
+/// Awaiting a promise that never settles does not fail a `wasm_bindgen_test`;
+/// it empties Node's event loop, and the runner then exits *silently*,
+/// reporting nothing and skipping every test after this one. A cancellation
+/// bug whose symptom is "the promise never settles" would therefore hide
+/// itself. Racing a timer turns that into an ordinary assertion failure.
+///
+/// Costs nothing when the promise does settle: `race` resolves as soon as it
+/// does, and the timer is left to expire unobserved.
+async fn within_a_second(p: js_sys::Promise) -> Option<Result<JsValue, JsValue>> {
+    let timeout = js_sys::Promise::new(&mut |resolve, _| {
+        let f = Function::new_with_args("r, v", "setTimeout(() => r(v), 1000);");
+        let _ = f.call2(&JsValue::NULL, &resolve, &JsValue::from_str(NEVER_SETTLED));
+    });
+    match JsFuture::from(js_sys::Promise::race(&Array::of2(&p, &timeout))).await {
+        Ok(v) if v.as_string().as_deref() == Some(NEVER_SETTLED) => None,
+        settled => Some(settled),
+    }
+}
+
 /// Register a TS command whose body is `body`.
 fn command(core: &BtermCore, name: &str, body: &str) {
     let sig = js_sys::JSON::parse(&format!(r#"{{"name":"{name}"}}"#)).expect("sig");
@@ -158,11 +182,12 @@ async fn a_partial_write_survives_ctrl_c() {
     // polling the inner future, so a suspended body never runs again. The
     // flush has to come from the abort path itself.
     //
-    // The `tick()` is load-bearing, not incidental: `run()` registers its
-    // task inside the spawned future, which `future_to_promise` does not
-    // poll until a microtask later, so a Ctrl-C fed in the same tick finds
-    // an empty task registry and aborts nothing. See the longer note in
-    // `abort_signal_fires_on_ctrl_c`.
+    // The `tick()` is load-bearing, and it is about this test's subject
+    // rather than about cancellation: there is only a partial write to
+    // rescue once the command body has actually run and written one. An
+    // interrupt delivered before the task's first poll settles it without
+    // running the body at all -- correct, but a different case, and the one
+    // `a_same_tick_ctrl_c_settles_the_run` covers.
     let core = make_core();
     command(
         &core,
@@ -175,6 +200,42 @@ async fn a_partial_write_survives_ctrl_c() {
     let err = JsFuture::from(pending).await.expect_err("aborted run rejects");
     let log = entries(&err, "log");
     assert!(contains(&log, "partial before ctrl-c"), "partial log lost on Ctrl-C: {log:?}");
+    core.dispose();
+}
+
+#[wasm_bindgen_test]
+async fn a_same_tick_ctrl_c_settles_the_run() {
+    // A `run()` has to be cancellable from the moment its promise exists,
+    // not from the moment the microtask queue next drains. A page that wires
+    // a cancel button and clicks it before yielding -- or any caller that
+    // feeds Ctrl-C on the next statement -- delivers the interrupt in the
+    // same tick as the call, and there is no tick to wait for.
+    //
+    // The deliberate absence of a `tick()` between the two lines below is
+    // the whole test. With the run registered only inside the spawned
+    // future, that Ctrl-C finds an empty task registry, aborts nothing, and
+    // leaves a promise that never settles.
+    //
+    // Nothing is asserted about the sink here: an abort landing before the
+    // first poll means `Abortable` returns `Err(Aborted)` without ever
+    // polling the inner future, so no command body ran and there is nothing
+    // for it to have written. The rejection still has to carry the two
+    // channels, empty -- that is `RunError`'s shape, not a special case.
+    let core = make_core();
+    command(&core, "hangs", "return new Promise(() => {});");
+
+    let pending = core.run(0, "hangs".to_string());
+    core.feed(0, "\x03");
+
+    let settled = within_a_second(pending).await.expect("a same-tick Ctrl-C left run() hanging");
+    let err = settled.expect_err("an aborted run rejects");
+    let msg = Reflect::get(&err, &"message".into())
+        .ok()
+        .and_then(|m| m.as_string())
+        .unwrap_or_default();
+    assert!(msg.contains("aborted"), "{msg}");
+    assert!(Reflect::has(&err, &"log".into()).unwrap_or(false), "rejection dropped `log`");
+    assert!(Reflect::has(&err, &"err".into()).unwrap_or(false), "rejection dropped `err`");
     core.dispose();
 }
 
@@ -530,14 +591,11 @@ async fn abort_signal_fires_on_ctrl_c() {
     let _ = Reflect::set(&js_sys::global(), &"__aborted".into(), &JsValue::FALSE);
 
     let pending = core.run(0, "hang".to_string());
-    // `run()` registers its task *inside* the spawned future, and
-    // `future_to_promise` does not poll that until a microtask later. A
-    // Ctrl-C fed in the same tick therefore finds an empty task registry,
-    // aborts nothing, and leaves this test awaiting a promise that never
-    // settles -- at which point Node's event loop empties and the runner
-    // exits silently, taking every not-yet-run test in this file with it.
-    // (The same-tick race is real in the product too, not an artifact of
-    // the test; it is worth fixing at the source.)
+    // The subject here is `ctx.signal` reaching a *running* command, so the
+    // body has to have run and attached its listener before the interrupt --
+    // hence the tick. Interrupting earlier than that still rejects the run
+    // (`a_same_tick_ctrl_c_settles_the_run`), but the body never runs, so
+    // there is no listener to fire and nothing for this test to observe.
     tick().await;
     core.feed(0, "\x03"); // Ctrl-C aborts pane 0's runs
     let err = JsFuture::from(pending).await.expect_err("aborted run rejects");
