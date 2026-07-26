@@ -8,6 +8,8 @@ use crate::value::Value;
 use indexmap::IndexSet;
 use unicode_width::UnicodeWidthStr;
 
+pub mod stream;
+
 const BOLD: &str = "\x1b[1m";
 const DIM: &str = "\x1b[2m";
 const CYAN: &str = "\x1b[36m";
@@ -173,10 +175,9 @@ fn render_record(map: &indexmap::IndexMap<String, Value>) -> String {
     out
 }
 
-/// Box-drawn table for a `List` of `Record`s. Column set is the union of
-/// keys in first-seen order. The widest column shrinks (with `…`) to fit the
-/// width budget; numbers right-align; header is bold.
-fn render_table(rows: &[Value], width: u16) -> String {
+/// The ordered union of record keys across `rows`, first-seen order.
+/// Non-`Record` rows contribute nothing (they render as blank cells).
+pub(crate) fn table_columns(rows: &[Value]) -> Vec<String> {
     let mut columns: IndexSet<String> = IndexSet::new();
     for row in rows {
         if let Value::Record(map) = row {
@@ -185,26 +186,59 @@ fn render_table(rows: &[Value], width: u16) -> String {
             }
         }
     }
-    let columns: Vec<String> = columns.into_iter().collect();
-    if columns.is_empty() {
-        return format!("{DIM}({} empty records){RESET}\n", rows.len());
+    columns.into_iter().collect()
+}
+
+/// Text and numeric-ness of one row's `col` cell (escape-stripped; numbers
+/// right-align downstream).
+fn cell(row: &Value, col: &str) -> (String, bool) {
+    match row {
+        Value::Record(map) => match map.get(col) {
+            Some(v) => (cell_text(&plain(v)), matches!(v, Value::Int(_) | Value::Float(_))),
+            None => (String::new(), false),
+        },
+        _ => (String::new(), false),
     }
+}
 
-    let cell = |row: &Value, col: &str| -> (String, bool) {
-        match row {
-            Value::Record(map) => match map.get(col) {
-                Some(v) => (cell_text(&plain(v)), matches!(v, Value::Int(_) | Value::Float(_))),
-                None => (String::new(), false),
-            },
-            _ => (String::new(), false),
+fn truncate(s: &str, max: usize) -> String {
+    if UnicodeWidthStr::width(s) <= max {
+        return s.to_string();
+    }
+    let mut out = String::new();
+    let mut used = 0usize;
+    for ch in s.chars() {
+        let w = UnicodeWidthStr::width(ch.to_string().as_str());
+        if used + w > max.saturating_sub(1) {
+            break;
         }
-    };
+        used += w;
+        out.push(ch);
+    }
+    out.push('…');
+    out
+}
 
-    // Display names are sanitized; `columns` keeps raw keys for cell lookup.
-    let headers: Vec<String> = columns.iter().map(|c| cell_text(c)).collect();
+fn rule(widths: &[usize], left: &str, mid: &str, right: &str) -> String {
+    let mut s = String::from(left);
+    for (i, w) in widths.iter().enumerate() {
+        s.push_str(&"─".repeat(w + 2));
+        s.push_str(if i + 1 == widths.len() { right } else { mid });
+    }
+    s.push('\n');
+    s
+}
+
+/// Final display widths for `cols` given these sample rows: natural widths
+/// (header vs cells), shrunk to fit `width` (with a `MIN_COL_WIDTH` floor).
+/// Called once against the probe rows so a streamed row later reuses the
+/// exact same widths a full-list render would have produced.
+pub(crate) fn column_widths(cols: &[String], rows: &[Value], width: u16) -> Vec<usize> {
+    // Display names are sanitized; `cols` keeps raw keys for cell lookup.
+    let headers: Vec<String> = cols.iter().map(|c| cell_text(c)).collect();
 
     // Natural widths.
-    let mut widths: Vec<usize> = columns
+    let mut widths: Vec<usize> = cols
         .iter()
         .zip(&headers)
         .map(|(c, h)| {
@@ -217,7 +251,7 @@ fn render_table(rows: &[Value], width: u16) -> String {
         .collect();
 
     // Shrink the widest column until the table fits (or we hit the floor).
-    let overhead = 3 * columns.len() + 1; // "│ " per column + trailing "│" and padding
+    let overhead = 3 * cols.len() + 1; // "│ " per column + trailing "│" and padding
     let budget = (width as usize).saturating_sub(overhead);
     while widths.iter().sum::<usize>() > budget {
         let (widest, w) = match widths.iter().enumerate().max_by_key(|(_, w)| **w) {
@@ -229,60 +263,63 @@ fn render_table(rows: &[Value], width: u16) -> String {
         }
         widths[widest] = w - 1;
     }
+    widths
+}
 
-    let truncate = |s: &str, max: usize| -> String {
-        if UnicodeWidthStr::width(s) <= max {
-            return s.to_string();
-        }
-        let mut out = String::new();
-        let mut used = 0usize;
-        for ch in s.chars() {
-            let w = UnicodeWidthStr::width(ch.to_string().as_str());
-            if used + w > max.saturating_sub(1) {
-                break;
-            }
-            used += w;
-            out.push(ch);
-        }
-        out.push('…');
-        out
-    };
-
-    let rule = |left: &str, mid: &str, right: &str| -> String {
-        let mut s = String::from(left);
-        for (i, w) in widths.iter().enumerate() {
-            s.push_str(&"─".repeat(w + 2));
-            s.push_str(if i + 1 == widths.len() { right } else { mid });
-        }
-        s.push('\n');
-        s
-    };
-
+/// Top border + header row + separator, at fixed `widths`.
+pub(crate) fn table_header(cols: &[String], widths: &[usize]) -> String {
+    let headers: Vec<String> = cols.iter().map(|c| cell_text(c)).collect();
     let mut out = String::new();
-    out.push_str(&rule("┌", "┬", "┐"));
+    out.push_str(&rule(widths, "┌", "┬", "┐"));
     out.push('│');
-    for (c, w) in headers.iter().zip(&widths) {
+    for (c, w) in headers.iter().zip(widths) {
         let text = truncate(c, *w);
         let pad = " ".repeat(w - UnicodeWidthStr::width(text.as_str()));
         out.push_str(&format!(" {BOLD}{text}{RESET}{pad} │"));
     }
     out.push('\n');
-    out.push_str(&rule("├", "┼", "┤"));
-    for row in rows {
-        out.push('│');
-        for (c, w) in columns.iter().zip(&widths) {
-            let (text, numeric) = cell(row, c);
-            let text = truncate(&text, *w);
-            let pad = " ".repeat(w - UnicodeWidthStr::width(text.as_str()));
-            if numeric {
-                out.push_str(&format!(" {pad}{CYAN}{text}{RESET} │"));
-            } else {
-                out.push_str(&format!(" {text}{pad} │"));
-            }
+    out.push_str(&rule(widths, "├", "┼", "┤"));
+    out
+}
+
+/// One data row at fixed `widths`: over-wide cells truncate with `…`,
+/// numbers right-align.
+pub(crate) fn table_row(row: &Value, cols: &[String], widths: &[usize]) -> String {
+    let mut out = String::new();
+    out.push('│');
+    for (c, w) in cols.iter().zip(widths) {
+        let (text, numeric) = cell(row, c);
+        let text = truncate(&text, *w);
+        let pad = " ".repeat(w - UnicodeWidthStr::width(text.as_str()));
+        if numeric {
+            out.push_str(&format!(" {pad}{CYAN}{text}{RESET} │"));
+        } else {
+            out.push_str(&format!(" {text}{pad} │"));
         }
-        out.push('\n');
     }
-    out.push_str(&rule("└", "┴", "┘"));
+    out.push('\n');
+    out
+}
+
+/// Bottom border at fixed `widths`.
+pub(crate) fn table_bottom(widths: &[usize]) -> String {
+    rule(widths, "└", "┴", "┘")
+}
+
+/// Box-drawn table for a `List` of `Record`s. Column set is the union of
+/// keys in first-seen order. The widest column shrinks (with `…`) to fit the
+/// width budget; numbers right-align; header is bold.
+fn render_table(rows: &[Value], width: u16) -> String {
+    let cols = table_columns(rows);
+    if cols.is_empty() {
+        return format!("{DIM}({} empty records){RESET}\n", rows.len());
+    }
+    let widths = column_widths(&cols, rows, width);
+    let mut out = table_header(&cols, &widths);
+    for row in rows {
+        out.push_str(&table_row(row, &cols, &widths));
+    }
+    out.push_str(&table_bottom(&widths));
     out
 }
 
