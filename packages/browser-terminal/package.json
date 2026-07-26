@@ -42,6 +42,7 @@
     "dist"
   ],
   "scripts": {
+    "prepublishOnly": "node scripts/check-publishable.mjs",
     "build": "node scripts/gen-xterm-css.mjs && tsc -p tsconfig.json && rm -rf dist/wasm && cp -R src/wasm dist/wasm && cp ../../LICENSE ./LICENSE"
   },
   "dependencies": {
