@@ -70,6 +70,26 @@ jobs:
       # engine the demos exercise.
       - run: cargo test --workspace
 
+      # The native suite above cannot reach the wasm-bindgen boundary --
+      # Value <-> JS conversion, JsCommand invocation, `run()`'s resolved
+      # shape, Ctrl-C through an AbortSignal -- and that boundary is the one
+      # thing the demos are made of. Left out of CI, ten of these went stale
+      # against two deliberate API changes without anything going red. Needs
+      # no extra tooling: the wasm32 target comes from the toolchain step,
+      # `wasm-bindgen-test-runner` ships in the pinned wasm-bindgen-cli, and
+      # Node is already set up above.
+      - name: Boundary tests (wasm32, under Node)
+        run: |
+          # `wasm-bindgen-cli` ships the runner alongside `wasm-bindgen`, and
+          # .cargo/config.toml names it as the wasm32 runner. If the install
+          # step ever stops unpacking it, cargo's own error is a confusing
+          # "no such command", so say what is actually missing.
+          if ! command -v wasm-bindgen-test-runner >/dev/null; then
+            echo "::error::wasm-bindgen-test-runner not on PATH; the wasm-bindgen-cli install step did not provide it"
+            exit 1
+          fi
+          just test-wasm
+
       - name: Build wasm + library
         run: just build
 
