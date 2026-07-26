@@ -19,7 +19,8 @@ use crate::matcher::{PatternMatcher, SubstringMatcher};
 use crate::registry::{Command, CommandRegistry, ExecContext, HostHooks, MuxAction, PipelineData};
 use crate::render::render;
 use crate::value::Value;
-use std::collections::VecDeque;
+use std::cell::RefCell;
+use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
 
 pub struct Engine {
@@ -31,6 +32,10 @@ pub struct Engine {
     fn_compiler: Rc<dyn FnCompiler>,
     prefix_armed: bool,
     events: VecDeque<EngineEvent>,
+    /// The in-flight progressive renderer for a pane, if any. The host's
+    /// probe deadline reaches it through here to force an early commit —
+    /// this crate has no clock, so the timing decision is the host's.
+    pending_render: HashMap<u32, Rc<RefCell<crate::render::stream::StreamRenderer>>>,
 }
 
 /// What `handle_msg` wants the host to do after the borrow closes.
@@ -59,6 +64,7 @@ impl Engine {
             fn_compiler: Rc::new(NoFnCompiler),
             prefix_armed: false,
             events: VecDeque::new(),
+            pending_render: HashMap::new(),
         }
     }
 
@@ -310,6 +316,22 @@ impl Engine {
             self.emit(EngineEvent::LayoutChanged { snapshot });
         }
     }
+
+    /// The host's probe deadline fired: commit whatever this pane's
+    /// progressive renderer has buffered, so a slow source paints without
+    /// waiting for more rows. No-op if there is nothing pending, or if it
+    /// already committed (reaching `PROBE_ROWS`, or a previous deadline).
+    ///
+    /// Returns the text to emit; the caller emits it after this borrow
+    /// closes (emitting inside would nest an engine borrow).
+    pub fn commit_pending_render(&mut self, pane: u32) -> Option<String> {
+        // Clone the Rc out and let the map borrow end here — `borrow_mut`
+        // below must not run while `self` (and thus the map) is still
+        // borrowed, and nothing here needs `&mut self` beyond the lookup.
+        let renderer = self.pending_render.get(&pane)?.clone();
+        let mut renderer = renderer.borrow_mut();
+        renderer.commit()
+    }
 }
 
 /// Normalize then convert to CRLF. Lone `\r` (cursor-to-column-0 control)
@@ -533,7 +555,10 @@ struct ProgressiveConsumer<A: EngineAccess> {
     /// Kept alongside the renderer for the mixed-stream fallback below,
     /// which renders buffered non-record items at this same width.
     width: u16,
-    renderer: crate::render::stream::StreamRenderer,
+    /// Shared with `Engine::pending_render` for the run's lifetime, so the
+    /// host's probe-deadline timer can force an early commit from outside
+    /// this future.
+    renderer: Rc<RefCell<crate::render::stream::StreamRenderer>>,
     /// Non-record items, rendered at finish via the normal path.
     buffered: Vec<PipelineData>,
     painted: bool,
@@ -541,12 +566,19 @@ struct ProgressiveConsumer<A: EngineAccess> {
 
 impl<A: EngineAccess> ProgressiveConsumer<A> {
     fn new(access: A, pane: u32, sink: Rc<dyn crate::sink::Sink>, width: u16) -> Self {
+        let renderer = Rc::new(RefCell::new(crate::render::stream::StreamRenderer::new(
+            width,
+            PROBE_ROWS,
+        )));
+        access.with(|e| {
+            e.pending_render.insert(pane, renderer.clone());
+        });
         ProgressiveConsumer {
             access,
             pane,
             sink,
             width,
-            renderer: crate::render::stream::StreamRenderer::new(width, PROBE_ROWS),
+            renderer,
             buffered: Vec::new(),
             painted: false,
         }
@@ -565,7 +597,7 @@ impl<A: EngineAccess> crate::eval::FinalConsumer for ProgressiveConsumer<A> {
         match item {
             PipelineData::Value(Value::Record(map)) => {
                 self.painted = true;
-                if let Some(text) = self.renderer.push(Value::Record(map)) {
+                if let Some(text) = self.renderer.borrow_mut().push(Value::Record(map)) {
                     self.paint(&text);
                 }
             }
@@ -582,8 +614,20 @@ impl<A: EngineAccess> crate::eval::FinalConsumer for ProgressiveConsumer<A> {
     }
 
     fn finish(&mut self) -> PipelineData {
+        // Deregister before doing anything else: the run is ending, so the
+        // host's probe deadline (if it still fires) must no longer reach
+        // this renderer. Guard with `ptr_eq` in case a second run already
+        // started in this pane and overwrote the map entry — never remove
+        // another run's still-active renderer.
+        self.access.with(|e| {
+            if let Some(current) = e.pending_render.get(&self.pane) {
+                if Rc::ptr_eq(current, &self.renderer) {
+                    e.pending_render.remove(&self.pane);
+                }
+            }
+        });
         if self.painted {
-            let tail = self.renderer.finish();
+            let tail = self.renderer.borrow_mut().finish();
             if !tail.is_empty() {
                 self.paint(&tail);
             }
@@ -1173,5 +1217,51 @@ mod tests {
             many > few + 5,
             "expected incremental paints ({many}) to far exceed the finite case ({few})"
         );
+    }
+
+    #[test]
+    fn a_host_deadline_commits_a_partial_probe() {
+        // A slow source: fewer rows than PROBE_ROWS have arrived, so nothing
+        // has painted. Driving a live pipeline to exactly this in-flight
+        // state fights the `block_on`/`drive` scheduling model directly
+        // (Part A's throttle processes at most one row per `drive` pass, so
+        // there is no clean hook to pause "after N rows, before the probe
+        // fills"). Instead this registers a renderer exactly as
+        // `ProgressiveConsumer::new` does, then calls
+        // `commit_pending_render` the way the host's `setTimeout` would --
+        // proving the engine's half of the mechanism without re-implementing
+        // the scheduler. The wasm half (arming the real timer) has no native
+        // test; Task 6 covers it in the browser.
+        let access = engine();
+        let pane = active_pane(&access);
+
+        let renderer = Rc::new(RefCell::new(crate::render::stream::StreamRenderer::new(
+            80,
+            PROBE_ROWS,
+        )));
+        let mut m = indexmap::IndexMap::new();
+        m.insert("id".to_string(), Value::Int(7));
+        assert_eq!(
+            renderer.borrow_mut().push(Value::Record(m)),
+            None,
+            "still probing: nothing painted yet"
+        );
+        access.with(|e| {
+            e.pending_render.insert(pane, renderer.clone());
+        });
+
+        let forced = access
+            .with(|e| e.commit_pending_render(pane))
+            .expect("the deadline forces a commit of the buffered row");
+        assert!(forced.contains("id"), "header painted: {forced:?}");
+        assert!(forced.contains('7'), "buffered row painted: {forced:?}");
+
+        // Already committed: a second deadline (or the run's own
+        // end-of-stream commit) is a safe no-op, not a repainted header.
+        assert_eq!(access.with(|e| e.commit_pending_render(pane)), None);
+
+        // A pane with nothing pending -- no run ever started, or its run
+        // already finished and deregistered -- is also a no-op.
+        assert_eq!(access.with(|e| e.commit_pending_render(pane + 1)), None);
     }
 }

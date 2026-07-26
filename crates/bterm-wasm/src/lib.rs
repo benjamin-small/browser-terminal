@@ -117,6 +117,45 @@ fn run_rejection(msg: &str, sink: &bterm_core::sink::CollectingSink) -> JsValue 
     e.into()
 }
 
+/// First-paint deadline for a pane's progressive table: if a slow source
+/// hasn't produced `PROBE_ROWS` (bterm-core's row-count bound) by this many
+/// milliseconds after the run started, we commit whatever it has buffered
+/// so far rather than leaving the pane blank. bterm-core has no clock, so
+/// this timing decision -- and the `setTimeout` that carries it out --
+/// lives here.
+const PROBE_DEADLINE_MS: i32 = 150;
+
+/// Arm the probe deadline for a run: after `PROBE_DEADLINE_MS`, force
+/// whatever that pane's progressive renderer has buffered to paint. Recorded
+/// in the task registry so `finish`/abort clears it before it can fire late
+/// against a pane that has moved on to a different run.
+fn arm_probe_deadline(run_id: u64, pane: u32) {
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    let closure = Closure::once(move || {
+        if !engine_alive() {
+            return;
+        }
+        let text = WasmAccess.with(|e| e.commit_pending_render(pane));
+        if let Some(text) = text {
+            WasmAccess.with(|e| e.emit_output(pane, &text));
+            flush_events();
+        }
+    });
+    let armed = window.set_timeout_with_callback_and_timeout_and_arguments_0(
+        closure.as_ref().unchecked_ref(),
+        PROBE_DEADLINE_MS,
+    );
+    // The closure must outlive the call that registers it with the JS
+    // timer; `forget` intentionally leaks it, and `finish`/abort clearing
+    // the timeout (below) is what bounds that leak to "at most one per run".
+    closure.forget();
+    if let Ok(id) = armed {
+        tasks::set_probe_timeout(run_id, id);
+    }
+}
+
 /// Spawn one submitted line as an abortable task, tracked in the task
 /// registry so Ctrl-C / dispose can cancel it.
 fn spawn_pipeline(pane: u32, line: String) {
@@ -126,6 +165,7 @@ fn spawn_pipeline(pane: u32, line: String) {
     };
     let (fut, handle) = Abortable::wrap(execute_line(WasmAccess, pane, line, run_id));
     tasks::register(run_id, pane, handle, controller);
+    arm_probe_deadline(run_id, pane);
     spawn_local(async move {
         let result = fut.await;
         tasks::finish(run_id);
