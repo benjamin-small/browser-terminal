@@ -45,6 +45,21 @@ export interface CommandArgs {
   flags: Record<string, Value>;
 }
 
+/** A diagnostic channel: callable for whole lines, with buffering control. */
+export interface ChannelWriter {
+  /** Write a whole line — the delimiter is appended for you. */
+  (line: string): void;
+  /** Write without appending a delimiter: partial lines, progress bars. */
+  write(s: string): void;
+  /** Emit everything buffered now. Always works, in every mode. */
+  flush(): void;
+  /**
+   * `'line'` (default) flushes on the delimiter, `'byte'` on every write,
+   * `'block'` only on `flush()` or when the buffer fills.
+   */
+  mode(m: 'byte' | 'line' | 'block', opts?: { delimiter?: string }): void;
+}
+
 export interface CommandCtx {
   /** Fires when the pipeline is aborted (Ctrl-C / dispose). Pass to fetch(). */
   signal: AbortSignal;
@@ -52,17 +67,17 @@ export interface CommandCtx {
    * Channel 3 — progress and commentary. Goes to the terminal, never into
    * the pipe, so a downstream `| length` is unaffected by anything you log.
    */
-  log(line: string): void;
+  log: ChannelWriter;
   /**
    * Channel 2 — warnings and diagnostics, rendered in red. Non-fatal:
    * throw if you need to abort the pipeline.
    */
-  err(line: string): void;
+  err: ChannelWriter;
   /**
    * Alias for `log`, kept because it predates the channel split and every
    * existing command uses it. Prefer `log` in new code.
    */
-  emit(line: string): void;
+  emit: ChannelWriter;
 }
 
 export type CommandFn = (
