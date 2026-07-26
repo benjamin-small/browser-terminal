@@ -126,21 +126,43 @@ fn run_rejection(msg: &str, sink: &bterm_core::sink::CollectingSink) -> JsValue 
 const PROBE_DEADLINE_MS: i32 = 150;
 
 /// Arm the probe deadline for a run: after `PROBE_DEADLINE_MS`, force
-/// whatever that pane's progressive renderer has buffered to paint. Recorded
-/// in the task registry so `finish`/abort clears it before it can fire late
-/// against a pane that has moved on to a different run.
+/// whatever that pane's progressive renderer has buffered to paint.
 fn arm_probe_deadline(run_id: u64, pane: u32) {
+    schedule_probe_check(run_id, pane);
+}
+
+/// Schedule one probe-deadline check `PROBE_DEADLINE_MS` out. Recorded in
+/// the task registry so `finish`/abort clears it before it can fire late
+/// against a pane that has moved on to a different run.
+///
+/// A source's first row can itself arrive after the deadline (an `await`
+/// before the first `yield`, say) — at that moment there is nothing
+/// buffered yet, so `commit_pending_render` finds nothing to paint and a
+/// single one-shot check would silently give up, leaving the pane blank
+/// until the stream ends on its own. So a check that finds nothing pending
+/// reschedules itself, rather than assuming "nothing yet" means "nothing
+/// ever" — it keeps trying every `PROBE_DEADLINE_MS` until either something
+/// paints, the renderer settles some other way (reaching `PROBE_ROWS`), or
+/// the run itself ends (which cancels the pending timer via `tasks`).
+fn schedule_probe_check(run_id: u64, pane: u32) {
     let Some(window) = web_sys::window() else {
         return;
     };
     let cb = Closure::once_into_js(move || {
-        if !engine_alive() {
+        if !engine_alive() || !tasks::is_active(run_id) {
             return;
         }
         let text = WasmAccess.with(|e| e.commit_pending_render(pane));
-        if let Some(text) = text {
-            WasmAccess.with(|e| e.emit_output(pane, &text));
-            flush_events();
+        match text {
+            Some(text) => {
+                WasmAccess.with(|e| e.emit_output(pane, &text));
+                flush_events();
+            }
+            None => {
+                if !WasmAccess.with(|e| e.probe_settled(pane)) {
+                    schedule_probe_check(run_id, pane);
+                }
+            }
         }
     });
     let armed = window.set_timeout_with_callback_and_timeout_and_arguments_0(

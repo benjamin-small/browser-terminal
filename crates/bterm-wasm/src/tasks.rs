@@ -31,6 +31,14 @@ thread_local! {
     static NEXT_ID: Cell<u64> = const { Cell::new(1) };
 }
 
+/// Whether `run_id` is still a live, in-flight run (not finished, not
+/// aborted). The probe-deadline reschedule loop checks this before touching
+/// the engine, so a stale timer from a run that already ended can't force a
+/// commit against whatever new run has since reused its pane.
+pub fn is_active(run_id: u64) -> bool {
+    TASKS.with(|t| t.borrow().contains_key(&run_id))
+}
+
 pub fn next_id() -> u64 {
     NEXT_ID.with(|c| {
         let id = c.get();

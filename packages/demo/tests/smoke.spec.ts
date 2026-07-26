@@ -352,6 +352,67 @@ test('a failed run still hands back the diagnostics it wrote', async ({ page }) 
   expect(result.err).toEqual(['about to fail']);
 });
 
+test('a slow source paints before it finishes, via the probe deadline', async ({ page }) => {
+  await page.goto('/');
+  await waitForTerminal(page);
+
+  await page.evaluate(() => {
+    // 3 rows over ~1.2s: far fewer than PROBE_ROWS, so only the host's
+    // 150ms deadline can make anything paint before the stream ends.
+    window.bt.registerCommand({ name: 'drip', summary: 'slow rows' }, async function* () {
+      for (let i = 0; i < 3; i++) {
+        await new Promise((r) => setTimeout(r, 400));
+        yield { id: i };
+      }
+    });
+  });
+
+  // Type it into the pane so it renders there (run() is programmatic and
+  // does not paint). Manually constructing InputEvents on the hidden
+  // textarea does not reach xterm's own input handling (verified: it
+  // needs real key events, not a synthesized `input` event with a value
+  // set out from under it) -- Playwright's real key-event dispatch does,
+  // because it pierces the open shadow root and drives the textarea the
+  // same way a real keystroke would.
+  const ta = page.locator('[data-browser-terminal]').locator('.xterm-helper-textarea');
+  await ta.click();
+  await ta.pressSequentially('drip');
+  await ta.press('Enter');
+
+  // The header must appear WELL BEFORE the stream could have finished
+  // (3 x 400ms = 1200ms). Waiting up to 900ms proves it did not wait for
+  // the end.
+  await page.waitForFunction(
+    () => {
+      const term = document.querySelector('[data-browser-terminal]')!.shadowRoot!;
+      const text = term.querySelector('.xterm-rows')?.textContent ?? '';
+      return text.includes('id');
+    },
+    null,
+    { timeout: 900 },
+  );
+});
+
+test('a fast source stays responsive', async ({ page }) => {
+  await page.goto('/');
+  await waitForTerminal(page);
+
+  const elapsed = await page.evaluate(async () => {
+    window.bt.registerCommand({ name: 'flood', summary: '2000 rows fast' }, async function* () {
+      for (let i = 0; i < 2000; i++) {
+        yield { id: i };
+      }
+    });
+    const started = Date.now();
+    const r = await window.bt.run('flood | length');
+    return { count: r.value, ms: Date.now() - started };
+  });
+
+  expect(elapsed.count).toBe(2000);
+  // Generous bound: the point is it completes rather than hanging.
+  expect(elapsed.ms).toBeLessThan(15000);
+});
+
 test('watch streams DOM events and head terminates it', async ({ page }) => {
   await page.goto('/');
   await waitForTerminal(page);

@@ -68,6 +68,15 @@ impl StreamRenderer {
         Some(out)
     }
 
+    /// Whether this renderer has committed widths (via `push` reaching
+    /// `probe_rows`, or a forced `commit`). Lets a caller stop polling once
+    /// there is nothing left for a deadline to do — `commit()` alone can't
+    /// tell "already committed" apart from "still empty", since both return
+    /// `None`.
+    pub fn is_committed(&self) -> bool {
+        self.committed.is_some()
+    }
+
     /// Close the table: commit anything still probing, then the bottom
     /// border. Empty if nothing was ever painted.
     pub fn finish(&mut self) -> String {

@@ -332,6 +332,20 @@ impl Engine {
         let mut renderer = renderer.borrow_mut();
         renderer.commit()
     }
+
+    /// Whether the host's probe deadline has nothing left to do for this
+    /// pane: either no run is pending here (finished, or never started), or
+    /// its renderer already committed (via the row-count probe or a
+    /// previous deadline). `commit_pending_render` returning `None` can't
+    /// tell "already settled" apart from "still waiting for the first
+    /// row" — this can, so a slow-starting source's deadline knows whether
+    /// to keep rescheduling itself.
+    pub fn probe_settled(&self, pane: u32) -> bool {
+        match self.pending_render.get(&pane) {
+            None => true,
+            Some(renderer) => renderer.borrow().is_committed(),
+        }
+    }
 }
 
 /// Normalize then convert to CRLF. Lone `\r` (cursor-to-column-0 control)
