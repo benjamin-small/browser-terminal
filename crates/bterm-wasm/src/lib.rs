@@ -388,61 +388,73 @@ impl BtermCore {
     /// Rejects with an `Error` whose message is the shell error and which
     /// also carries `log` and `err` — a failed run keeps the diagnostics it
     /// wrote on the way down.
+    ///
+    /// Cancellable from the moment it returns: the run is in the task
+    /// registry before the promise reaches the caller, so a Ctrl-C in the
+    /// same tick rejects it with `aborted`.
     pub fn run(&self, pane: u32, line: String) -> js_sys::Promise {
         if !engine_alive() {
             return js_sys::Promise::reject(&JsValue::from_str(
                 "browser-terminal: engine is disposed",
             ));
         }
+        let run_id = tasks::next_id();
+        let Ok(controller) = web_sys::AbortController::new() else {
+            let e = js_sys::Error::new("AbortController unavailable");
+            return js_sys::Promise::reject(&e.into());
+        };
+        // Registered under the pane so Ctrl-C also cancels programmatic runs
+        // targeting it — and registered *here*, synchronously, so that holds
+        // from the moment the promise exists rather than from whenever
+        // `future_to_promise` first polls the task (a microtask later). A
+        // page that wires a cancel button, or a caller that feeds `\x03` on
+        // the next statement, interrupts in this same tick: registering
+        // inside the async block would leave that Ctrl-C nothing to find,
+        // and the promise would never settle.
+        //
+        // An abort that lands in the gap is still honoured, and cheaply:
+        // `Abortable::poll` checks the flag before it polls the inner
+        // future, so the task's first poll settles it `Err(Aborted)` without
+        // `eval_to_value` running at all.
+        let sink = Rc::new(bterm_core::sink::CollectingSink::new());
+        let (fut, handle) =
+            Abortable::wrap(eval_to_value(WasmAccess, pane, line, run_id, sink.clone()));
+        tasks::register(run_id, pane, handle, controller);
         future_to_promise(async move {
-            let run_id = tasks::next_id();
-            if let Ok(controller) = web_sys::AbortController::new() {
-                // Registered under the pane so Ctrl-C also cancels
-                // programmatic runs targeting it.
-                let sink = Rc::new(bterm_core::sink::CollectingSink::new());
-                let (fut, handle) = Abortable::wrap(eval_to_value(
-                    WasmAccess,
-                    pane,
-                    line,
-                    run_id,
-                    sink.clone(),
-                ));
-                tasks::register(run_id, pane, handle, controller);
-                let result = fut.await;
-                tasks::finish(run_id);
-                match result {
-                    Ok(Ok(value)) => {
-                        let out = js_sys::Object::new();
-                        let _ = js_sys::Reflect::set(
-                            &out,
-                            &JsValue::from_str("value"),
-                            &convert::value_to_js(&value),
-                        );
-                        let _ = js_sys::Reflect::set(
-                            &out,
-                            &JsValue::from_str("log"),
-                            &string_array(&sink.log_lines()),
-                        );
-                        let _ = js_sys::Reflect::set(
-                            &out,
-                            &JsValue::from_str("err"),
-                            &string_array(&sink.err_lines()),
-                        );
-                        Ok(out.into())
-                    }
-                    Ok(Err(err)) => {
-                        let mut msg = err.msg.clone();
-                        if let Some(help) = &err.help {
-                            msg.push_str(&format!(" ({help})"));
-                        }
-                        Err(run_rejection(&msg, &sink))
-                    }
-                    // Ctrl-C keeps what the command managed to print — the
-                    // partial log is usually why you interrupted it.
-                    Err(_aborted) => Err(run_rejection("aborted", &sink)),
+            let result = fut.await;
+            tasks::finish(run_id);
+            match result {
+                Ok(Ok(value)) => {
+                    let out = js_sys::Object::new();
+                    let _ = js_sys::Reflect::set(
+                        &out,
+                        &JsValue::from_str("value"),
+                        &convert::value_to_js(&value),
+                    );
+                    let _ = js_sys::Reflect::set(
+                        &out,
+                        &JsValue::from_str("log"),
+                        &string_array(&sink.log_lines()),
+                    );
+                    let _ = js_sys::Reflect::set(
+                        &out,
+                        &JsValue::from_str("err"),
+                        &string_array(&sink.err_lines()),
+                    );
+                    Ok(out.into())
                 }
-            } else {
-                Err(js_sys::Error::new("AbortController unavailable").into())
+                Ok(Err(err)) => {
+                    let mut msg = err.msg.clone();
+                    if let Some(help) = &err.help {
+                        msg.push_str(&format!(" ({help})"));
+                    }
+                    Err(run_rejection(&msg, &sink))
+                }
+                // Ctrl-C keeps what the command managed to print — the
+                // partial log is usually why you interrupted it. A run
+                // aborted before its first poll printed nothing, so this is
+                // the same rejection with both channels empty.
+                Err(_aborted) => Err(run_rejection("aborted", &sink)),
             }
         })
     }
