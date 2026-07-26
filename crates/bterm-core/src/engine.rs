@@ -464,6 +464,30 @@ impl<A: EngineAccess> crate::sink::Sink for PaneSink<A> {
         // queued and invisible until the whole pipeline resolves.
         self.access.events_ready();
     }
+
+    /// Hand control back to the driver between paints.
+    ///
+    /// Without this a fast producer paints as fast as it can produce,
+    /// starving every other stage in the same `drive` pass and, in a browser,
+    /// the frame loop with it. One yield per painted item bounds paint rate
+    /// to the driver's pace, which is what keeps the tab responsive on a
+    /// 100k-row source. `drive` re-polls promptly because the self-wake sets
+    /// its nudge flag.
+    fn ready(&self) -> crate::registry::LocalBoxFuture<()> {
+        Box::pin(async {
+            let mut yielded = false;
+            std::future::poll_fn(move |cx| {
+                if yielded {
+                    std::task::Poll::Ready(())
+                } else {
+                    yielded = true;
+                    cx.waker().wake_by_ref();
+                    std::task::Poll::Pending
+                }
+            })
+            .await
+        })
+    }
 }
 
 fn make_ctx<A: EngineAccess>(
