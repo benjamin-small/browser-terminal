@@ -52,6 +52,75 @@ impl CommandSource for std::cell::RefCell<CommandRegistry> {
     }
 }
 
+/// Receives the last stage's items.
+///
+/// `eval_pipeline` is engine-agnostic — it cannot paint, because painting
+/// needs an `EngineAccess` only the pane path has. So the terminal consumer
+/// is pluggable: programmatic `run()`, the CLI, and tests collect into one
+/// value; the interactive pane paints progressively.
+///
+/// `item` is synchronous because painting is (`access.with` is a sync
+/// closure) and because a future borrowing `&mut self` cannot be boxed into
+/// the `'static` `LocalBoxFuture`. Backpressure is therefore a separate
+/// `ready()`, which borrows nothing of `self`.
+pub trait FinalConsumer {
+    /// One item from the last stage: paint or buffer it now.
+    fn item(&mut self, item: PipelineData);
+
+    /// Resolves when the consumer can accept more — the pane throttle.
+    /// Default immediate; awaited between items with no borrow held.
+    fn ready(&self) -> crate::registry::LocalBoxFuture<()> {
+        crate::registry::ready(())
+    }
+
+    /// End of stream: the value this pipeline reports.
+    fn finish(&mut self) -> PipelineData;
+}
+
+/// Collects items into one value, exactly as the previous hardcoded terminal
+/// collector did — the behaviour `run()`, the CLI, and every test depend on.
+#[derive(Default)]
+pub struct CollectingConsumer {
+    items: Vec<PipelineData>,
+}
+
+impl CollectingConsumer {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl FinalConsumer for CollectingConsumer {
+    fn item(&mut self, item: PipelineData) {
+        self.items.push(item);
+    }
+
+    fn finish(&mut self) -> PipelineData {
+        let items = std::mem::take(&mut self.items);
+        let all_rendered = !items.is_empty()
+            && items.iter().all(|i| matches!(i, PipelineData::Rendered(_)));
+        if all_rendered {
+            let joined = items
+                .into_iter()
+                .map(|i| match i {
+                    PipelineData::Rendered(s) => s,
+                    _ => String::new(),
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            PipelineData::Rendered(joined)
+        } else {
+            match items.len() {
+                0 => PipelineData::Empty,
+                1 => items.into_iter().next().expect("len checked above"),
+                _ => PipelineData::Value(Value::List(
+                    items.into_iter().map(PipelineData::into_value).collect(),
+                )),
+            }
+        }
+    }
+}
+
 /// Evaluate one submitted line. Returns one result per completed
 /// `;`-pipeline plus the error that stopped a later pipeline, if any —
 /// earlier successful results are never discarded.
@@ -63,8 +132,9 @@ pub async fn eval_line(
 ) -> (Vec<PipelineData>, Option<ShellError>) {
     let mut results = Vec::new();
     for pipeline in &line.pipelines {
-        match eval_pipeline(pipeline, source, ctx, scope).await {
-            Ok(data) => results.push(data),
+        let mut consumer = CollectingConsumer::new();
+        match eval_pipeline(pipeline, source, ctx, scope, &mut consumer).await {
+            Ok(()) => results.push(consumer.finish()),
             Err(err) => return (results, Some(err)),
         }
     }
@@ -87,8 +157,8 @@ pub async fn eval_pipeline(
     source: &impl CommandSource,
     ctx: &ExecContext,
     scope: &Scope,
-) -> Result<PipelineData, ShellError> {
-    let outcome: Rc<RefCell<PipelineData>> = Rc::new(RefCell::new(PipelineData::Empty));
+    consumer: &mut dyn FinalConsumer,
+) -> Result<(), ShellError> {
     let failure: Rc<RefCell<Option<ShellError>>> = Rc::new(RefCell::new(None));
 
     // The first stage's input is an already-closed empty stream.
@@ -112,49 +182,19 @@ pub async fn eval_pipeline(
         upstream = rx;
     }
 
-    // Terminal collector: drain the last stage's output into `outcome`.
+    // Terminal consumer: drain the last stage's output into `consumer`.
     //
-    // Deliberately not `crate::stream::collect` — that helper is for a
-    // *collecting command's own input*, where degrading `Rendered` to `Str`
-    // is the intended "trust drops once consumed" rule. This is the outer
-    // boundary instead: the renderer needs to know a single surviving item
-    // was `Rendered` (pre-styled help/table text) rather than a `Value` to
-    // print it verbatim instead of running it through `render()`.
-    //
-    // A pure help/text stream reaching this boundary (e.g. `cmd --help`,
-    // now sent as one `Rendered` item per line) stays trusted text, joined
-    // back into a single `Rendered` block and printed verbatim — so a bare
-    // `cmd --help` looks the same as before streaming. Anything else
-    // collects as: 0 items -> Empty, 1 item -> that item (tag preserved), N
-    // items -> a `Value::List` (the same way `stream::collect` would).
-    let outcome_for_collector = outcome.clone();
+    // `eval_pipeline` is engine-agnostic and cannot paint, so what happens to
+    // each item is pluggable: `CollectingConsumer` reproduces the old
+    // hardcoded collector (below) exactly; the pane's progressive consumer
+    // paints each item as it arrives instead. Either way this stays a stage
+    // so consumption interleaves with upstream production rather than
+    // waiting for it to finish.
     stages.push(Box::pin(async move {
-        let mut items: Vec<PipelineData> = Vec::new();
         while let Some(item) = upstream.recv().await {
-            items.push(item);
+            consumer.item(item);
+            consumer.ready().await;
         }
-        let all_rendered = !items.is_empty()
-            && items.iter().all(|i| matches!(i, PipelineData::Rendered(_)));
-        let collected = if all_rendered {
-            let joined = items
-                .into_iter()
-                .map(|i| match i {
-                    PipelineData::Rendered(s) => s,
-                    _ => String::new(),
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
-            PipelineData::Rendered(joined)
-        } else {
-            match items.len() {
-                0 => PipelineData::Empty,
-                1 => items.into_iter().next().expect("len checked above"),
-                _ => PipelineData::Value(Value::List(
-                    items.into_iter().map(PipelineData::into_value).collect(),
-                )),
-            }
-        };
-        *outcome_for_collector.borrow_mut() = collected;
     }));
 
     crate::pipeline::drive(stages).await;
@@ -162,8 +202,7 @@ pub async fn eval_pipeline(
     if let Some(err) = failure.borrow_mut().take() {
         return Err(err);
     }
-    let result = std::mem::replace(&mut *outcome.borrow_mut(), PipelineData::Empty);
-    Ok(result)
+    Ok(())
 }
 
 /// Items a stage may buffer before its producer is made to wait. The bound
@@ -465,6 +504,17 @@ mod tests {
         };
         assert!(text.contains("reverse"), "no reverse line: {text:?}");
         assert!(!text.contains("Usage"), "did not filter to one line: {text:?}");
+    }
+
+    #[test]
+    fn the_consumer_seam_preserves_the_final_value() {
+        // Guards the refactor: routing the last stage through a pluggable
+        // consumer must not change what a pipeline reports.
+        let out = eval("emit 5 | double").expect("eval");
+        assert_eq!(
+            out.into_iter().last().map(PipelineData::into_value),
+            Some(Value::Int(10))
+        );
     }
 
     #[test]
