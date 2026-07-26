@@ -53,6 +53,23 @@ struct CliSink;
 
 impl bterm_core::sink::Sink for CliSink {
     fn write(&self, record: bterm_core::sink::Record) {
+        use std::io::Write;
+        if record.is_raw() {
+            // No newline: a partial write must stay partial. Flush so a
+            // progress bar appears as it is drawn rather than sitting in
+            // stdout's line buffer.
+            match record.channel() {
+                bterm_core::sink::Channel::Log => {
+                    print!("{}", record.text());
+                    let _ = std::io::stdout().flush();
+                }
+                bterm_core::sink::Channel::Err => {
+                    eprint!("{}", record.text());
+                    let _ = std::io::stderr().flush();
+                }
+            }
+            return;
+        }
         match record.channel() {
             bterm_core::sink::Channel::Log => println!("{}", record.text()),
             bterm_core::sink::Channel::Err => eprintln!("{}", record.text()),
