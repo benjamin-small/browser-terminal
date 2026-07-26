@@ -397,20 +397,45 @@ test('a fast source stays responsive', async ({ page }) => {
   await page.goto('/');
   await waitForTerminal(page);
 
-  const elapsed = await page.evaluate(async () => {
+  await page.evaluate(() => {
     window.bt.registerCommand({ name: 'flood', summary: '2000 rows fast' }, async function* () {
       for (let i = 0; i < 2000; i++) {
         yield { id: i };
       }
     });
-    const started = Date.now();
-    const r = await window.bt.run('flood | length');
-    return { count: r.value, ms: Date.now() - started };
   });
 
-  expect(elapsed.count).toBe(2000);
-  // Generous bound: the point is it completes rather than hanging.
-  expect(elapsed.ms).toBeLessThan(15000);
+  // Type it into the pane rather than `run('flood | length')`: `run()`
+  // collects through CollectingConsumer/CollectingSink, which never touches
+  // PaneSink::ready() -- the cooperative-yield throttle this test means to
+  // exercise. `| length` would also collapse the 2000 rows to one scalar
+  // before they ever reach the pane, so this runs `flood` bare and lets all
+  // 2000 records flow through the progressive path, one yield apiece.
+  const ta = page.locator('[data-browser-terminal]').locator('.xterm-helper-textarea');
+  await ta.click();
+  const started = Date.now();
+  await ta.pressSequentially('flood');
+  await ta.press('Enter');
+
+  // The point is that painting 2000 rows, one cooperative yield each,
+  // completes rather than hanging the tab. Generous bound.
+  //
+  // Can't look for the literal id "1999": the pane in this viewport is
+  // narrow enough that numeric cells truncate (e.g. to "1…"), so the last
+  // row's value never appears verbatim. The bottom border only appears once
+  // the table closes, and a fresh prompt only reprints after `finish_pane`
+  // -- together they're a completion signal that doesn't depend on the
+  // pane's column width.
+  await page.waitForFunction(
+    () => {
+      const term = document.querySelector('[data-browser-terminal]')!.shadowRoot!;
+      const text = term.querySelector('.xterm-rows')?.textContent ?? '';
+      return text.includes('└') && text.trimEnd().endsWith('❯');
+    },
+    null,
+    { timeout: 15000 },
+  );
+  expect(Date.now() - started).toBeLessThan(15000);
 });
 
 test('watch streams DOM events and head terminates it', async ({ page }) => {

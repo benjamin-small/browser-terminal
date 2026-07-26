@@ -152,14 +152,14 @@ fn schedule_probe_check(run_id: u64, pane: u32) {
         if !engine_alive() || !tasks::is_active(run_id) {
             return;
         }
-        let text = WasmAccess.with(|e| e.commit_pending_render(pane));
+        let text = WasmAccess.with(|e| e.commit_pending_render(pane, run_id));
         match text {
             Some(text) => {
                 WasmAccess.with(|e| e.emit_output(pane, &text));
                 flush_events();
             }
             None => {
-                if !WasmAccess.with(|e| e.probe_settled(pane)) {
+                if !WasmAccess.with(|e| e.probe_settled(pane, run_id)) {
                     schedule_probe_check(run_id, pane);
                 }
             }

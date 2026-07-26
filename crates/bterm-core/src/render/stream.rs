@@ -12,7 +12,7 @@
 //! job — this crate has no timer. The host calls `commit()` when its
 //! deadline fires.
 
-use super::{column_widths, table_bottom, table_columns, table_header, table_row};
+use super::{column_widths, table_bottom, table_columns, table_header, table_row, DIM, RESET};
 use crate::value::Value;
 
 pub struct StreamRenderer {
@@ -36,6 +36,15 @@ impl StreamRenderer {
     /// header plus every probed row; afterwards, that one row.
     pub fn push(&mut self, row: Value) -> Option<String> {
         if let Some(c) = &self.committed {
+            if c.cols.is_empty() {
+                // Already committed to the "(N empty records)" placeholder
+                // (see `commit`). There is no per-row rendering for a
+                // record with no fields, and the count already painted
+                // can't be updated in place, so later field-less rows are
+                // silently absorbed rather than emitting a meaningless
+                // empty row.
+                return None;
+            }
             return Some(table_row(&row, &c.cols, &c.widths));
         }
         self.probe.push(row);
@@ -56,8 +65,14 @@ impl StreamRenderer {
         let rows = std::mem::take(&mut self.probe);
         let cols = table_columns(&rows);
         if cols.is_empty() {
-            // Records with no fields: nothing meaningful to tabulate.
-            return None;
+            // Records with no fields have no columns to tabulate, but they
+            // are still output -- `render_table` prints a placeholder
+            // rather than nothing, and the pane must match it or a finite
+            // result would render differently here than through
+            // run()/the CLI. `widths` stays empty, which `finish` uses to
+            // know not to append a bottom border for this case.
+            self.committed = Some(Committed { cols, widths: Vec::new() });
+            return Some(format!("{DIM}({} empty records){RESET}\n", rows.len()));
         }
         let widths = column_widths(&cols, &rows, self.width);
         let mut out = table_header(&cols, &widths);
@@ -82,7 +97,13 @@ impl StreamRenderer {
     pub fn finish(&mut self) -> String {
         let mut out = self.commit().unwrap_or_default();
         if let Some(c) = &self.committed {
-            out.push_str(&table_bottom(&c.widths));
+            // Empty `widths` is the field-less-records placeholder, which
+            // has no box to close -- `render_table` prints only the
+            // placeholder line, no border, and `table_bottom(&[])` would
+            // otherwise append a stray "└\n".
+            if !c.widths.is_empty() {
+                out.push_str(&table_bottom(&c.widths));
+            }
         }
         out
     }
@@ -144,6 +165,31 @@ mod tests {
         // The gate: when every row arrives inside the probe, the streamed
         // output must be byte-identical to rendering the whole list at once.
         let rows = vec![rec(1), rec(2), rec(3)];
+        let mut r = StreamRenderer::new(80, 50);
+        let mut streamed = String::new();
+        for row in &rows {
+            if let Some(text) = r.push(row.clone()) {
+                streamed.push_str(&text);
+            }
+        }
+        streamed.push_str(&r.finish());
+        assert_eq!(streamed, super::super::render(&Value::List(rows), 80));
+    }
+
+    #[test]
+    fn field_less_records_match_render_table_exactly() {
+        // Records with no fields have no columns to tabulate, but they are
+        // still output: `render_table` prints "(N empty records)" rather
+        // than a zero-column box. `commit` used to drop the buffered rows
+        // and paint nothing at all in this case -- the gate here is the
+        // same shape as `a_full_probe_matches_render_table_exactly`, byte
+        // for byte, so the streaming path can't silently diverge from a
+        // one-shot render again.
+        let rows = vec![
+            Value::Record(indexmap::IndexMap::new()),
+            Value::Record(indexmap::IndexMap::new()),
+            Value::Record(indexmap::IndexMap::new()),
+        ];
         let mut r = StreamRenderer::new(80, 50);
         let mut streamed = String::new();
         for row in &rows {

@@ -32,10 +32,19 @@ pub struct Engine {
     fn_compiler: Rc<dyn FnCompiler>,
     prefix_armed: bool,
     events: VecDeque<EngineEvent>,
-    /// The in-flight progressive renderer for a pane, if any. The host's
-    /// probe deadline reaches it through here to force an early commit —
-    /// this crate has no clock, so the timing decision is the host's.
-    pending_render: HashMap<u32, Rc<RefCell<crate::render::stream::StreamRenderer>>>,
+    /// The in-flight progressive renderer for a pane, tagged with the run
+    /// that owns it. The host's probe deadline reaches it through here to
+    /// force an early commit — this crate has no clock, so the timing
+    /// decision is the host's.
+    ///
+    /// A second line submitted while the first is still streaming
+    /// (`feed`/`spawn_pipeline` starts every submitted line as its own
+    /// task) replaces this entry for the pane, so the run id lets
+    /// `commit_pending_render`/`probe_settled` tell "this is still my
+    /// renderer" from "a newer run took over this pane" — otherwise an
+    /// older run's deadline would silently drive the newer run's renderer
+    /// and abandon its own.
+    pending_render: HashMap<u32, (u64, Rc<RefCell<crate::render::stream::StreamRenderer>>)>,
 }
 
 /// What `handle_msg` wants the host to do after the borrow closes.
@@ -317,33 +326,43 @@ impl Engine {
         }
     }
 
-    /// The host's probe deadline fired: commit whatever this pane's
-    /// progressive renderer has buffered, so a slow source paints without
-    /// waiting for more rows. No-op if there is nothing pending, or if it
-    /// already committed (reaching `PROBE_ROWS`, or a previous deadline).
+    /// The host's probe deadline fired for `run_id`: commit whatever this
+    /// pane's progressive renderer has buffered, so a slow source paints
+    /// without waiting for more rows. `None` if there is nothing pending,
+    /// if it already committed (reaching `PROBE_ROWS`, or a previous
+    /// deadline), or — critically — if a *different* run has since taken
+    /// over this pane: without the run-id check, an older run's timer
+    /// would reach into a newer run's renderer, silently forcing its probe
+    /// while leaving the older run's own renderer (now orphaned) unpainted.
     ///
     /// Returns the text to emit; the caller emits it after this borrow
     /// closes (emitting inside would nest an engine borrow).
-    pub fn commit_pending_render(&mut self, pane: u32) -> Option<String> {
+    pub fn commit_pending_render(&mut self, pane: u32, run_id: u64) -> Option<String> {
         // Clone the Rc out and let the map borrow end here — `borrow_mut`
         // below must not run while `self` (and thus the map) is still
         // borrowed, and nothing here needs `&mut self` beyond the lookup.
-        let renderer = self.pending_render.get(&pane)?.clone();
+        let (owner, renderer) = self.pending_render.get(&pane)?;
+        if *owner != run_id {
+            return None;
+        }
+        let renderer = renderer.clone();
         let mut renderer = renderer.borrow_mut();
         renderer.commit()
     }
 
-    /// Whether the host's probe deadline has nothing left to do for this
-    /// pane: either no run is pending here (finished, or never started), or
-    /// its renderer already committed (via the row-count probe or a
-    /// previous deadline). `commit_pending_render` returning `None` can't
-    /// tell "already settled" apart from "still waiting for the first
-    /// row" — this can, so a slow-starting source's deadline knows whether
-    /// to keep rescheduling itself.
-    pub fn probe_settled(&self, pane: u32) -> bool {
+    /// Whether the host's probe deadline has nothing left to do for
+    /// `run_id` in this pane: no run is pending here (finished, never
+    /// started, or superseded by a different run), or its renderer already
+    /// committed (via the row-count probe or a previous deadline).
+    /// `commit_pending_render` returning `None` can't tell "already
+    /// settled" apart from "still waiting for the first row" — this can, so
+    /// a slow-starting source's deadline knows whether to keep rescheduling
+    /// itself. A pane now owned by a different run also reads as settled:
+    /// this run has nothing left to do here either way.
+    pub fn probe_settled(&self, pane: u32, run_id: u64) -> bool {
         match self.pending_render.get(&pane) {
             None => true,
-            Some(renderer) => renderer.borrow().is_committed(),
+            Some((owner, renderer)) => *owner != run_id || renderer.borrow().is_committed(),
         }
     }
 }
@@ -565,6 +584,9 @@ const PROBE_ROWS: usize = 50;
 struct ProgressiveConsumer<A: EngineAccess> {
     access: A,
     pane: u32,
+    /// Tags this run's entry in `Engine::pending_render`, so `finish` only
+    /// removes it if a newer run hasn't already replaced it for this pane.
+    run_id: u64,
     sink: Rc<dyn crate::sink::Sink>,
     /// Kept alongside the renderer for the mixed-stream fallback below,
     /// which renders buffered non-record items at this same width.
@@ -579,17 +601,18 @@ struct ProgressiveConsumer<A: EngineAccess> {
 }
 
 impl<A: EngineAccess> ProgressiveConsumer<A> {
-    fn new(access: A, pane: u32, sink: Rc<dyn crate::sink::Sink>, width: u16) -> Self {
+    fn new(access: A, pane: u32, run_id: u64, sink: Rc<dyn crate::sink::Sink>, width: u16) -> Self {
         let renderer = Rc::new(RefCell::new(crate::render::stream::StreamRenderer::new(
             width,
             PROBE_ROWS,
         )));
         access.with(|e| {
-            e.pending_render.insert(pane, renderer.clone());
+            e.pending_render.insert(pane, (run_id, renderer.clone()));
         });
         ProgressiveConsumer {
             access,
             pane,
+            run_id,
             sink,
             width,
             renderer,
@@ -630,12 +653,12 @@ impl<A: EngineAccess> crate::eval::FinalConsumer for ProgressiveConsumer<A> {
     fn finish(&mut self) -> PipelineData {
         // Deregister before doing anything else: the run is ending, so the
         // host's probe deadline (if it still fires) must no longer reach
-        // this renderer. Guard with `ptr_eq` in case a second run already
-        // started in this pane and overwrote the map entry — never remove
-        // another run's still-active renderer.
+        // this renderer. The run-id check is what actually protects a
+        // second run in this pane (`commit_pending_render`/`probe_settled`
+        // check it too); `ptr_eq` is belt-and-braces on top of that.
         self.access.with(|e| {
-            if let Some(current) = e.pending_render.get(&self.pane) {
-                if Rc::ptr_eq(current, &self.renderer) {
+            if let Some((owner, current)) = e.pending_render.get(&self.pane) {
+                if *owner == self.run_id && Rc::ptr_eq(current, &self.renderer) {
                     e.pending_render.remove(&self.pane);
                 }
             }
@@ -718,7 +741,7 @@ pub async fn execute_line<A: EngineAccess>(access: A, pane: u32, line: String, r
         let access2 = access.clone();
         let sink2 = sink_for_consumer;
         let mut make = || -> Box<dyn crate::eval::FinalConsumer> {
-            Box::new(ProgressiveConsumer::new(access2.clone(), pane, sink2.clone(), cols))
+            Box::new(ProgressiveConsumer::new(access2.clone(), pane, run_id, sink2.clone(), cols))
         };
         eval_line_with(&parsed.line, &source, &ctx, &scope, &mut make).await
     };
@@ -1245,9 +1268,10 @@ mod tests {
         // `commit_pending_render` the way the host's `setTimeout` would --
         // proving the engine's half of the mechanism without re-implementing
         // the scheduler. The wasm half (arming the real timer) has no native
-        // test; Task 6 covers it in the browser.
+        // test; the browser proof covers it end to end.
         let access = engine();
         let pane = active_pane(&access);
+        let run_id = 1;
 
         let renderer = Rc::new(RefCell::new(crate::render::stream::StreamRenderer::new(
             80,
@@ -1261,21 +1285,87 @@ mod tests {
             "still probing: nothing painted yet"
         );
         access.with(|e| {
-            e.pending_render.insert(pane, renderer.clone());
+            e.pending_render.insert(pane, (run_id, renderer.clone()));
         });
 
         let forced = access
-            .with(|e| e.commit_pending_render(pane))
+            .with(|e| e.commit_pending_render(pane, run_id))
             .expect("the deadline forces a commit of the buffered row");
         assert!(forced.contains("id"), "header painted: {forced:?}");
         assert!(forced.contains('7'), "buffered row painted: {forced:?}");
 
         // Already committed: a second deadline (or the run's own
         // end-of-stream commit) is a safe no-op, not a repainted header.
-        assert_eq!(access.with(|e| e.commit_pending_render(pane)), None);
+        assert_eq!(access.with(|e| e.commit_pending_render(pane, run_id)), None);
 
         // A pane with nothing pending -- no run ever started, or its run
         // already finished and deregistered -- is also a no-op.
-        assert_eq!(access.with(|e| e.commit_pending_render(pane + 1)), None);
+        assert_eq!(access.with(|e| e.commit_pending_render(pane + 1, run_id)), None);
+    }
+
+    #[test]
+    fn a_second_runs_deadline_does_not_hijack_the_first() {
+        // A user can submit a second line into the same pane while the
+        // first is still streaming -- nothing in `feed`/`spawn_pipeline`
+        // stops it. `ProgressiveConsumer::new` would then overwrite
+        // `pending_render[pane]` with the newer run's renderer. Without the
+        // run-id check, the *older* run's still-armed timer would reach
+        // through that shared pane key and force a commit on the *newer*
+        // run's renderer -- silently abandoning its own, and (if the newer
+        // run settles first) making `probe_settled` report "done" for a run
+        // that never painted.
+        let access = engine();
+        let pane = active_pane(&access);
+        let (run_a, run_b) = (1, 2);
+
+        let renderer_a = Rc::new(RefCell::new(crate::render::stream::StreamRenderer::new(
+            80,
+            PROBE_ROWS,
+        )));
+        let mut m = indexmap::IndexMap::new();
+        m.insert("id".to_string(), Value::Int(1));
+        renderer_a.borrow_mut().push(Value::Record(m));
+        access.with(|e| {
+            e.pending_render.insert(pane, (run_a, renderer_a.clone()));
+        });
+
+        // Run B starts in the same pane before A's deadline fires, and
+        // overwrites the map entry exactly as `ProgressiveConsumer::new`
+        // does.
+        let renderer_b = Rc::new(RefCell::new(crate::render::stream::StreamRenderer::new(
+            80,
+            PROBE_ROWS,
+        )));
+        let mut m = indexmap::IndexMap::new();
+        m.insert("id".to_string(), Value::Int(2));
+        renderer_b.borrow_mut().push(Value::Record(m));
+        access.with(|e| {
+            e.pending_render.insert(pane, (run_b, renderer_b.clone()));
+        });
+
+        // A's deadline fires: it must not touch B's renderer.
+        assert_eq!(
+            access.with(|e| e.commit_pending_render(pane, run_a)),
+            None,
+            "a superseded run's deadline must not drive the newer run's renderer"
+        );
+        assert!(
+            !renderer_b.borrow().is_committed(),
+            "A's deadline must not have force-committed B's renderer"
+        );
+        assert!(
+            access.with(|e| e.probe_settled(pane, run_a)),
+            "a superseded run reads as settled -- it has nothing left to do here"
+        );
+
+        // B's own deadline still works normally.
+        let forced = access
+            .with(|e| e.commit_pending_render(pane, run_b))
+            .expect("B's own deadline still commits B's buffered row");
+        // Check the coloured numeric cell specifically, not a bare digit --
+        // the header's bold escape (`\x1b[1m`) itself contains a literal
+        // '1' and would make a plain `contains('1')` a false positive.
+        assert!(forced.contains("\x1b[36m2"), "B's row painted: {forced:?}");
+        assert!(!forced.contains("\x1b[36m1"), "A's row must not appear: {forced:?}");
     }
 }
