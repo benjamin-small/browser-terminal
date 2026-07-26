@@ -2,6 +2,33 @@
   "name": "@benjamin-small/browser-terminal",
   "version": "0.1.0",
   "description": "A terminal/tmux experience for any web page, powered by a Rust/WASM core with structured-value pipes.",
+  "license": "Apache-2.0",
+  "author": "Benjamin Small",
+  "homepage": "https://benjamin-small.github.io/browser-terminal/",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/benjamin-small/browser-terminal.git",
+    "directory": "packages/browser-terminal"
+  },
+  "bugs": {
+    "url": "https://github.com/benjamin-small/browser-terminal/issues"
+  },
+  "keywords": [
+    "terminal",
+    "tmux",
+    "shell",
+    "webassembly",
+    "wasm",
+    "xterm",
+    "repl",
+    "structured-data",
+    "pipeline",
+    "rust"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "sideEffects": false,
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
