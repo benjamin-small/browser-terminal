@@ -1112,20 +1112,42 @@ mod tests {
         }
     }
 
+    /// Number of separate PaneOutput events — the observable difference
+    /// between painting incrementally and emitting one block at the end.
+    fn pane_output_count(events: &[EngineEvent]) -> usize {
+        events
+            .iter()
+            .filter(|ev| matches!(ev, EngineEvent::PaneOutput { .. }))
+            .count()
+    }
+
     #[test]
-    fn a_long_result_paints_before_it_ends() {
-        // More rows than the probe: the header and early rows must already be
-        // painted before the stream finishes, which is what "progressive"
-        // means. Painting happens inside the run, so by the time we read the
-        // events the whole table is there -- the observable proof is that the
-        // header appears BEFORE the last row in the byte stream, which only
-        // holds if it was emitted incrementally rather than as one block at
-        // the end.
+    fn a_long_result_paints_incrementally_not_in_one_block() {
+        // 60 rows against a 50-row probe: the probe commits (header + first
+        // 50 rows), then each remaining row paints on its own. A collect-once
+        // implementation would emit a single output event instead, so the
+        // count is what distinguishes them -- asserting only that the header
+        // precedes the last row would pass either way.
         let access = engine();
         access.with(|e| e.registry.register_builtin(Rc::new(Rows(60))));
-        let out = output_text(&feed_and_run(&access, "rows\r"));
-        let header = out.find("id").expect("header painted");
-        let last_row = out.rfind("59").expect("last row painted");
-        assert!(header < last_row, "header must precede the final row");
+        let events = feed_and_run(&access, "rows\r");
+        let out = output_text(&events);
+
+        assert!(out.contains("id"), "header painted: {out:?}");
+        assert!(out.contains("59"), "last row painted: {out:?}");
+
+        // Prompt/echo also emit PaneOutput, so compare against the finite
+        // case rather than a magic number: 60 rows must produce many more
+        // output events than a 3-row result does.
+        let small = engine();
+        small.with(|e| e.registry.register_builtin(Rc::new(Rows(3))));
+        let small_events = feed_and_run(&small, "rows\r");
+
+        let many = pane_output_count(&events);
+        let few = pane_output_count(&small_events);
+        assert!(
+            many > few + 5,
+            "expected incremental paints ({many}) to far exceed the finite case ({few})"
+        );
     }
 }
