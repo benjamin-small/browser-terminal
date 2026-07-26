@@ -71,17 +71,24 @@ impl Command for JsCommand {
             // The line call and the raw write are different APIs, not two
             // spellings of one: `ctx.log('msg')` passes a *message* -- the
             // shell owns the framing and strip-everything sanitizing, and
-            // `run()`'s log/err arrays are a public contract of clean,
-            // single-line entries (a SECURITY test asserts an embedded
-            // newline collapses so page-controlled text cannot fake extra
-            // lines in a caller's log viewer). `ctx.log.write('\r50%')`
-            // passes *terminal bytes* -- the command owns the framing, and
-            // the allowlist sanitizer plus `OutputBuffer` is what makes that
-            // safe. Only `.write`/`.flush`/`.mode` touch the buffer; the
+            // for *that* path `run()`'s log/err arrays are a public contract
+            // of clean, single-line entries (a SECURITY test asserts an
+            // embedded newline collapses so page-controlled text cannot fake
+            // extra lines in a caller's log viewer). The contract is no wider
+            // than the cooked path: a raw entry lands in the same array with
+            // a different shape -- `ctx.log.write('a\nb')` puts one
+            // multi-line entry in `run().log`, and line/block coalescing
+            // means raw entry count does not track call count either.
+            // `ctx.log.write('\r50%')` passes *terminal bytes* -- the command
+            // owns the framing, and the allowlist sanitizer plus
+            // `OutputBuffer` is what makes that safe.
+            // Only `.write`/`.flush`/`.mode` touch the buffer; the
             // plain call bypasses it entirely, so mixing the two on one
-            // channel (`ctx.log('a')` then `ctx.log.write('b')`) can
-            // interleave out of order -- acceptable, since a command that
-            // wants ordering guarantees should pick one API and stick to it.
+            // channel reorders output -- `ctx.log.write('a')` may still be
+            // buffered when a later `ctx.log('b')` goes straight out, so `b`
+            // lands first and `a` follows when the buffer drains. Acceptable,
+            // since a command that wants ordering guarantees should pick one
+            // API and stick to it (or `flush()` before switching).
             let log_buf = Rc::new(RefCell::new(OutputBuffer::new()));
 
             // ctx.log(line) -- the sugar every existing command uses: cooked,

@@ -502,28 +502,29 @@ test('a progress bar redraws in place rather than scrolling', async ({ page }) =
   expect(text).not.toContain('20%');
 });
 
-test('block mode holds output until flush', async ({ page }) => {
+test('block mode holds delimiter-bearing writes until flush', async ({ page }) => {
   await page.goto('/');
   await waitForTerminal(page);
 
-  const result = await page.evaluate(async () => {
+  const log = await page.evaluate(async () => {
     window.bt.registerCommand({ name: 'batched', summary: 'block mode' }, async (_a, _i, ctx) => {
       ctx.log.mode('block');
-      ctx.log.write('one ');
-      ctx.log.write('two ');
-      ctx.log.write('three');
-      const beforeFlush = 'nothing emitted yet';
+      // Every write ends in the line delimiter, which is what makes this a
+      // test of *block* mode rather than of buffering in general: under the
+      // DEFAULT line mode each of these flushes on its own newline and
+      // arrives as its own entry. Delimiter-free writes would be held by
+      // line mode too, so they could not tell the two apart.
+      ctx.log.write('one\n');
+      ctx.log.write('two\n');
+      ctx.log.write('three\n');
       ctx.log.flush();
-      return beforeFlush;
+      return 'done';
     });
     const r = await window.bt.run('batched');
-    return { value: r.value, log: r.log };
+    return r.log;
   });
 
-  expect(result.value).toBe('nothing emitted yet');
-  // The three writes arrive as ONE entry, not three -- that is what block
-  // mode buys. (Observed: exactly `['one two three']`; the allowance of 2
-  // covers a boundary `finish()` tail, which an explicit flush leaves empty.)
-  expect(result.log.join('')).toContain('one two three');
-  expect(result.log.length).toBeLessThanOrEqual(2);
+  // Exactly one entry carrying all three lines. Line mode would give three
+  // entries; byte mode would also give three. Only block coalesces.
+  expect(log).toEqual(['one\ntwo\nthree\n']);
 });

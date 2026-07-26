@@ -134,15 +134,23 @@ pub fn diagnostic_text(s: &str) -> String {
 /// Display text for a command's *raw* write (`ctx.log.write`), which is
 /// allowed a narrow set of control sequences that `diagnostic_text` strips.
 ///
-/// The rule that makes this safe: **every permitted sequence is confined to
-/// the current line, or is non-spatial styling.** Nothing here can move to
-/// another line, position the cursor absolutely, clear the screen, read the
-/// cursor back (that injects into the input stream), or touch OSC. So the
-/// worst a hostile command can do is garble the line it is already writing —
-/// which it can do with plain text anyway.
+/// The rule that makes this safe: **no permitted sequence moves the cursor
+/// upward or to an absolute position.** `\n` *is* permitted, so a raw write
+/// is not confined to one line — a command can open new lines below itself.
+/// What it cannot do is climb back: nothing here moves up, positions the
+/// cursor absolutely, clears the screen, reads the cursor back (that injects
+/// into the input stream), or touches OSC. So a hostile command can only
+/// garble lines it opened itself, which it can already do with plain text;
+/// output written before it — the prompt, an earlier command — is out of
+/// reach.
 ///
-/// SGR is permitted because it cannot move anything; the writer force-emits
-/// a reset at the command boundary so colour cannot leak into the prompt.
+/// SGR is permitted because it cannot move anything. Its containment comes
+/// from `PaneSink` reset-prefixing *every* record (see `engine.rs`), not from
+/// any reset at the command boundary — there is no such reset, and there
+/// could not usefully be one: `Abortable::poll` returns without resuming a
+/// suspended command, so boundary cleanup never runs on Ctrl-C, which is
+/// exactly the case a command that sets a colour and then hangs would
+/// exploit. Per-record reset holds even then.
 pub fn writer_text(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut chars = s.chars().peekable();
