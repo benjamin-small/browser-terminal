@@ -133,7 +133,7 @@ fn arm_probe_deadline(run_id: u64, pane: u32) {
     let Some(window) = web_sys::window() else {
         return;
     };
-    let closure = Closure::once(move || {
+    let cb = Closure::once_into_js(move || {
         if !engine_alive() {
             return;
         }
@@ -144,13 +144,13 @@ fn arm_probe_deadline(run_id: u64, pane: u32) {
         }
     });
     let armed = window.set_timeout_with_callback_and_timeout_and_arguments_0(
-        closure.as_ref().unchecked_ref(),
+        cb.as_ref().unchecked_ref(),
         PROBE_DEADLINE_MS,
     );
-    // The closure must outlive the call that registers it with the JS
-    // timer; `forget` intentionally leaks it, and `finish`/abort clearing
-    // the timeout (below) is what bounds that leak to "at most one per run".
-    closure.forget();
+    // `once_into_js` hands the closure to JS rather than leaking it, so a
+    // long session submitting many lines doesn't accumulate one per run.
+    // Clearing the timeout on finish/abort cancels the *timer*; it is JS
+    // that reclaims the callback.
     if let Ok(id) = armed {
         tasks::set_probe_timeout(run_id, id);
     }
