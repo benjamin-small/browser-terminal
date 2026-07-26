@@ -8,7 +8,7 @@
 //! than N items in flight" true regardless of how fast a producer runs.
 
 use crate::registry::PipelineData;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::future::poll_fn;
 use std::rc::Rc;
@@ -28,6 +28,17 @@ struct Inner {
     recv_waker: Option<Waker>,
     /// Woken when the buffer frees a slot or the receiver goes away.
     send_waker: Option<Waker>,
+    /// Whether this stream carries the elements of a collection rather than
+    /// a bare value. `flatten` sets it when it unrolls a `List`, and
+    /// `collect` reads it to decide whether one item means `[x]` or `x` —
+    /// the two are otherwise indistinguishable once flattened.
+    ///
+    /// Shared rather than owned so a streaming stage can hand its output the
+    /// *same* flag its input has (`share_batching_with`). That sidesteps the
+    /// ordering problem: the producer may not have flattened yet when the
+    /// stage starts, but by the time anyone calls `collect` it has, and both
+    /// ends are looking at one cell.
+    batched: Rc<Cell<bool>>,
 }
 
 pub fn channel(capacity: usize) -> (Sender, Receiver) {
@@ -39,6 +50,7 @@ pub fn channel(capacity: usize) -> (Sender, Receiver) {
         receiver_gone: false,
         recv_waker: None,
         send_waker: None,
+        batched: Rc::new(Cell::new(false)),
     }));
     (Sender { inner: inner.clone() }, Receiver { inner })
 }
@@ -48,6 +60,21 @@ pub struct Sender {
 }
 
 impl Sender {
+    /// Declare that what follows is the contents of a collection, so one
+    /// item downstream still collects to a one-element list.
+    pub fn mark_batched(&self) {
+        self.inner.borrow().batched.set(true);
+    }
+
+    /// Adopt `input`'s batching flag, so this stage's output is a collection
+    /// exactly when its input was one. A streaming stage forwards items
+    /// without ever seeing the enclosing list, and would otherwise lose the
+    /// distinction its producer established.
+    pub fn share_batching_with(&self, input: &Receiver) {
+        let upstream = input.inner.borrow().batched.clone();
+        self.inner.borrow_mut().batched = upstream;
+    }
+
     /// Resolves once the item is buffered. Pending while the buffer is full —
     /// this is the backpressure. `Err(Closed)` means the receiver is gone.
     pub async fn send(&self, item: PipelineData) -> Result<(), Closed> {
@@ -107,6 +134,11 @@ pub struct Receiver {
 }
 
 impl Receiver {
+    /// Whether this stream carries a collection's elements. See `Inner`.
+    pub fn is_batched(&self) -> bool {
+        self.inner.borrow().batched.get()
+    }
+
     /// `None` means end of stream: the sender is gone and the buffer is
     /// drained. Pending means more may yet arrive.
     pub async fn recv(&mut self) -> Option<PipelineData> {

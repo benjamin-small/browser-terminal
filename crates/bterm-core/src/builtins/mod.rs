@@ -69,6 +69,10 @@ impl Command for StreamingBuiltin {
         input: crate::chan::Receiver,
         output: crate::chan::Sender,
     ) -> crate::registry::LocalBoxFuture<Result<(), ShellError>> {
+        // A streaming command sees items, never the list around them, so it
+        // cannot preserve batching itself. Do it here, once, for all of them:
+        // filtering a table leaves a table, even down to one row or none.
+        output.share_batching_with(&input);
         (self.run_fn)(ctx, call, input, output)
     }
 }
@@ -1019,36 +1023,36 @@ mod tests {
 
     // --- grep (native host: substring dialect) ---
 
-    // --- batch-model note (S3-T2) ---
+    // --- batch-model note ---
     //
-    // `stream::collect`'s N==1 rule ("exactly one item stays that value,
-    // unwrapped") is what makes a fully-collected *table* pipeline
-    // byte-identical, per the streaming-commands design. But it also means a
-    // stage's single surviving row is indistinguishable, on the inter-stage
-    // channel, from that stage having produced a bare scalar/record all
-    // along — a table that happens to have exactly one row collapses to its
-    // one row once a downstream collecting command reads it back. The design
-    // doc calls this out by name as an expected shift ("anything that
-    // assumed input is exactly one `List` value"), not a regression. The
-    // tests below that hit it are updated to assert the new, still-correct
-    // behavior, with this note explaining why; where the fix is instead to
-    // give the test non-singleton data (so the thing it actually means to
-    // test survives the round trip), that's done instead of changing the
-    // assertion.
+    // A stream now carries a flag saying whether its items were a collection
+    // (`chan::Inner::batched`, set by `stream::flatten`, propagated across
+    // streaming stages, read by `stream::collect`). So a table filtered down
+    // to one row stays a one-row table, while `echo 5` stays a scalar.
+    //
+    // This note used to say the opposite. S3-T2 introduced collect's bare
+    // N==1 rule, noticed that a one-row table then collapsed into its row,
+    // and recorded that as "an expected shift, not a regression" — and the
+    // tests below were rewritten to assert the collapse, one of them with
+    // the message "a singleton table collapses to a bare record downstream".
+    // It was a bug, and writing it down as intended is what kept it alive:
+    // `[x] | length` errored, `grep pat | length` errored whenever exactly
+    // one row matched, and the suite stayed green because it had been taught
+    // to expect that. The tests now assert the answers a user would predict.
 
     #[test]
     fn grep_filters_table_rows_across_all_columns() {
         // "Rust" appears in text; "webassembly.org" only in href — both hit.
         //
-        // Batch-model change: only one row survives `grep Rust`, so it
-        // arrives at `length` as a bare record, not a one-row table — see
-        // the note above.
-        let err = eval(&format!("echo {} | from json | grep Rust | length", table_json()))
-            .expect_err("a singleton table collapses to a bare record downstream");
-        assert!(err.msg.contains("expects a list or string"), "{}", err.msg);
+        // One row survives, and one row is still a table: `length` answers 1
+        // rather than erroring on a bare record. This is the case the note
+        // above describes.
+        let v = eval(&format!("echo {} | from json | grep Rust | length", table_json()))
+            .expect("a one-row table is still a table");
+        assert_eq!(v, Value::Int(1));
 
-        // Same collapse: `get` receives the lone surviving record directly
-        // and returns its field as a scalar, not a one-element list.
+        // `get` on a one-row table still returns the field as a scalar —
+        // that is column extraction, not the collapse, and is unchanged.
         let v = eval(r#"echo '[{"t":"a","href":"x.org"},{"t":"b","href":"y.com"}]' | from json | grep .org | get t"#)
             .expect("eval");
         assert_eq!(v, Value::Str("a".into()));
@@ -1057,13 +1061,12 @@ mod tests {
     #[test]
     fn grep_ignore_case_and_invert() {
         let json = r#"'[{"n":"Rust"},{"n":"wasm"}]'"#;
-        // Batch-model change: `grep rust -i` leaves one row, which collapses
-        // to a bare record before `length` sees it — see the note above.
-        let err = eval(&format!("echo {json} | from json | grep rust -i | length"))
-            .expect_err("singleton collapse");
-        assert!(err.msg.contains("expects a list or string"), "{}", err.msg);
+        // `grep rust -i` leaves one row, and counting it gives 1.
+        let v = eval(&format!("echo {json} | from json | grep rust -i | length"))
+            .expect("a one-row table is still a table");
+        assert_eq!(v, Value::Int(1));
 
-        // Same collapse: one row survives `-v`, so `get n` returns a scalar.
+        // One row survives `-v`; `get n` extracts its column as a scalar.
         let v = eval(&format!("echo {json} | from json | grep Rust -v | get n")).expect("eval");
         assert_eq!(v, Value::Str("wasm".into()));
     }
@@ -1076,8 +1079,7 @@ mod tests {
         // of --on over piping through `get`.
         let v = eval(&format!("echo {json} | from json | grep rust | length")).expect("eval");
         assert_eq!(v, Value::Int(2));
-        // Batch-model change: --on t leaves exactly one row, which collapses
-        // to a bare record before `get` sees it — see the note above.
+        // --on t leaves exactly one row; `get href` reads its column.
         let v = eval(&format!("echo {json} | from json | grep rust --on t | get href"))
             .expect("eval");
         assert_eq!(v, Value::Str("a".into()));
@@ -1116,11 +1118,20 @@ mod tests {
     #[test]
     fn grep_on_dotted_path_reaches_nested_records() {
         let json = r#"'[{"u":{"name":"ada"}},{"u":{"name":"bob"}}]'"#;
-        // Batch-model change: only the "ada" row matches, so it collapses to
-        // a bare record before `length` sees it — see the note above.
-        let err = eval(&format!("echo {json} | from json | grep ada --on u.name | length"))
-            .expect_err("singleton collapse");
-        assert!(err.msg.contains("expects a list or string"), "{}", err.msg);
+        // Naming the survivor, not just counting it: a count of 1 would also
+        // pass if the dotted path resolved to the wrong row, which is the
+        // confusion this test exists to rule out.
+        let v = eval(&format!(
+            "echo {json} | from json | grep ada --on u.name | map {{|o| $o.u.name}}"
+        ))
+        .expect("eval");
+        assert_eq!(v, Value::Str("ada".into()));
+
+        // And the path really is being walked: a value that appears nowhere
+        // under u.name matches nothing rather than everything.
+        let v = eval(&format!("echo {json} | from json | grep zzz --on u.name | length"))
+            .expect("eval");
+        assert_eq!(v, Value::Int(0));
     }
 
     #[test]

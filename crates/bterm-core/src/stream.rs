@@ -16,6 +16,11 @@ pub async fn flatten(data: PipelineData, tx: &Sender) -> Result<(), Closed> {
     match data {
         PipelineData::Empty => Ok(()),
         PipelineData::Value(Value::List(items)) => {
+            // Record that these items *were* a list before anyone can observe
+            // them individually. Without it a one-element list arrives
+            // downstream looking exactly like a bare value, and `[x] | length`
+            // errors instead of answering 1.
+            tx.mark_batched();
             for item in items {
                 tx.send(PipelineData::Value(item)).await?;
             }
@@ -35,6 +40,12 @@ pub async fn collect(rx: &mut Receiver) -> PipelineData {
     let mut items: Vec<Value> = Vec::new();
     while let Some(item) = rx.recv().await {
         items.push(item.into_value());
+    }
+    // A batched stream is a collection however many items survived it, so
+    // `grep` matching one row still yields a one-row table. Only an
+    // unbatched stream may unwrap, which is what keeps `echo 5` a scalar.
+    if rx.is_batched() {
+        return PipelineData::Value(Value::List(items));
     }
     match items.len() {
         // An emptied stream is an empty collection, not "no value" -- so a
@@ -72,6 +83,62 @@ mod tests {
                 seen.push(item.into_value());
             }
             assert_eq!(seen, vec![Value::Int(1), Value::Int(2), Value::Int(3)]);
+        });
+    }
+
+    #[test]
+    fn a_one_element_list_survives_the_round_trip_as_a_list() {
+        // The bug this guards: flatten sends `[x]` as a single item, which is
+        // byte-identical on the wire to a bare `x`, so collect used to unwrap
+        // it and `[x] | length` errored with "expects a list or string".
+        let (tx, mut rx) = channel(8);
+        block_on(async {
+            let list = Value::List(vec![Value::Int(7)]);
+            flatten(PipelineData::Value(list), &tx).await.expect("flatten");
+            drop(tx);
+            assert_eq!(
+                collect(&mut rx).await,
+                PipelineData::Value(Value::List(vec![Value::Int(7)])),
+            );
+        });
+    }
+
+    #[test]
+    fn a_lone_scalar_still_collects_unwrapped() {
+        // The other half, and why the flag exists rather than collect simply
+        // always wrapping: `echo 5` must stay 5, not become [5].
+        let (tx, mut rx) = channel(8);
+        block_on(async {
+            flatten(PipelineData::Value(Value::Int(5)), &tx).await.expect("flatten");
+            drop(tx);
+            assert_eq!(collect(&mut rx).await, PipelineData::Value(Value::Int(5)));
+        });
+    }
+
+    #[test]
+    fn batching_survives_a_streaming_stage_that_keeps_one_item() {
+        // A streaming stage forwards items without ever seeing the list
+        // around them. Sharing the flag is what stops `grep pat | length`
+        // from erroring on the single-match case.
+        let (up_tx, up_rx) = channel(8);
+        let (down_tx, mut down_rx) = channel(8);
+        block_on(async {
+            let list = Value::List(vec![Value::Int(1), Value::Int(2)]);
+            flatten(PipelineData::Value(list), &up_tx).await.expect("flatten");
+            drop(up_tx);
+
+            down_tx.share_batching_with(&up_rx);
+            let mut up_rx = up_rx;
+            // Forward only the first item, as a filter matching one row would.
+            if let Some(item) = up_rx.recv().await {
+                down_tx.send(item).await.expect("send");
+            }
+            drop(down_tx);
+
+            assert_eq!(
+                collect(&mut down_rx).await,
+                PipelineData::Value(Value::List(vec![Value::Int(1)])),
+            );
         });
     }
 
