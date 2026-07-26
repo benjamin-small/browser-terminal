@@ -5,6 +5,6 @@ export default defineConfig({
   plugins: [react()],
   // Don't pre-bundle the library: it must keep its
   // `new URL('./wasm/…', import.meta.url)` intact to locate the .wasm file.
-  optimizeDeps: { exclude: ['browser-terminal'] },
+  optimizeDeps: { exclude: ['@benjamin-small/browser-terminal'] },
   server: { host: true, port: 5174, fs: { allow: ['../..'] } },
 });

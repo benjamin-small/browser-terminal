@@ -9,7 +9,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "browser-terminal": "*",
+    "@benjamin-small/browser-terminal": "*",
     "react": "^19.2.8",
     "react-dom": "^19.2.8"
   },

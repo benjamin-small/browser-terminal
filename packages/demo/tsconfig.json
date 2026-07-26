@@ -5,7 +5,7 @@
   // types `window.bt` from the library's real exports, so an API change that
   // the tests no longer match is a compile error rather than a silent drift.
   //
-  // `browser-terminal` resolves through the workspace symlink to its
+  // `@benjamin-small/browser-terminal` resolves through the workspace symlink to its
   // published `dist/index.d.ts`, so the library must be built first —
   // `just typecheck` depends on `just build` for that reason.
   "compilerOptions": {

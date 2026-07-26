@@ -1,4 +1,4 @@
-import { BrowserTerminal } from 'browser-terminal';
+import { BrowserTerminal } from '@benjamin-small/browser-terminal';
 import { codePanel, helpPanel } from './code';
 // The panel below shows this very file — `?raw` guarantees the example on
 // the page is the code that actually ran.

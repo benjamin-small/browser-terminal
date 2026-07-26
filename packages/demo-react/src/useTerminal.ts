@@ -18,7 +18,7 @@
  * current. This is the same shape as React's own useEffectEvent.
  */
 import { useEffect, useLayoutEffect, useRef } from 'react';
-import type { BrowserTerminal, CommandFn, CommandSpec, SelectorFn } from 'browser-terminal';
+import type { BrowserTerminal, CommandFn, CommandSpec, SelectorFn } from '@benjamin-small/browser-terminal';
 
 /**
  * Register a shell command for the lifetime of the component.

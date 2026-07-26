@@ -5,7 +5,7 @@
  * These run once at startup and stay correct forever, because they close over
  * a module-level signal rather than a render-scoped value.
  */
-import type { BrowserTerminal } from 'browser-terminal';
+import type { BrowserTerminal } from '@benjamin-small/browser-terminal';
 import { addTask, hasTask, removeTask, store, toggleTask } from './tasks.svelte';
 
 export function registerTaskCommands(bt: BrowserTerminal): void {

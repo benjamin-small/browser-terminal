@@ -64,7 +64,7 @@ const { value } = await bt.run("links | filter {|o| $o.text != ''} | length");  
 ## Install
 
 ```sh
-npm install browser-terminal
+npm install @benjamin-small/browser-terminal
 ```
 
 Works out of the box with Vite / webpack 5 (the `.wasm` loads via
@@ -74,9 +74,9 @@ Works out of the box with Vite / webpack 5 (the `.wasm` loads via
 
 ```html
 <script type="module">
-  import { BrowserTerminal } from 'https://esm.sh/browser-terminal';
+  import { BrowserTerminal } from 'https://esm.sh/@benjamin-small/browser-terminal';
   const bt = await BrowserTerminal.create({
-    wasmUrl: 'https://esm.sh/browser-terminal/dist/wasm/bterm_wasm_bg.wasm',
+    wasmUrl: 'https://esm.sh/@benjamin-small/browser-terminal/dist/wasm/bterm_wasm_bg.wasm',
   });
 </script>
 ```

@@ -1,5 +1,5 @@
 {
-  "name": "browser-terminal",
+  "name": "@benjamin-small/browser-terminal",
   "version": "0.1.0",
   "description": "A terminal/tmux experience for any web page, powered by a Rust/WASM core with structured-value pipes.",
   "type": "module",

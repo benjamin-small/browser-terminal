@@ -11,7 +11,7 @@
  * writes to a module-level rune, and the component re-renders. No component
  * had to be involved.
  */
-import type { BrowserTerminal } from 'browser-terminal';
+import type { BrowserTerminal } from '@benjamin-small/browser-terminal';
 import { ansiToHtml } from './code';
 
 export interface HelpPage {

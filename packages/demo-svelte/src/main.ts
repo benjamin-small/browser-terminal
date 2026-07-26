@@ -1,5 +1,5 @@
 import { mount } from 'svelte';
-import { BrowserTerminal } from 'browser-terminal';
+import { BrowserTerminal } from '@benjamin-small/browser-terminal';
 import App from './App.svelte';
 import { registerTaskCommands } from './commands';
 import { loadHelp } from './help.svelte';

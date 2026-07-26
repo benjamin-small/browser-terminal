@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { BrowserTerminal } from 'browser-terminal';
+import { BrowserTerminal } from '@benjamin-small/browser-terminal';
 import { useCommand } from './useTerminal';
 import { ansiToHtml, highlight, region } from './code';
 // Shown on the page verbatim, so the example can't drift from the code.

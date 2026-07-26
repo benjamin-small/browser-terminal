@@ -4,7 +4,7 @@
  * prefix-key splits, session pills, and dispose.
  */
 import { expect, test } from '@playwright/test';
-import type { RunError } from 'browser-terminal';
+import type { RunError } from '@benjamin-small/browser-terminal';
 
 // `window.bt` is typed by the demo itself (src/main.ts declares the global
 // from the library's own `BrowserTerminal`), so this suite checks against the

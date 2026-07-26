@@ -4,6 +4,6 @@ import { defineConfig } from 'vite';
 export default defineConfig({
   plugins: [svelte()],
   // Keep `new URL('./wasm/…', import.meta.url)` intact so the .wasm resolves.
-  optimizeDeps: { exclude: ['browser-terminal'] },
+  optimizeDeps: { exclude: ['@benjamin-small/browser-terminal'] },
   server: { host: true, port: 5175, fs: { allow: ['../..'] } },
 });
