@@ -152,6 +152,32 @@ async function main(): Promise<void> {
   );
   // #endregion
 
+  // #region progress
+  // A progress bar: byte mode flushes every write, and `\r` returns to the
+  // start of the line so each update overwrites the last instead of
+  // scrolling. `\r` survives sanitizing because it cannot leave the current
+  // line — cursor moves that could are stripped.
+  bt.registerCommand(
+    {
+      name: 'progress',
+      summary: 'Draw a progress bar in place, then finish',
+      optional: [{ name: 'steps', shape: 'int', desc: 'how many steps (default 10)' }],
+    },
+    async ({ positionals }, _input, ctx) => {
+      const steps = Number(positionals[0] ?? 10);
+      ctx.log.mode('byte');
+      for (let i = 1; i <= steps; i++) {
+        await new Promise((r) => setTimeout(r, 80));
+        const filled = '█'.repeat(i);
+        const empty = '░'.repeat(steps - i);
+        ctx.log.write(`\r${filled}${empty} ${Math.round((i / steps) * 100)}%`);
+      }
+      ctx.log.write('\n');
+      return `done in ${steps} steps`;
+    },
+  );
+  // #endregion
+
   // Show the real wiring on the page.
   const host = document.getElementById('source');
   host?.append(
@@ -159,6 +185,7 @@ async function main(): Promise<void> {
     codePanel('An async, cancellable command (slow)', selfSource, 'slow'),
     codePanel('A named selector function (@host)', selfSource, 'selector'),
     codePanel('A live streaming source (watch)', selfSource, 'watch'),
+    codePanel('A progress bar (byte mode + \\r)', selfSource, 'progress'),
   );
 
   // …and what that signature produces. Asking the engine rather than pasting
