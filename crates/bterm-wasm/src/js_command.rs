@@ -90,6 +90,16 @@ impl Command for JsCommand {
             // since a command that wants ordering guarantees should pick one
             // API and stick to it (or `flush()` before switching).
             let log_buf = Rc::new(RefCell::new(OutputBuffer::new()));
+            // The run owns the buffer's tail, not this future: the drains at
+            // the bottom of this function only happen if the body reaches
+            // them, and every `?` below (and every abort) skips them. See
+            // `tasks::flush_buffers`.
+            crate::tasks::register_buffer(
+                ctx.run_id,
+                log_buf.clone(),
+                ctx.sink.clone(),
+                bterm_core::sink::Channel::Log,
+            );
 
             // ctx.log(line) -- the sugar every existing command uses: cooked,
             // unbuffered, exactly as before the channel split.
@@ -144,6 +154,12 @@ impl Command for JsCommand {
             let _ = js_sys::Reflect::set(&ctx_obj, &JsValue::from_str("emit"), &log_fn);
 
             let err_buf = Rc::new(RefCell::new(OutputBuffer::new()));
+            crate::tasks::register_buffer(
+                ctx.run_id,
+                err_buf.clone(),
+                ctx.sink.clone(),
+                bterm_core::sink::Channel::Err,
+            );
 
             // ctx.err(line) -- cooked and unbuffered, same reasoning as log_call.
             let sink_e = ctx.sink.clone();
@@ -264,13 +280,18 @@ impl Command for JsCommand {
                         break;
                     }
                 }
-                // Nothing buffered is lost, whatever mode the command chose.
+                // Drain at the *stage* boundary, so a stage's tail lands
+                // before whatever the rest of the pipeline goes on to print
+                // rather than at the end of the whole run.
                 //
-                // Belt-and-braces only: this does NOT run when a command is
-                // aborted (`Abortable::poll` returns without resuming a
-                // suspended body), which is exactly what a hung command
-                // exploits. The real protection against SGR bleeding into
-                // later output is `PaneSink` reset-prefixing every record.
+                // It is not what makes "nothing buffered is lost" true:
+                // this line is only reached when the body returns normally,
+                // and neither an early `?` above nor an abort (which never
+                // resumes a suspended body at all) gets here.
+                // `tasks::flush_buffers`, driven from the run's end, is the
+                // guarantee; this is the nicety on top of it, and running
+                // both is safe because a second `finish()` on a drained
+                // buffer yields nothing.
                 let tail_log = log_buf.borrow_mut().finish();
                 if let Some(text) = tail_log {
                     ctx.sink.write(Record::raw_log(text));
