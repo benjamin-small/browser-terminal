@@ -508,9 +508,28 @@ impl<A: EngineAccess> crate::sink::Sink for PaneSink<A> {
         const RED: &str = "\x1b[31m";
         const RESET: &str = "\x1b[0m";
         let clean = record.text();
-        let line = match record.channel() {
-            crate::sink::Channel::Log => format!("{clean}\n"),
-            crate::sink::Channel::Err => format!("{RED}{clean}{RESET}\n"),
+        // Every record is reset-prefixed, raw or not. The allowlist permits
+        // SGR on the argument that a command's styling is bounded by a reset
+        // at the command boundary -- and that argument is false on the abort
+        // path: `Abortable::poll` returns Ready(Err(Aborted)) *before*
+        // polling the inner future (abort.rs:58), so a suspended command body
+        // never resumes and a trailing reset never runs. A command that
+        // writes `\x1b[8m` (conceal) and then hangs would otherwise leave
+        // every later command's output invisible. Resetting per record makes
+        // cross-command SGR bleed structurally impossible instead of
+        // dependent on cleanup that cancellation can skip.
+        //
+        // A raw write otherwise owns its formatting: no appended newline (a
+        // partial write must stay partial) and no colour wrapper (the command
+        // may be emitting its own SGR, and re-wrapping per write would fight
+        // it).
+        let line = if record.is_raw() {
+            format!("{RESET}{clean}")
+        } else {
+            match record.channel() {
+                crate::sink::Channel::Log => format!("{RESET}{clean}\n"),
+                crate::sink::Channel::Err => format!("{RESET}{RED}{clean}{RESET}\n"),
+            }
         };
         self.access.with(|e| e.emit_output(self.pane, &line));
         // Flush after the borrow closes, never inside `with` — flushing may
@@ -1072,6 +1091,46 @@ mod tests {
         assert_eq!(access.flushes.get(), 1, "write should flush immediately");
         sink.write(Record::err("two"));
         assert_eq!(access.flushes.get(), 2, "each write should flush, not just the last");
+    }
+
+    #[test]
+    fn the_pane_emits_a_raw_record_verbatim() {
+        // A partial write must not gain a newline, and must not be wrapped
+        // in the err channel's colour -- a progress bar owns its own line.
+        let access = engine();
+        let pane = active_pane(&access);
+        let sink = PaneSink { access: access.clone(), pane };
+        sink.write(crate::sink::Record::raw_log("50%\r"));
+        let out = output_text(&access.with(|e| e.drain_events()));
+        assert!(out.contains("50%\r"), "raw text altered: {out:?}");
+        assert!(!out.contains("50%\r\n"), "newline appended: {out:?}");
+
+        let access2 = engine();
+        let pane2 = active_pane(&access2);
+        let sink2 = PaneSink { access: access2.clone(), pane: pane2 };
+        sink2.write(crate::sink::Record::raw_err("oops"));
+        let out2 = output_text(&access2.with(|e| e.drain_events()));
+        assert!(!out2.contains("\x1b[31m"), "raw err was colour-wrapped: {out2:?}");
+    }
+
+    #[test]
+    fn every_pane_record_is_reset_prefixed_so_sgr_cannot_bleed() {
+        // The allowlist permits SGR only because styling is bounded. It
+        // cannot be bounded by cleanup at the command boundary: `Abortable`
+        // returns Ready(Err(Aborted)) without resuming a suspended body
+        // (abort.rs:58), so a command that writes conceal (`\x1b[8m`) and
+        // then hangs would leave later output invisible forever. Prefixing
+        // every record with a reset makes that unreachable.
+        let access = engine();
+        let pane = active_pane(&access);
+        let sink = PaneSink { access: access.clone(), pane };
+        sink.write(crate::sink::Record::raw_log("\x1b[8mhidden"));
+        sink.write(crate::sink::Record::log("after"));
+        let out = output_text(&access.with(|e| e.drain_events()));
+        // The innocent second write starts from a clean slate.
+        let after = out.find("after").expect("second write painted");
+        let reset_before = out[..after].rfind("\x1b[0m").expect("reset precedes it");
+        assert!(reset_before < after, "no reset before the following record");
     }
 
     /// Writes to both diagnostic channels so the wiring from `execute_line`
