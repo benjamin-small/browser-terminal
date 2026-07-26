@@ -16,6 +16,7 @@ pub mod expr;
 pub mod lex;
 pub mod matcher;
 pub mod mux;
+pub mod outbuf;
 pub mod parse;
 pub mod pipeline;
 pub mod protocol;
