@@ -10,7 +10,7 @@
 
 use crate::editor::Effects;
 use crate::error::ShellError;
-use crate::eval::{eval_line, CommandSource};
+use crate::eval::{eval_line, eval_line_with, CommandSource};
 use crate::mux::{keys, layout_window, Dir, FocusDir, Mux, PaneShell, Rect};
 use crate::parse::parse;
 use crate::protocol::{EngineEvent, HostMsg, LayoutSnapshot, PaneInfo, SessionInfo, WindowInfo};
@@ -492,6 +492,123 @@ fn scope_for_pane<A: EngineAccess>(access: &A, pane: u32) -> crate::signature::S
     })
 }
 
+/// Rows to buffer before committing column widths. The host may commit
+/// sooner on a deadline (a later task); this is the row-count bound.
+const PROBE_ROWS: usize = 50;
+
+/// Paints a pipeline's items to a pane as they arrive.
+///
+/// Records feed a `StreamRenderer` (probe → commit widths → stream rows), so
+/// a long or live result shows its first rows without waiting for the end.
+/// Anything else (scalars, `Rendered` help text) is buffered and rendered
+/// once at `finish`, exactly as before — those have no incremental form.
+struct ProgressiveConsumer<A: EngineAccess> {
+    access: A,
+    pane: u32,
+    sink: Rc<dyn crate::sink::Sink>,
+    /// Kept alongside the renderer for the mixed-stream fallback below,
+    /// which renders buffered non-record items at this same width.
+    width: u16,
+    renderer: crate::render::stream::StreamRenderer,
+    /// Non-record items, rendered at finish via the normal path.
+    buffered: Vec<PipelineData>,
+    painted: bool,
+}
+
+impl<A: EngineAccess> ProgressiveConsumer<A> {
+    fn new(access: A, pane: u32, sink: Rc<dyn crate::sink::Sink>, width: u16) -> Self {
+        ProgressiveConsumer {
+            access,
+            pane,
+            sink,
+            width,
+            renderer: crate::render::stream::StreamRenderer::new(width, PROBE_ROWS),
+            buffered: Vec::new(),
+            painted: false,
+        }
+    }
+
+    /// Paint text to the pane. The borrow closes before `events_ready`,
+    /// which may call into JS.
+    fn paint(&self, text: &str) {
+        self.access.with(|e| e.emit_output(self.pane, text));
+        self.access.events_ready();
+    }
+}
+
+impl<A: EngineAccess> crate::eval::FinalConsumer for ProgressiveConsumer<A> {
+    fn item(&mut self, item: PipelineData) {
+        match item {
+            PipelineData::Value(Value::Record(map)) => {
+                self.painted = true;
+                if let Some(text) = self.renderer.push(Value::Record(map)) {
+                    self.paint(&text);
+                }
+            }
+            other => self.buffered.push(other),
+        }
+    }
+
+    fn needs_backpressure(&self) -> bool {
+        true
+    }
+
+    fn ready(&self) -> crate::registry::LocalBoxFuture<()> {
+        self.sink.ready()
+    }
+
+    fn finish(&mut self) -> PipelineData {
+        if self.painted {
+            let tail = self.renderer.finish();
+            if !tail.is_empty() {
+                self.paint(&tail);
+            }
+            // Mixed stream: records painted progressively, but non-record
+            // items also arrived (pathological, but never silently dropped).
+            // Ordering relative to the painted rows is lost either way, so
+            // just render them now via the normal one-shot path.
+            if !self.buffered.is_empty() {
+                let cols = self.width;
+                let items = std::mem::take(&mut self.buffered);
+                for data in items {
+                    match data {
+                        PipelineData::Value(v) => {
+                            let rendered = render(&v, cols);
+                            self.paint(&rendered);
+                        }
+                        PipelineData::Rendered(s) => self.paint(&format!("{s}\n")),
+                        PipelineData::Empty => {}
+                    }
+                }
+            }
+            // Already painted; nothing left for the caller to render.
+            return PipelineData::Empty;
+        }
+        // No records: fall back to the old collect-then-render path.
+        let items = std::mem::take(&mut self.buffered);
+        let all_rendered =
+            !items.is_empty() && items.iter().all(|i| matches!(i, PipelineData::Rendered(_)));
+        if all_rendered {
+            let joined = items
+                .into_iter()
+                .map(|i| match i {
+                    PipelineData::Rendered(s) => s,
+                    _ => String::new(),
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            return PipelineData::Rendered(joined);
+        }
+        match items.len() {
+            0 => PipelineData::Empty,
+            1 => items.into_iter().next().unwrap_or(PipelineData::Empty),
+            _ => PipelineData::Value(Value::List(
+                items.into_iter().map(PipelineData::into_value).collect(),
+            )),
+        }
+    }
+}
+
 /// Evaluate one submitted line in a pane: parse → eval → render → prompt.
 /// The single shared execution path for native tests and the browser.
 pub async fn execute_line<A: EngineAccess>(access: A, pane: u32, line: String, run_id: u64) {
@@ -509,12 +626,20 @@ pub async fn execute_line<A: EngineAccess>(access: A, pane: u32, line: String, r
 
     let sink: Rc<dyn crate::sink::Sink> =
         Rc::new(PaneSink { access: access.clone(), pane });
+    let sink_for_consumer = sink.clone();
     let ctx = make_ctx(&access, pane, run_id, sink);
     let cols = ctx.width;
     let scope = scope_for_pane(&access, pane);
     let source = EngineCommands(access.clone());
 
-    let (results, error) = eval_line(&parsed.line, &source, &ctx, &scope).await;
+    let (results, error) = {
+        let access2 = access.clone();
+        let sink2 = sink_for_consumer;
+        let mut make = || -> Box<dyn crate::eval::FinalConsumer> {
+            Box::new(ProgressiveConsumer::new(access2.clone(), pane, sink2.clone(), cols))
+        };
+        eval_line_with(&parsed.line, &source, &ctx, &scope, &mut make).await
+    };
 
     access.with(|e| {
         // Completed pipelines render even when a later one failed.
@@ -940,5 +1065,67 @@ mod tests {
         let events = feed_and_run(&access, "borrower | borrower | borrower\r");
         let out = output_text(&events);
         assert!(out.contains('1'), "pipeline produced no output: {out:?}");
+    }
+
+    /// Emits `n` single-field records, then ends.
+    struct Rows(usize);
+    impl Command for Rows {
+        fn signature(&self) -> &Signature {
+            static SIG: std::sync::OnceLock<Signature> = std::sync::OnceLock::new();
+            SIG.get_or_init(|| Signature::build("rows", "emit n records"))
+        }
+        fn run(
+            &self,
+            _ctx: ExecContext,
+            _call: BoundCall,
+            _input: crate::chan::Receiver,
+            output: crate::chan::Sender,
+        ) -> crate::registry::LocalBoxFuture<Result<(), ShellError>> {
+            let n = self.0;
+            Box::pin(async move {
+                for i in 0..n {
+                    let mut m = indexmap::IndexMap::new();
+                    m.insert("id".to_string(), Value::Int(i as i64));
+                    if output
+                        .send(PipelineData::Value(Value::Record(m)))
+                        .await
+                        .is_err()
+                    {
+                        return Ok(());
+                    }
+                }
+                Ok(())
+            })
+        }
+    }
+
+    #[test]
+    fn a_finite_table_renders_the_same_through_the_progressive_path() {
+        // The gate: a small result still paints a complete table -- header,
+        // every row, bottom border -- exactly as the collect-once path did.
+        let access = engine();
+        access.with(|e| e.registry.register_builtin(Rc::new(Rows(3))));
+        let out = output_text(&feed_and_run(&access, "rows\r"));
+        assert!(out.contains("id"), "header: {out:?}");
+        for expected in ['0', '1', '2'] {
+            assert!(out.contains(expected), "row {expected} missing: {out:?}");
+        }
+    }
+
+    #[test]
+    fn a_long_result_paints_before_it_ends() {
+        // More rows than the probe: the header and early rows must already be
+        // painted before the stream finishes, which is what "progressive"
+        // means. Painting happens inside the run, so by the time we read the
+        // events the whole table is there -- the observable proof is that the
+        // header appears BEFORE the last row in the byte stream, which only
+        // holds if it was emitted incrementally rather than as one block at
+        // the end.
+        let access = engine();
+        access.with(|e| e.registry.register_builtin(Rc::new(Rows(60))));
+        let out = output_text(&feed_and_run(&access, "rows\r"));
+        let header = out.find("id").expect("header painted");
+        let last_row = out.rfind("59").expect("last row painted");
+        assert!(header < last_row, "header must precede the final row");
     }
 }

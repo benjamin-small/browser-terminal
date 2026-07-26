@@ -73,6 +73,13 @@ pub trait FinalConsumer {
         crate::registry::ready(())
     }
 
+    /// Whether `ready()` is worth awaiting. Default `false`, so a consumer
+    /// that cannot fall behind pays no per-item future allocation; the pane's
+    /// throttling consumer overrides it.
+    fn needs_backpressure(&self) -> bool {
+        false
+    }
+
     /// End of stream: the value this pipeline reports.
     fn finish(&mut self) -> PipelineData;
 }
@@ -130,10 +137,25 @@ pub async fn eval_line(
     ctx: &ExecContext,
     scope: &Scope,
 ) -> (Vec<PipelineData>, Option<ShellError>) {
+    let mut make = || -> Box<dyn FinalConsumer> { Box::new(CollectingConsumer::new()) };
+    eval_line_with(line, source, ctx, scope, &mut make).await
+}
+
+/// Like `eval_line`, but the caller supplies the terminal consumer — the
+/// pane path passes one that paints progressively. Returns the per-pipeline
+/// results the consumer reported, plus the error that stopped a later
+/// pipeline, if any.
+pub async fn eval_line_with(
+    line: &Line,
+    source: &impl CommandSource,
+    ctx: &ExecContext,
+    scope: &Scope,
+    make_consumer: &mut dyn FnMut() -> Box<dyn FinalConsumer>,
+) -> (Vec<PipelineData>, Option<ShellError>) {
     let mut results = Vec::new();
     for pipeline in &line.pipelines {
-        let mut consumer = CollectingConsumer::new();
-        match eval_pipeline(pipeline, source, ctx, scope, &mut consumer).await {
+        let mut consumer = make_consumer();
+        match eval_pipeline(pipeline, source, ctx, scope, consumer.as_mut()).await {
             Ok(()) => results.push(consumer.finish()),
             Err(err) => return (results, Some(err)),
         }
@@ -193,7 +215,9 @@ pub async fn eval_pipeline(
     stages.push(Box::pin(async move {
         while let Some(item) = upstream.recv().await {
             consumer.item(item);
-            consumer.ready().await;
+            if consumer.needs_backpressure() {
+                consumer.ready().await;
+            }
         }
     }));
 
