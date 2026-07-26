@@ -144,18 +144,32 @@ async function main(): Promise<void> {
   // A progress bar: byte mode flushes every write, and `\r` returns to the
   // start of the line so each update overwrites the last instead of
   // scrolling. `\r` survives sanitizing because it cannot leave the current
-  // line — cursor moves that could are stripped.
+  // line — cursor moves that could are stripped. Like every other async
+  // command here it wires `ctx.signal`, so Ctrl-C aborts mid-bar.
   bt.registerCommand(
     {
       name: 'progress',
-      summary: 'Draw a progress bar in place, then finish',
+      summary: 'Draw a progress bar in place, then finish (Ctrl-C to abort)',
       optional: [{ name: 'steps', shape: 'int', desc: 'how many steps (default 10)' }],
     },
     async ({ positionals }, _input, ctx) => {
-      const steps = Number(positionals[0] ?? 10);
+      // Clamped: the bar is `steps` characters of one line, and every step
+      // rebuilds that string, so an unclamped `progress 100000` would draw
+      // far off the right edge for hours. 60 keeps it inside a default pane.
+      const asked = Math.floor(Number(positionals[0] ?? 10));
+      const steps = Number.isFinite(asked) ? Math.min(60, Math.max(1, asked)) : 10;
       ctx.log.mode('byte');
       for (let i = 1; i <= steps; i++) {
-        await new Promise((r) => setTimeout(r, 80));
+        // Cancellable, the same way `slow` is: the sleep rejects when
+        // `ctx.signal` aborts, so Ctrl-C stops the bar instead of leaving it
+        // redrawing until it runs out of steps.
+        await new Promise((resolve, reject) => {
+          const t = setTimeout(resolve, 80);
+          ctx.signal.addEventListener('abort', () => {
+            clearTimeout(t);
+            reject(new DOMException('aborted', 'AbortError'));
+          });
+        });
         const filled = '█'.repeat(i);
         const empty = '░'.repeat(steps - i);
         ctx.log.write(`\r${filled}${empty} ${Math.round((i / steps) * 100)}%`);

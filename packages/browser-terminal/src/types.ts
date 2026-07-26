@@ -45,9 +45,32 @@ export interface CommandArgs {
   flags: Record<string, Value>;
 }
 
-/** A diagnostic channel: callable for whole lines, with buffering control. */
+/**
+ * A diagnostic channel. One object, two deliberately different APIs:
+ *
+ * - **Calling it** (`ctx.log('msg')`) passes a *message*. The shell owns the
+ *   framing and sanitizing: every escape is stripped and newlines collapse,
+ *   so it lands as exactly one clean single-line entry, immediately.
+ * - **`.write` / `.flush` / `.mode`** pass *terminal bytes* through this
+ *   channel's buffer. You own the framing; what keeps it safe is a narrow
+ *   allowlist (`\r`, `\b`, `\t`, `\n`, horizontal cursor moves,
+ *   erase-in-line, SGR) — everything else is still stripped.
+ *
+ * **Mixing the two on one channel can reorder your output.** Only `.write` /
+ * `.flush` / `.mode` touch the buffer; calling the channel bypasses it
+ * entirely and goes out at once. So a raw write still sitting in the buffer
+ * (line mode until its delimiter, block mode until `flush()`) is overtaken
+ * by a later call: `ctx.log.write('a')` then `ctx.log('b')` arrives as `b`,
+ * then `a` whenever the buffer drains. If order matters, pick one API per
+ * channel and stay with it — or `flush()` before switching.
+ */
 export interface ChannelWriter {
-  /** Write a whole line — the delimiter is appended for you. */
+  /**
+   * Pass a message. It is cooked — escapes stripped, newlines collapsed to
+   * spaces — and emitted immediately as exactly one entry. Nothing is
+   * appended to it and the buffer's delimiter is not consulted; the pane
+   * supplies the line break when it displays the entry.
+   */
   (line: string): void;
   /** Write without appending a delimiter: partial lines, progress bars. */
   write(s: string): void;
@@ -101,9 +124,21 @@ export type SelectorFn = (item: Value) => unknown;
 export interface RunResult {
   /** Channel 1 — the pipeline's final structured value. */
   value: Value;
-  /** Channel 3 lines, in order. */
+  /**
+   * Channel 3 entries, in emission order. Entries, not lines: what you may
+   * rely on depends on which API produced each one, and both land here.
+   *
+   * - **Cooked** (`ctx.log('msg')`) — exactly one entry per call, holding no
+   *   embedded newline and no escape sequence. Safe to render as a line
+   *   as-is.
+   * - **Raw** (`ctx.log.write(s)`) — arbitrary text. It may hold embedded
+   *   newlines and any escape the writer allowlist keeps (`\r`, `\b`, `\t`,
+   *   horizontal cursor moves, erase-in-line, SGR), and entry count does not
+   *   track call count: line and block modes coalesce several writes into
+   *   one entry. Treat these as terminal bytes, not as lines.
+   */
   log: string[];
-  /** Channel 2 lines, in order. */
+  /** Channel 2 entries, in emission order. Same shape rules as `log`. */
   err: string[];
 }
 
@@ -116,8 +151,8 @@ export interface RunResult {
  * missed by an `await` that never checks.
  */
 export interface RunError extends Error {
-  /** Channel 3 lines written before the failure. */
+  /** Channel 3 entries written before the failure, shaped as in `RunResult`. */
   log: string[];
-  /** Channel 2 lines written before the failure. */
+  /** Channel 2 entries written before the failure, shaped as in `RunResult`. */
   err: string[];
 }

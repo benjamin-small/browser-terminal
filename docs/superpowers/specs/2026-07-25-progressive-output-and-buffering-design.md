@@ -1,6 +1,8 @@
 # Progressive rendering & output buffering — design
 
-Status: approved, not yet implemented
+Status: implemented. Sections below marked **As shipped** record where the
+approved design changed during implementation; the surrounding prose is the
+original reasoning, kept because it explains why.
 Part of: the streaming line of work — combines what the
 [channels/streaming spec](2026-07-23-output-channels-and-streaming-design.md)
 called stage 5 (progressive rendering) and stage 6 (pane self-throttling),
@@ -40,8 +42,8 @@ also carrying `.write` / `.flush` / `.mode` for cadence control. (JS functions
 are objects, so a function with attached methods is one value that is both.)
 
 ```ts
-ctx.log(line): void            // unchanged sugar: write(line + delimiter)
-ctx.log.write(s: string): void // partial write, NO implicit newline
+ctx.log(msg): void             // cooked message: sanitized, unbuffered, one entry
+ctx.log.write(s: string): void // raw terminal bytes, buffered, NO implicit newline
 ctx.log.flush(): void          // force buffered content to the pane now
 ctx.log.mode(m: 'byte' | 'line' | 'block', opts?: { delimiter?: string }): void
 
@@ -53,6 +55,34 @@ Existing commands are untouched — `ctx.log(line)` / `ctx.err(line)` still work
 exactly as they do today. New commands reach for `ctx.log.write` + `flush` for
 cadence control. Backward compatibility is why the writer is `ctx.log` rather
 than a fresh `ctx.out`.
+
+**As shipped: the call and the raw write are two different APIs, not two
+spellings of one.** The approved draft specified `ctx.log(line)` as sugar for
+`write(line + delimiter)` — buffered, sharing the writer's cadence and
+delimiter. That was deliberately abandoned in stage 5b, because the two calls
+carry different *kinds* of value:
+
+- **`ctx.log('msg')` passes a message.** The shell owns the framing and the
+  sanitizing: `render::diagnostic_text` strips every escape and collapses
+  newlines to spaces, the record is written straight to the sink unbuffered,
+  and it lands as exactly one clean single-line entry in `run().log`. A
+  SECURITY test pins this — page-controlled text must not be able to fake
+  extra lines in a caller's log viewer. Nothing is appended and the buffer's
+  delimiter is never consulted; the pane supplies the line break at display
+  time.
+- **`ctx.log.write(s)` passes terminal bytes.** The command owns the framing;
+  what makes it safe is the `render::writer_text` allowlist plus
+  `OutputBuffer`.
+
+Collapsing the two would have forced one of them to lose: either the line
+call gives up its single-line guarantee, or the raw write gives up partial
+output. Keeping them separate costs one sharp edge, which is the API's most
+surprising behaviour and is documented on `ChannelWriter` in `types.ts`: only
+`.write` / `.flush` / `.mode` touch the buffer, so a cooked call bypasses it
+and goes out at once. A raw write still sitting in the buffer is therefore
+overtaken — `ctx.log.write('a')` then `ctx.log('b')` shows `b` first, `a`
+when the buffer drains. A command that needs ordering picks one API, or
+`flush()`es before switching.
 
 ### Buffering modes
 
@@ -66,9 +96,16 @@ than a fresh `ctx.out`.
   `mode('line', { delimiter: '\r\n' })` for CRLF producers,
   `{ delimiter: '\0' }` for null-delimited framing (`find -print0` idiom), or
   any string. `byte`/`block` ignore the delimiter.
-- Two invariants regardless of mode: **the buffer always flushes when the
-  command finishes** (nothing is silently lost), and **`flush()` always
-  works** (in block mode it is the primary control).
+- Two invariants regardless of mode: **the buffer flushes when the command
+  finishes** (nothing is silently lost), and **`flush()` always works** (in
+  block mode it is the primary control).
+- **As shipped**, the first of those is narrower than it reads: the
+  finish-flush runs on the *normal* exit paths in `js_command.rs`, and does
+  **not** run when a command is aborted, because `Abortable::poll` returns
+  without ever resuming a suspended body. Ctrl-C on a hung command drops
+  whatever it had buffered. That is fine for output, but it is why nothing
+  safety-critical may rest on code running at the command boundary — see the
+  SGR note below.
 
 ### Control-character allowlist on raw writes
 
@@ -76,12 +113,17 @@ than a fresh `ctx.out`.
 sanitized — but with a **curated allowlist** rather than the strip-everything
 pass used for auto-`Record` diagnostics. The unifying safety rule:
 
-> **Every allowed sequence is confined to the current line, or is non-spatial
-> styling that is force-reset at the command boundary.** Nothing can move to
-> another line, position the cursor absolutely, clear the screen, read the
-> cursor back (that injects input), or touch OSC (title / clipboard /
-> hyperlinks). The worst a malicious command can do is garble its own current
-> output line — which it can already do with plain text.
+> **No allowed sequence moves the cursor upward or to an absolute position.**
+> Nothing can move up, position the cursor absolutely, clear the screen, read
+> the cursor back (that injects input), or touch OSC (title / clipboard /
+> hyperlinks). The worst a malicious command can do is garble lines it opened
+> itself — which it can already do with plain text.
+
+**As shipped**, that rule is stated in terms of *upward* movement rather than
+"confined to the current line", because `\n` is on the allowlist: a raw write
+is not confined to one line, and a command can open new lines below itself.
+What it cannot do is climb back to output it did not write — the prompt, or
+an earlier command's rows — which is the property that actually matters.
 
 | allowed | what | why safe |
 |---|---|---|
@@ -90,10 +132,23 @@ pass used for auto-`Record` diagnostics. The unifying safety rule:
 | `\x1b[nC` / `\x1b[nD` | cursor forward / back | **horizontal only** |
 | `\x1b[K`, `\x1b[0K/1K/2K` | erase to end / start / whole line | current line only |
 | `\x1b[…m` | SGR styling (colour, bold, …) | non-spatial; leak-proofed below |
+| `\n` | newline | *(as shipped)* opens a line **below**; cannot climb back |
+| `\t` | tab | ordinary text a writer may emit |
 
-**SGR is leak-proofed:** the writer force-appends a reset (`\x1b[0m`) at the
-command boundary, so a command's colour can never bleed into the prompt or
-another command's output.
+**SGR is leak-proofed.** *As shipped, not by a boundary reset.* The draft
+proposed force-appending `\x1b[0m` when a command ends. That was never built,
+and would not have covered the case that matters: a command that sets a
+colour — or `\x1b[8m` conceal, which would make every later command invisible
+— and then *hangs* is stopped by Ctrl-C, and `Abortable::poll` returns without
+resuming the suspended body, so nothing at the boundary runs. A guarantee that
+evaporates in exactly the hostile case is not a guarantee.
+
+What ships instead: `PaneSink` **reset-prefixes every record** it emits, raw
+or cooked (`engine.rs`). Styling is bounded by the *next* record rather than
+by the command's own exit, so it holds even when the command never exits. The
+test is `every_pane_record_is_reset_prefixed_so_sgr_cannot_bleed`. Anything
+auditing `writer_text`'s decision to allow SGR should look there, not for a
+boundary reset.
 
 Explicitly still stripped: `\x1b[A/B` (cursor up/down — cross-line),
 `\x1b[row;colH` / `\x1b[nf` (absolute positioning), `\x1b[2J/3J` (clear
@@ -169,17 +224,19 @@ the pane instead of outrunning it.
 |---|---|
 | `crates/bterm-core/src/sink.rs` | `Sink` gains `ready() -> LocalBoxFuture<()>` (pane sink throttles; collecting/test sinks return immediately). A new allowlist sanitizer for raw writer output, distinct from `diagnostic_text`. |
 | `crates/bterm-core/src/render/` | streaming renderer: probe → commit widths → stream rows at fixed widths; the allowlist sanitizer lives near the existing `strip_escapes`. |
-| `crates/bterm-core/src/engine.rs` | `execute_line` renders progressively as the data stream arrives, awaiting the pane sink's `ready()`; final render becomes "flush the probe / remaining". `PaneSink` coalesces + throttles. |
+| `crates/bterm-core/src/engine.rs` | `execute_line` renders progressively as the data stream arrives, awaiting the pane sink's `ready()`; final render becomes "flush the probe / remaining". `PaneSink` coalesces + throttles, and reset-prefixes every record (the SGR containment mechanism). |
 | `crates/bterm-wasm/src/js_command.rs` | `ctx.log` / `ctx.err` writer objects (callable + `.write`/`.flush`/`.mode`) backed by a per-run buffer; modes, delimiter, flush; wired to the sink. |
-| `packages/browser-terminal/src/types.ts` | `CommandCtx` gains the `out`/`err` writer types. |
+| `packages/browser-terminal/src/types.ts` | `CommandCtx`'s `log`/`err` become the `ChannelWriter` type (callable + `.write`/`.flush`/`.mode`), documenting the cooked/raw split and the interleaving hazard. |
 | `packages/demo` | a progress-bar command (byte mode + `\r`) and a live-source render demo; browser tests. |
 
 ## Testing
 
 - **Allowlist sanitizer** — adversarial tests: each allowed sequence passes;
   cursor up/down, absolute positioning, clear-screen, `\x1b[6n`, save/restore,
-  OSC/DCS/APC all stripped; SGR forced-reset at boundary; the stage-1
-  escape-injection cases still blocked.
+  OSC/DCS/APC all stripped; the stage-1 escape-injection cases still blocked.
+  *As shipped*, the SGR-containment test lives with `PaneSink` instead of the
+  sanitizer — every emitted record is reset-prefixed — since there is no
+  boundary reset to test.
 - **Buffering modes** — line flushes on the (configurable) delimiter and at
   command end; byte flushes per write; block flushes only on `flush()` / fill
   / end; a dropped-without-flush buffer still flushes at command end (nothing
