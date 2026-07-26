@@ -6,6 +6,17 @@
 import { expect, test } from '@playwright/test';
 
 declare global {
+  /**
+   * A diagnostic channel: callable for a whole cooked line, with the buffered
+   * raw-write API hanging off the same function object. Mirrors
+   * `ChannelWriter` in the library's public types.
+   */
+  interface TestWriter {
+    (s: string): void;
+    write(s: string): void;
+    flush(): void;
+    mode(m: 'byte' | 'line' | 'block', opts?: { delimiter?: string }): void;
+  }
   interface Window {
     bt: {
       run(line: string): Promise<{ value: unknown; log: string[]; err: string[] }>;
@@ -15,7 +26,7 @@ declare global {
         fn: (
           args: unknown,
           input: unknown,
-          ctx: { log(s: string): void; err(s: string): void; emit(s: string): void },
+          ctx: { log: TestWriter; err: TestWriter; emit: TestWriter },
         ) => unknown,
       ): void;
     };
@@ -462,4 +473,66 @@ test('watch streams DOM events and head terminates it', async ({ page }) => {
   await page.waitForTimeout(150);
   await page.mouse.click(10, 10);
   expect(await again).toEqual({ type: 'click', target: expect.any(String) });
+});
+
+test('a progress bar redraws in place rather than scrolling', async ({ page }) => {
+  await page.goto('/');
+  await waitForTerminal(page);
+
+  // Must be typed into the pane: `run()` collects through CollectingSink and
+  // never paints, and the whole claim here is about what the terminal shows.
+  const ta = page.locator('[data-browser-terminal]').locator('.xterm-helper-textarea');
+  await ta.click();
+  await ta.pressSequentially('progress 5');
+  await ta.press('Enter');
+
+  // Wait for completion (5 steps x 80ms plus slack).
+  await page.waitForFunction(
+    () => {
+      const root = document.querySelector('[data-browser-terminal]')!.shadowRoot!;
+      return (root.querySelector('.xterm-rows')?.textContent ?? '').includes('done in 5 steps');
+    },
+    null,
+    { timeout: 5000 },
+  );
+
+  const text = await page.evaluate(() => {
+    const root = document.querySelector('[data-browser-terminal]')!.shadowRoot!;
+    return root.querySelector('.xterm-rows')?.textContent ?? '';
+  });
+
+  // Five writes, one visible bar: `\r` returned to column 0 each time, so
+  // only the final 100% state survives. Without in-place rewrite there
+  // would be one line per step.
+  expect(text).toContain('100%');
+  const barLines = (text.match(/100%/g) ?? []).length;
+  expect(barLines).toBe(1);
+  // The intermediate percentages must NOT still be on screen.
+  expect(text).not.toContain('20%');
+});
+
+test('block mode holds output until flush', async ({ page }) => {
+  await page.goto('/');
+  await waitForTerminal(page);
+
+  const result = await page.evaluate(async () => {
+    window.bt.registerCommand({ name: 'batched', summary: 'block mode' }, async (_a, _i, ctx) => {
+      ctx.log.mode('block');
+      ctx.log.write('one ');
+      ctx.log.write('two ');
+      ctx.log.write('three');
+      const beforeFlush = 'nothing emitted yet';
+      ctx.log.flush();
+      return beforeFlush;
+    });
+    const r = await window.bt.run('batched');
+    return { value: r.value, log: r.log };
+  });
+
+  expect(result.value).toBe('nothing emitted yet');
+  // The three writes arrive as ONE entry, not three -- that is what block
+  // mode buys. (Observed: exactly `['one two three']`; the allowance of 2
+  // covers a boundary `finish()` tail, which an explicit flush leaves empty.)
+  expect(result.log.join('')).toContain('one two three');
+  expect(result.log.length).toBeLessThanOrEqual(2);
 });
