@@ -71,6 +71,15 @@ fn contains(entries: &[String], needle: &str) -> bool {
     entries.iter().any(|e| e.contains(needle))
 }
 
+/// A resolved list of strings, for assertions that name *which* rows survived
+/// a stage rather than only counting them.
+fn strings(v: &JsValue) -> Vec<String> {
+    v.clone()
+        .dyn_into::<Array>()
+        .map(|a| a.iter().filter_map(|e| e.as_string()).collect())
+        .unwrap_or_default()
+}
+
 /// Hand control back to the event loop for one macrotask.
 async fn tick() {
     let p = js_sys::Promise::new(&mut |resolve, _| {
@@ -231,8 +240,14 @@ async fn grep_uses_real_regex_in_the_browser() {
         // "Learning Rust" holds "Rust" without starting with it, so the `^`
         // assertion below still separates a real anchor from a plain
         // substring search — a substring dialect would count three, not two.
+        //
+        // "Go lang" matches nothing any pattern here looks for. It is the
+        // control: without a row that stays out, the alternation case below
+        // matches every row, and would pass just as happily against a `grep`
+        // that filtered nothing at all.
         r#"return [{t:"Rust lang"},{t:"WebAssembly"},{t:"rust book"},
-                  {t:"Rust by example"},{t:"WebAssembly spec"},{t:"Learning Rust"}];"#,
+                  {t:"Rust by example"},{t:"WebAssembly spec"},{t:"Learning Rust"},
+                  {t:"Go lang"}];"#,
     );
     core.register_command(sig, f).expect("registered");
 
@@ -249,17 +264,24 @@ async fn grep_uses_real_regex_in_the_browser() {
     let v = run_value(&core, "rows | grep '^Rust' | length").await.expect("resolves");
     assert_eq!(v.as_f64(), Some(2.0), "^ anchor is regex, not a literal");
 
-    // Alternation + case-insensitive: every row matches one side or the other.
+    // …and *which* two, which is the stronger claim: a count of 2 would also
+    // be satisfied by matching "Learning Rust" and dropping one of these.
+    let v = run_value(&core, "rows | grep '^Rust' | map t").await.expect("resolves");
+    assert_eq!(strings(&v), ["Rust lang", "Rust by example"], "^ matched the wrong rows");
+
+    // Alternation + case-insensitive: everything but the "Go lang" control.
     let v = run_value(&core, "rows | grep 'rust|assembly' -i | length").await.expect("resolves");
     assert_eq!(v.as_f64(), Some(6.0), "| is alternation");
 
     // Character class + quantifier — both "WebAssembly…" rows, no others.
     let v = run_value(&core, r#"rows | grep '[A-Z][a-z]+As' | length"#).await.expect("resolves");
     assert_eq!(v.as_f64(), Some(2.0));
+    let v = run_value(&core, r#"rows | grep '[A-Z][a-z]+As' | map t"#).await.expect("resolves");
+    assert_eq!(strings(&v), ["WebAssembly", "WebAssembly spec"]);
 
-    // Invert still composes with regex: the four rows `^Rust` did not match.
+    // Invert still composes with regex: the five rows `^Rust` did not match.
     let v = run_value(&core, "rows | grep '^Rust' -v | length").await.expect("resolves");
-    assert_eq!(v.as_f64(), Some(4.0));
+    assert_eq!(v.as_f64(), Some(5.0));
     core.dispose();
 }
 
