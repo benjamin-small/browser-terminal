@@ -30,6 +30,11 @@ pub enum Channel {
 pub struct Record {
     channel: Channel,
     text: String,
+    /// Written through `ctx.log.write` rather than `ctx.log(line)`: the text
+    /// went through the *allowlist* sanitizer, and a sink must emit it
+    /// verbatim — no appended newline, no styling wrapper — so partial
+    /// writes and in-place rewrites (progress bars) work.
+    raw: bool,
 }
 
 impl Record {
@@ -45,6 +50,28 @@ impl Record {
         Record {
             channel,
             text: crate::render::diagnostic_text(text.as_ref()),
+            raw: false,
+        }
+    }
+
+    /// A raw write to the log channel: allowlist-sanitized, emitted verbatim.
+    pub fn raw_log(text: impl AsRef<str>) -> Self {
+        Self::new_raw(Channel::Log, text)
+    }
+
+    /// A raw write to the err channel: allowlist-sanitized, emitted verbatim.
+    pub fn raw_err(text: impl AsRef<str>) -> Self {
+        Self::new_raw(Channel::Err, text)
+    }
+
+    /// Sanitized by the allowlist rather than strip-everything: a raw write
+    /// may keep `\r` and styling, which is what makes a progress bar
+    /// possible. The narrower rules live in `render::writer_text`.
+    fn new_raw(channel: Channel, text: impl AsRef<str>) -> Self {
+        Record {
+            channel,
+            text: crate::render::writer_text(text.as_ref()),
+            raw: true,
         }
     }
 
@@ -54,6 +81,12 @@ impl Record {
 
     pub fn text(&self) -> &str {
         &self.text
+    }
+
+    /// Whether a sink must emit this verbatim (no newline, no styling
+    /// wrapper).
+    pub fn is_raw(&self) -> bool {
+        self.raw
     }
 }
 
@@ -142,6 +175,24 @@ mod tests {
         let r = Record::err("\x1b[2J\x1b[Hcleared\nsecond");
         assert_eq!(r.text(), "cleared second");
         assert_eq!(r.channel(), Channel::Err);
+    }
+
+    #[test]
+    fn a_raw_record_keeps_line_local_control_but_not_screen_control() {
+        // Raw writes carry a progress bar's \r; the auto-sanitized path
+        // still strips everything, so existing diagnostics are unchanged.
+        let raw = Record::raw_log("50%\r");
+        assert_eq!(raw.text(), "50%\r");
+        assert!(raw.is_raw());
+
+        let cooked = Record::log("50%\r");
+        assert_eq!(cooked.text(), "50% ", "the existing path is unchanged");
+        assert!(!cooked.is_raw());
+
+        // Even raw text cannot clear the screen -- the allowlist decides,
+        // not the caller.
+        assert_eq!(Record::raw_err("\x1b[2Jx").text(), "x");
+        assert!(Record::raw_err("x").is_raw());
     }
 
     #[test]
