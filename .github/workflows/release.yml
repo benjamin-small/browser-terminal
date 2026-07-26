@@ -1,0 +1,173 @@
+name: Publish to npm
+
+# Tag-triggered rather than push-to-main: publishing is irreversible in a way
+# deploying is not. An npm version number can never be reused, even after
+# `npm unpublish`, so the trigger is an explicit act (`git tag v0.1.0`) rather
+# than a side effect of merging.
+on:
+  push:
+    tags: ['v*']
+  # Lets the whole gauntlet run without publishing, which is the only way to
+  # exercise this workflow before trusting it with a real release.
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Run every check but stop before publishing'
+        type: boolean
+        default: true
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  # Required for npm provenance: npm exchanges this for a Sigstore signature
+  # linking the published tarball to this workflow and commit, so anyone can
+  # verify the package was built here and not uploaded from a laptop.
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      # Same version-from-Cargo.toml read as ci.yml and pages.yml: the CLI
+      # must match the crate exactly or it refuses to process the module.
+      - id: wb
+        run: |
+          v=$(grep -m1 'wasm-bindgen = "=' crates/bterm-wasm/Cargo.toml | sed 's/.*"=\(.*\)".*/\1/')
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "wasm-bindgen pinned at $v"
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-bindgen-cli@${{ steps.wb.outputs.version }},just
+
+      # NOT apt: Ubuntu ships binaryen 108 (2022), which silently mangles the
+      # externref table wasm-bindgen emits — the module instantiates far
+      # enough to look fine and dies on `Table.grow()` at runtime. This
+      # workflow ships the binary to every consumer, so the assertion below
+      # matters more here than anywhere else.
+      - name: Install binaryen
+        env:
+          BINARYEN_VERSION: '131'
+        run: |
+          curl -sSfL "https://github.com/WebAssembly/binaryen/releases/download/version_${BINARYEN_VERSION}/binaryen-version_${BINARYEN_VERSION}-x86_64-linux.tar.gz" \
+            | tar xz
+          echo "$PWD/binaryen-version_${BINARYEN_VERSION}/bin" >> "$GITHUB_PATH"
+      - name: Check binaryen is recent enough
+        run: |
+          wasm-opt --version
+          v=$(wasm-opt --version | grep -oE '[0-9]+' | head -1)
+          if [ "$v" -lt 120 ]; then
+            echo "::error::wasm-opt $v is too old for the emitted reference types"
+            exit 1
+          fi
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          # Points npm at the public registry and wires NODE_AUTH_TOKEN into
+          # the generated .npmrc, so no token is ever written by hand.
+          registry-url: https://registry.npmjs.org
+
+      # A tag that disagrees with the manifest publishes a version nobody can
+      # find from the source. Cheapest possible check, done before any build.
+      - name: Tag must match the package version
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          tag="${GITHUB_REF#refs/tags/v}"
+          pkg=$(node -p "require('./packages/browser-terminal/package.json').version")
+          echo "tag=$tag  package.json=$pkg"
+          if [ "$tag" != "$pkg" ]; then
+            echo "::error::tag v$tag does not match package.json version $pkg"
+            exit 1
+          fi
+
+      # Refuse to republish an existing version rather than letting npm fail
+      # halfway through, and make the "already released" case obvious.
+      - name: Version must not already exist on the registry
+        run: |
+          name=$(node -p "require('./packages/browser-terminal/package.json').name")
+          version=$(node -p "require('./packages/browser-terminal/package.json').version")
+          if npm view "$name@$version" version >/dev/null 2>&1; then
+            echo "::error::$name@$version is already published; bump the version"
+            exit 1
+          fi
+          echo "$name@$version is unpublished — proceeding"
+
+      - run: npm ci
+
+      - run: cargo test --workspace
+
+      - name: Boundary tests (wasm32, under Node)
+        run: |
+          if ! command -v wasm-bindgen-test-runner >/dev/null; then
+            echo "::error::wasm-bindgen-test-runner not on PATH; the wasm-bindgen-cli install step did not provide it"
+            exit 1
+          fi
+          just test-wasm
+
+      - name: Build wasm + library
+        run: just build
+
+      - name: Type-check the demo
+        run: npm --prefix packages/demo run typecheck
+
+      # The same guard a local `npm publish` would trip: dist complete, the
+      # .wasm newer than every Rust source, and the tree clean. Run explicitly
+      # and *before* packing, because `npm pack` drops a .tgz that would
+      # otherwise make the tree dirty and fail the guard on its own output.
+      - name: Publishable check
+        run: node packages/browser-terminal/scripts/check-publishable.mjs
+
+      - name: Pack
+        id: pack
+        run: |
+          cd packages/browser-terminal
+          file=$(npm pack --silent | tail -1)
+          echo "tarball=$PWD/$file" >> "$GITHUB_OUTPUT"
+          echo "packed $file ($(stat -c%s "$file") bytes)"
+
+      # The workspace resolves the library through a symlink, so nothing above
+      # this line proves the *tarball* is usable. This installs it outside the
+      # repo, type-checks against the shipped .d.ts, bundles it, and boots it
+      # in a browser. It is the last thing that can catch a packaging mistake
+      # while the version number is still reusable.
+      - run: npx playwright install --with-deps chromium
+      - name: Verify the tarball as a consumer would
+        run: node scripts/verify-tarball.mjs "${{ steps.pack.outputs.tarball }}"
+
+      - name: Publish
+        if: ${{ github.event_name == 'push' || !inputs.dry_run }}
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ -z "$NODE_AUTH_TOKEN" ]; then
+            echo "::error::NPM_TOKEN secret is not set; add a granular npm access token with publish rights"
+            exit 1
+          fi
+          # Publishing the exact tarball that was just verified, rather than
+          # re-packing from the directory, so what ships is byte-for-byte what
+          # booted in the browser a step ago.
+          npm publish "${{ steps.pack.outputs.tarball }}" --provenance --access public
+
+      - name: Dry run finished
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
+        run: echo "Every check passed. Nothing was published (dry_run)."
+
+      # Keeps the verified artifact around whether or not the publish step
+      # ran, so a failed release can be inspected rather than reconstructed.
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: npm-tarball
+          path: packages/browser-terminal/*.tgz
+          if-no-files-found: warn

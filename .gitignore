@@ -30,3 +30,6 @@ _site/
 
 # Copied from the repo root at package build time so npm ships it.
 packages/browser-terminal/LICENSE
+
+# npm pack output; a stray tarball would also trip the publish guard.
+*.tgz
