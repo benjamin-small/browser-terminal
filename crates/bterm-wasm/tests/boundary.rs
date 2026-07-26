@@ -33,8 +33,29 @@ fn make_core() -> BtermCore {
     BtermCore::new(event_collector()).expect("engine created")
 }
 
+/// Run a line and hand back the whole `RunResult` — `{ value, log, err }` —
+/// for the tests that care about the diagnostic channels. Rejections pass
+/// through as the `RunError` itself.
 async fn run_line(core: &BtermCore, line: &str) -> Result<JsValue, JsValue> {
     JsFuture::from(core.run(0, line.to_string())).await
+}
+
+/// Run a line and hand back channel 1 alone: the pipeline's final value.
+///
+/// Most tests here are about what a pipeline *computes*, so they want the
+/// value and not the envelope it arrives in. Going through `run_line` and
+/// reaching past the wrapper — rather than asserting on the resolved object
+/// directly — is what keeps `assert_eq!(v.as_f64(), Some(5.0))` honest: on
+/// the wrapper it reads `None` and fails for a reason that has nothing to do
+/// with the pipeline. The `has` check makes a future change to `RunResult`'s
+/// shape say so outright instead of quietly handing back `undefined`.
+async fn run_value(core: &BtermCore, line: &str) -> Result<JsValue, JsValue> {
+    let out = run_line(core, line).await?;
+    assert!(
+        Reflect::has(&out, &"value".into()).unwrap_or(false),
+        "run() must resolve with a RunResult ({{ value, log, err }})"
+    );
+    Ok(Reflect::get(&out, &"value".into()).expect("RunResult.value"))
 }
 
 /// The `log`/`err` entries carried by a `RunResult` or a `RunError`.
@@ -151,11 +172,11 @@ async fn a_partial_write_survives_ctrl_c() {
 #[wasm_bindgen_test]
 async fn run_resolves_scalar_and_plain_objects() {
     let core = make_core();
-    let v = run_line(&core, "echo 5").await.expect("resolves");
+    let v = run_value(&core, "echo 5").await.expect("resolves");
     assert_eq!(v.as_f64(), Some(5.0));
 
     // Records must arrive as plain objects (never Map).
-    let v = run_line(&core, "echo '{\"a\":1}' | from json").await.expect("resolves");
+    let v = run_value(&core, "echo '{\"a\":1}' | from json").await.expect("resolves");
     assert!(v.is_object());
     assert!(!v.is_instance_of::<js_sys::Map>());
     let a = Reflect::get(&v, &"a".into()).expect("field a");
@@ -169,14 +190,14 @@ async fn ts_command_sync_return_and_int_conversion() {
     let sig = js_sys::JSON::parse(r#"{"name":"answer","summary":"the answer"}"#).expect("sig");
     let f = Function::new_with_args("args, input, ctx", "return 42;");
     core.register_command(sig, f).expect("registered");
-    let v = run_line(&core, "answer").await.expect("resolves");
+    let v = run_value(&core, "answer").await.expect("resolves");
     assert_eq!(v.as_f64(), Some(42.0));
 
     // Integral JS numbers become Int — usable by first/last.
     let sig = js_sys::JSON::parse(r#"{"name":"nums"}"#).expect("sig");
     let f = Function::new_with_args("args", "return [10, 20, 30];");
     core.register_command(sig, f).expect("registered");
-    let v = run_line(&core, "nums | head 2 | length").await.expect("resolves");
+    let v = run_value(&core, "nums | head 2 | length").await.expect("resolves");
     assert_eq!(v.as_f64(), Some(2.0));
     core.dispose();
 }
@@ -193,7 +214,7 @@ async fn ts_command_async_and_args_shape() {
         "return Promise.resolve({ nPos: args.positionals.length, limit: args.flags.limit ?? null, hasEmit: typeof ctx.emit === 'function', hasSignal: ctx.signal instanceof AbortSignal });",
     );
     core.register_command(sig, f).expect("registered");
-    let v = run_line(&core, "shape a b --limit 7").await.expect("resolves");
+    let v = run_value(&core, "shape a b --limit 7").await.expect("resolves");
     assert_eq!(Reflect::get(&v, &"nPos".into()).expect("nPos").as_f64(), Some(2.0));
     assert_eq!(Reflect::get(&v, &"limit".into()).expect("limit").as_f64(), Some(7.0));
     assert_eq!(Reflect::get(&v, &"hasEmit".into()).expect("hasEmit").as_bool(), Some(true));
@@ -207,25 +228,38 @@ async fn grep_uses_real_regex_in_the_browser() {
     let sig = js_sys::JSON::parse(r#"{"name":"rows"}"#).expect("sig");
     let f = Function::new_with_args(
         "args",
-        r#"return [{t:"Rust lang"},{t:"WebAssembly"},{t:"rust book"}];"#,
+        // "Learning Rust" holds "Rust" without starting with it, so the `^`
+        // assertion below still separates a real anchor from a plain
+        // substring search — a substring dialect would count three, not two.
+        r#"return [{t:"Rust lang"},{t:"WebAssembly"},{t:"rust book"},
+                  {t:"Rust by example"},{t:"WebAssembly spec"},{t:"Learning Rust"}];"#,
     );
     core.register_command(sig, f).expect("registered");
 
-    // Anchors: only "Rust lang" starts with capital R-u-s-t.
-    let v = run_line(&core, "rows | grep '^Rust' | length").await.expect("resolves");
-    assert_eq!(v.as_f64(), Some(1.0), "^ anchor is regex, not a literal");
+    // Every count below is deliberately ≥ 2. A stage that leaves exactly one
+    // row collapses to a bare record on the inter-stage channel (the
+    // batch-model note in `bterm-core`'s `builtins`), and `length` then
+    // rejects it as "expects a list or string" — which would fail this test
+    // for a reason having nothing to do with regex. Non-singleton data keeps
+    // each assertion about the thing it names.
 
-    // Alternation + case-insensitive.
-    let v = run_line(&core, "rows | grep 'rust|assembly' -i | length").await.expect("resolves");
-    assert_eq!(v.as_f64(), Some(3.0), "| is alternation");
+    // Anchors: two rows *begin* with capital "Rust". "rust book" is excluded
+    // by case and "Learning Rust" by position — the latter is what proves `^`
+    // anchors rather than being matched literally or ignored.
+    let v = run_value(&core, "rows | grep '^Rust' | length").await.expect("resolves");
+    assert_eq!(v.as_f64(), Some(2.0), "^ anchor is regex, not a literal");
 
-    // Character class + quantifier.
-    let v = run_line(&core, r#"rows | grep '[A-Z][a-z]+As' | length"#).await.expect("resolves");
-    assert_eq!(v.as_f64(), Some(1.0));
+    // Alternation + case-insensitive: every row matches one side or the other.
+    let v = run_value(&core, "rows | grep 'rust|assembly' -i | length").await.expect("resolves");
+    assert_eq!(v.as_f64(), Some(6.0), "| is alternation");
 
-    // Invert still composes with regex.
-    let v = run_line(&core, "rows | grep '^Rust' -v | length").await.expect("resolves");
+    // Character class + quantifier — both "WebAssembly…" rows, no others.
+    let v = run_value(&core, r#"rows | grep '[A-Z][a-z]+As' | length"#).await.expect("resolves");
     assert_eq!(v.as_f64(), Some(2.0));
+
+    // Invert still composes with regex: the four rows `^Rust` did not match.
+    let v = run_value(&core, "rows | grep '^Rust' -v | length").await.expect("resolves");
+    assert_eq!(v.as_f64(), Some(4.0));
     core.dispose();
 }
 
@@ -241,7 +275,7 @@ async fn grep_invalid_regex_is_a_clean_error_not_a_crash() {
         .unwrap_or_default();
     assert!(msg.contains("invalid regex pattern"), "message: {msg}");
 
-    let v = run_line(&core, "echo 5").await.expect("engine still alive");
+    let v = run_value(&core, "echo 5").await.expect("engine still alive");
     assert_eq!(v.as_f64(), Some(5.0));
     core.dispose();
 }
@@ -252,33 +286,41 @@ async fn inline_functions_project_and_filter() {
     let sig = js_sys::JSON::parse(r#"{"name":"rows"}"#).expect("sig");
     let f = Function::new_with_args(
         "args",
-        r#"return [{id:1,name:"a"},{id:7,name:"b"},{id:9,name:"c"}];"#,
+        // `bb` sits mid-list so that the `^b` grep below leaves two rows
+        // rather than one: a lone survivor collapses to a bare record (the
+        // batch-model note in `bterm-core`'s `builtins`) and there would be
+        // no list left to assert the "keeps whole rows" part on. Mid-list
+        // rather than appended so `tail` still lands on `c`.
+        r#"return [{id:1,name:"a"},{id:7,name:"b"},{id:3,name:"bb"},{id:9,name:"c"}];"#,
     );
     core.register_command(sig, f).expect("registered");
 
     // The shape from the original sketch: project one field, filter by
     // another, then compose with the rest of the pipeline.
-    let v = run_line(&core, "rows | map '(o) => o.name' | length").await.expect("resolves");
-    assert_eq!(v.as_f64(), Some(3.0));
+    let v = run_value(&core, "rows | map '(o) => o.name' | length").await.expect("resolves");
+    assert_eq!(v.as_f64(), Some(4.0));
 
-    let v = run_line(&core, "rows | filter '(o) => o.id > 5' | length").await.expect("resolves");
+    let v = run_value(&core, "rows | filter '(o) => o.id > 5' | length").await.expect("resolves");
     assert_eq!(v.as_f64(), Some(2.0));
 
     // Computed projection — not expressible as a field path at all.
     // Bare `tail` yields the scalar; `tail 1` would yield a one-item list.
-    let v = run_line(&core, "rows | map '(o) => o.name + o.id' | tail").await.expect("resolves");
+    let v = run_value(&core, "rows | map '(o) => o.name + o.id' | tail").await.expect("resolves");
     assert_eq!(v.as_string().as_deref(), Some("c9"));
 
     // `--on` with a function: filter on a computed key while keeping rows.
-    let v = run_line(&core, "rows | grep '^b' --on '(o) => o.name' | map id")
+    // "b" and "bb" match; their ids survive, so the rows came through whole
+    // rather than having been projected down to the computed key.
+    let v = run_value(&core, "rows | grep '^b' --on '(o) => o.name' | map id")
         .await
         .expect("resolves");
     let arr: Array = v.dyn_into().expect("list");
-    assert_eq!(arr.length(), 1);
+    assert_eq!(arr.length(), 2);
     assert_eq!(arr.get(0).as_f64(), Some(7.0));
+    assert_eq!(arr.get(1).as_f64(), Some(3.0));
 
     // Computed sort key: descending by negating, so the largest id leads.
-    let v = run_line(&core, "rows | sort-by --on '(o) => -o.id' | map id | head")
+    let v = run_value(&core, "rows | sort-by --on '(o) => -o.id' | map id | head")
         .await
         .expect("resolves");
     assert_eq!(v.as_f64(), Some(9.0));
@@ -291,14 +333,17 @@ async fn registered_functions_work_without_eval() {
     let sig = js_sys::JSON::parse(r#"{"name":"rows"}"#).expect("sig");
     core.register_command(
         sig,
-        Function::new_with_args("args", r#"return [{id:1},{id:7}];"#),
+        // Three rows so two survive `@big`: one survivor would collapse to a
+        // bare record and `length` would reject it. Same shape as the native
+        // `closure_filters_without_any_host_engine`.
+        Function::new_with_args("args", r#"return [{id:1},{id:7},{id:9}];"#),
     )
     .expect("registered");
 
     core.register_fn("big", Function::new_with_args("o", "return o.id > 5;"))
         .expect("register_fn");
-    let v = run_line(&core, "rows | filter @big | length").await.expect("resolves");
-    assert_eq!(v.as_f64(), Some(1.0));
+    let v = run_value(&core, "rows | filter @big | length").await.expect("resolves");
+    assert_eq!(v.as_f64(), Some(2.0));
 
     // Unknown name gets a did-you-mean rather than a bare failure.
     let err = run_line(&core, "rows | filter @bigg").await.expect_err("unknown");
@@ -342,7 +387,7 @@ async fn callable_errors_are_clean_and_survivable() {
     assert!(msg.contains("boom"), "message: {msg}");
 
     // Engine survives both.
-    let v = run_line(&core, "echo 7").await.expect("still alive");
+    let v = run_value(&core, "echo 7").await.expect("still alive");
     assert_eq!(v.as_f64(), Some(7.0));
     core.dispose();
 }
@@ -355,27 +400,32 @@ async fn native_closures_match_the_cli_exactly() {
     let sig = js_sys::JSON::parse(r#"{"name":"rows"}"#).expect("sig");
     core.register_command(
         sig,
-        Function::new_with_args("args", r#"return [{a:2,b:3},{a:10,b:1}];"#),
+        // Three rows so `a > 5` leaves two: one survivor would collapse to a
+        // bare record and `length` would reject it, exactly as the native
+        // `closure_filters_without_any_host_engine` had to account for.
+        // `a:7` last keeps the two `head` assertions below unchanged.
+        Function::new_with_args("args", r#"return [{a:2,b:3},{a:10,b:1},{a:7,b:4}];"#),
     )
     .expect("registered");
 
-    let v = run_line(&core, "rows | filter {|o| $o.a > 5} | length").await.expect("resolves");
-    assert_eq!(v.as_f64(), Some(1.0));
+    let v = run_value(&core, "rows | filter {|o| $o.a > 5} | length").await.expect("resolves");
+    assert_eq!(v.as_f64(), Some(2.0));
 
-    let v = run_line(&core, "rows | map {|o| $o.a * $o.b} | head").await.expect("resolves");
+    let v = run_value(&core, "rows | map {|o| $o.a * $o.b} | head").await.expect("resolves");
     assert_eq!(v.as_f64(), Some(6.0));
 
     // Computed descending sort key, expressible in no column.
-    let v = run_line(&core, "rows | sort-by --on {|o| -$o.a} | map a | head")
+    let v = run_value(&core, "rows | sort-by --on {|o| -$o.a} | map a | head")
         .await
         .expect("resolves");
     assert_eq!(v.as_f64(), Some(10.0));
 
-    // Closures and JS lambdas coexist in one pipeline.
-    let v = run_line(&core, "rows | filter {|o| $o.a > 1} | map '(o) => o.b' | length")
+    // Closures and JS lambdas coexist in one pipeline. Every row clears
+    // `a > 1`, so all three reach the JS lambda.
+    let v = run_value(&core, "rows | filter {|o| $o.a > 1} | map '(o) => o.b' | length")
         .await
         .expect("resolves");
-    assert_eq!(v.as_f64(), Some(2.0));
+    assert_eq!(v.as_f64(), Some(3.0));
     core.dispose();
 }
 
@@ -409,7 +459,7 @@ async fn builtin_collision_rejected_and_replace_allowed() {
     core.register_command(sig1, Function::new_with_args("a", "return 1;")).expect("first ok");
     let sig2 = js_sys::JSON::parse(r#"{"name":"mine"}"#).expect("sig");
     core.register_command(sig2, Function::new_with_args("a", "return 2;")).expect("replace ok");
-    let v = run_line(&core, "mine").await.expect("resolves");
+    let v = run_value(&core, "mine").await.expect("resolves");
     assert_eq!(v.as_f64(), Some(2.0), "replacement wins");
 
     core.unregister_command("mine");
