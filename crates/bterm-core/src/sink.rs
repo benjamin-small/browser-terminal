@@ -65,6 +65,16 @@ impl Record {
 /// is held at the call site itself.
 pub trait Sink {
     fn write(&self, record: Record);
+
+    /// Resolves when the sink can accept more output.
+    ///
+    /// A pane sink overrides this to throttle a fast producer to display
+    /// speed; every other sink can absorb output as fast as it arrives, so
+    /// the default resolves immediately. Awaited by the progressive renderer
+    /// between paints, with no engine borrow held.
+    fn ready(&self) -> crate::registry::LocalBoxFuture<()> {
+        crate::registry::ready(())
+    }
 }
 
 /// Accumulates records for later retrieval. Backs programmatic `run()` and
@@ -132,5 +142,15 @@ mod tests {
         let r = Record::err("\x1b[2J\x1b[Hcleared\nsecond");
         assert_eq!(r.text(), "cleared second");
         assert_eq!(r.channel(), Channel::Err);
+    }
+
+    #[test]
+    fn sinks_without_backpressure_are_immediately_ready() {
+        // The default: a sink that cannot fall behind resolves at once, so
+        // the progressive renderer's await between paints costs nothing.
+        use crate::eval::block_on;
+        let sink = CollectingSink::new();
+        block_on(sink.ready());
+        block_on(NullSink.ready());
     }
 }
