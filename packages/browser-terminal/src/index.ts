@@ -26,6 +26,7 @@ export type {
 } from './events.js';
 export type { PanelMode } from './panels.js';
 export type {
+  ChannelWriter,
   CommandArgs,
   CommandCtx,
   CommandFn,

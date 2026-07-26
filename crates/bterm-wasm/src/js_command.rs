@@ -1,16 +1,25 @@
 //! TS-registered commands: a `Signature` plus a JS function, invoked as
 //! `fn(args, input, ctx)` where `args = { positionals, flags }`, `input` is
-//! the piped value, and `ctx = { signal: AbortSignal, log(line), err(line),
-//! emit(line) }` (`emit` is an alias for `log`).
+//! the piped value, and `ctx = { signal: AbortSignal, log, err, emit }`.
+//! `log` and `err` are callable writer objects, but the call and the writer
+//! methods are different APIs: `ctx.log('line')` is a cooked, unbuffered
+//! message -- the shell strip-everything sanitizes it, same as before this
+//! module grew buffering -- while `ctx.log.write(s)`/`.flush()`/`.mode(...)`
+//! pass terminal bytes through the allowlist sanitizer and an `OutputBuffer`,
+//! for partial output and progress bars. `emit` is an alias for `log`, kept
+//! because it predates the channel split.
 //! Sync returns are tolerated via `Promise.resolve`; rejections map to
 //! `ShellError` (rich `{ message, help? }` objects keep their help text).
 
 use crate::convert::{js_to_value, value_to_js};
 use bterm_core::error::Span;
+use bterm_core::outbuf::{Mode, OutputBuffer};
 use bterm_core::registry::{Command, ExecContext, LocalBoxFuture, PipelineData};
 use bterm_core::signature::{BoundCall, Signature};
 use bterm_core::sink::Record;
 use bterm_core::ShellError;
+use std::cell::RefCell;
+use std::rc::Rc;
 use wasm_bindgen::closure::Closure;
 use wasm_bindgen::JsValue;
 
@@ -55,26 +64,145 @@ impl Command for JsCommand {
             if let Some(signal) = crate::tasks::signal_for(ctx.run_id) {
                 let _ = js_sys::Reflect::set(&ctx_obj, &JsValue::from_str("signal"), &signal);
             }
-            let log_sink = ctx.sink.clone();
             // These stay alive across the await: an async command may write
             // from a continuation. A command that stashes one and calls it
             // after completing gets a JS error, which is the intended signal.
-            let log = Closure::<dyn Fn(String)>::new(move |line: String| {
-                log_sink.write(Record::log(line));
+            //
+            // The line call and the raw write are different APIs, not two
+            // spellings of one: `ctx.log('msg')` passes a *message* -- the
+            // shell owns the framing and strip-everything sanitizing, and
+            // for *that* path `run()`'s log/err arrays are a public contract
+            // of clean, single-line entries (a SECURITY test asserts an
+            // embedded newline collapses so page-controlled text cannot fake
+            // extra lines in a caller's log viewer). The contract is no wider
+            // than the cooked path: a raw entry lands in the same array with
+            // a different shape -- `ctx.log.write('a\nb')` puts one
+            // multi-line entry in `run().log`, and line/block coalescing
+            // means raw entry count does not track call count either.
+            // `ctx.log.write('\r50%')` passes *terminal bytes* -- the command
+            // owns the framing, and the allowlist sanitizer plus
+            // `OutputBuffer` is what makes that safe.
+            // Only `.write`/`.flush`/`.mode` touch the buffer; the
+            // plain call bypasses it entirely, so mixing the two on one
+            // channel reorders output -- `ctx.log.write('a')` may still be
+            // buffered when a later `ctx.log('b')` goes straight out, so `b`
+            // lands first and `a` follows when the buffer drains. Acceptable,
+            // since a command that wants ordering guarantees should pick one
+            // API and stick to it (or `flush()` before switching).
+            let log_buf = Rc::new(RefCell::new(OutputBuffer::new()));
+            // The run owns the buffer's tail, not this future: the drains at
+            // the bottom of this function only happen if the body reaches
+            // them, and every `?` below (and every abort) skips them. See
+            // `tasks::flush_buffers`.
+            crate::tasks::register_buffer(
+                ctx.run_id,
+                log_buf.clone(),
+                ctx.sink.clone(),
+                bterm_core::sink::Channel::Log,
+            );
+
+            // ctx.log(line) -- the sugar every existing command uses: cooked,
+            // unbuffered, exactly as before the channel split.
+            let sink_a = ctx.sink.clone();
+            let log_call = Closure::<dyn Fn(String)>::new(move |line: String| {
+                sink_a.write(Record::log(line));
             });
-            let err_sink = ctx.sink.clone();
-            let err = Closure::<dyn Fn(String)>::new(move |line: String| {
-                err_sink.write(Record::err(line));
+
+            // ctx.log.write(s) -- partial: no delimiter appended.
+            let sink_b = ctx.sink.clone();
+            let buf_b = log_buf.clone();
+            let log_write = Closure::<dyn Fn(String)>::new(move |s: String| {
+                let out = buf_b.borrow_mut().write(&s);
+                if let Some(text) = out {
+                    sink_b.write(Record::raw_log(text));
+                }
             });
-            let emit_sink = ctx.sink.clone();
-            // `emit` predates the channel split and is what every existing
-            // command calls; it is retained as an alias for `log`.
-            let emit = Closure::<dyn Fn(String)>::new(move |line: String| {
-                emit_sink.write(Record::log(line));
+
+            // ctx.log.flush()
+            let sink_c = ctx.sink.clone();
+            let buf_c = log_buf.clone();
+            let log_flush = Closure::<dyn Fn()>::new(move || {
+                let out = buf_c.borrow_mut().flush();
+                if let Some(text) = out {
+                    sink_c.write(Record::raw_log(text));
+                }
             });
-            let _ = js_sys::Reflect::set(&ctx_obj, &JsValue::from_str("log"), log.as_ref());
-            let _ = js_sys::Reflect::set(&ctx_obj, &JsValue::from_str("err"), err.as_ref());
-            let _ = js_sys::Reflect::set(&ctx_obj, &JsValue::from_str("emit"), emit.as_ref());
+
+            // ctx.log.mode(m, opts?)
+            let buf_d = log_buf.clone();
+            let log_mode = Closure::<dyn Fn(String, JsValue)>::new(move |m: String, opts: JsValue| {
+                let mode = match m.as_str() {
+                    "byte" => Mode::Byte,
+                    "block" => Mode::Block,
+                    _ => Mode::Line,
+                };
+                // A single-argument call passes `undefined`; Reflect::get on
+                // it fails, and `.ok()` turns that into "no delimiter given".
+                let delim = js_sys::Reflect::get(&opts, &JsValue::from_str("delimiter"))
+                    .ok()
+                    .and_then(|v| v.as_string());
+                buf_d.borrow_mut().set_mode(mode, delim);
+            });
+
+            let log_fn = js_sys::Function::from(log_call.as_ref().clone());
+            let _ = js_sys::Reflect::set(&log_fn, &JsValue::from_str("write"), log_write.as_ref());
+            let _ = js_sys::Reflect::set(&log_fn, &JsValue::from_str("flush"), log_flush.as_ref());
+            let _ = js_sys::Reflect::set(&log_fn, &JsValue::from_str("mode"), log_mode.as_ref());
+            let _ = js_sys::Reflect::set(&ctx_obj, &JsValue::from_str("log"), &log_fn);
+            // `emit` predates the channel split; it stays an alias for the
+            // same function object (cooked call plus `.write`/`.flush`/`.mode`).
+            let _ = js_sys::Reflect::set(&ctx_obj, &JsValue::from_str("emit"), &log_fn);
+
+            let err_buf = Rc::new(RefCell::new(OutputBuffer::new()));
+            crate::tasks::register_buffer(
+                ctx.run_id,
+                err_buf.clone(),
+                ctx.sink.clone(),
+                bterm_core::sink::Channel::Err,
+            );
+
+            // ctx.err(line) -- cooked and unbuffered, same reasoning as log_call.
+            let sink_e = ctx.sink.clone();
+            let err_call = Closure::<dyn Fn(String)>::new(move |line: String| {
+                sink_e.write(Record::err(line));
+            });
+
+            let sink_f = ctx.sink.clone();
+            let buf_f = err_buf.clone();
+            let err_write = Closure::<dyn Fn(String)>::new(move |s: String| {
+                let out = buf_f.borrow_mut().write(&s);
+                if let Some(text) = out {
+                    sink_f.write(Record::raw_err(text));
+                }
+            });
+
+            let sink_g = ctx.sink.clone();
+            let buf_g = err_buf.clone();
+            let err_flush = Closure::<dyn Fn()>::new(move || {
+                let out = buf_g.borrow_mut().flush();
+                if let Some(text) = out {
+                    sink_g.write(Record::raw_err(text));
+                }
+            });
+
+            let buf_h = err_buf.clone();
+            let err_mode = Closure::<dyn Fn(String, JsValue)>::new(move |m: String, opts: JsValue| {
+                let mode = match m.as_str() {
+                    "byte" => Mode::Byte,
+                    "block" => Mode::Block,
+                    _ => Mode::Line,
+                };
+                let delim = js_sys::Reflect::get(&opts, &JsValue::from_str("delimiter"))
+                    .ok()
+                    .and_then(|v| v.as_string());
+                buf_h.borrow_mut().set_mode(mode, delim);
+            });
+
+            let err_fn = js_sys::Function::from(err_call.as_ref().clone());
+            let _ = js_sys::Reflect::set(&err_fn, &JsValue::from_str("write"), err_write.as_ref());
+            let _ = js_sys::Reflect::set(&err_fn, &JsValue::from_str("flush"), err_flush.as_ref());
+            let _ = js_sys::Reflect::set(&err_fn, &JsValue::from_str("mode"), err_mode.as_ref());
+            let _ = js_sys::Reflect::set(&ctx_obj, &JsValue::from_str("err"), &err_fn);
 
             let returned = func
                 .call3(&JsValue::NULL, &args, &input_js, &ctx_obj)
@@ -152,9 +280,34 @@ impl Command for JsCommand {
                         break;
                     }
                 }
-                drop(log);
-                drop(err);
-                drop(emit);
+                // Drain at the *stage* boundary, so a stage's tail lands
+                // before whatever the rest of the pipeline goes on to print
+                // rather than at the end of the whole run.
+                //
+                // It is not what makes "nothing buffered is lost" true:
+                // this line is only reached when the body returns normally,
+                // and neither an early `?` above nor an abort (which never
+                // resumes a suspended body at all) gets here.
+                // `tasks::flush_buffers`, driven from the run's end, is the
+                // guarantee; this is the nicety on top of it, and running
+                // both is safe because a second `finish()` on a drained
+                // buffer yields nothing.
+                let tail_log = log_buf.borrow_mut().finish();
+                if let Some(text) = tail_log {
+                    ctx.sink.write(Record::raw_log(text));
+                }
+                let tail_err = err_buf.borrow_mut().finish();
+                if let Some(text) = tail_err {
+                    ctx.sink.write(Record::raw_err(text));
+                }
+                drop(log_call);
+                drop(log_write);
+                drop(log_flush);
+                drop(log_mode);
+                drop(err_call);
+                drop(err_write);
+                drop(err_flush);
+                drop(err_mode);
                 return Ok(());
             }
 
@@ -167,9 +320,22 @@ impl Command for JsCommand {
                 PipelineData::Value(value)
             };
             let _ = bterm_core::stream::flatten(pd, &output).await;
-            drop(log);
-            drop(err);
-            drop(emit);
+            let tail_log = log_buf.borrow_mut().finish();
+            if let Some(text) = tail_log {
+                ctx.sink.write(Record::raw_log(text));
+            }
+            let tail_err = err_buf.borrow_mut().finish();
+            if let Some(text) = tail_err {
+                ctx.sink.write(Record::raw_err(text));
+            }
+            drop(log_call);
+            drop(log_write);
+            drop(log_flush);
+            drop(log_mode);
+            drop(err_call);
+            drop(err_write);
+            drop(err_flush);
+            drop(err_mode);
             Ok(())
         })
     }

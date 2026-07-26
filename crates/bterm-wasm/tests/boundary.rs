@@ -33,18 +33,150 @@ fn make_core() -> BtermCore {
     BtermCore::new(event_collector()).expect("engine created")
 }
 
+/// Run a line and hand back the whole `RunResult` — `{ value, log, err }` —
+/// for the tests that care about the diagnostic channels. Rejections pass
+/// through as the `RunError` itself.
 async fn run_line(core: &BtermCore, line: &str) -> Result<JsValue, JsValue> {
     JsFuture::from(core.run(0, line.to_string())).await
+}
+
+/// Run a line and hand back channel 1 alone: the pipeline's final value.
+///
+/// Most tests here are about what a pipeline *computes*, so they want the
+/// value and not the envelope it arrives in. Going through `run_line` and
+/// reaching past the wrapper — rather than asserting on the resolved object
+/// directly — is what keeps `assert_eq!(v.as_f64(), Some(5.0))` honest: on
+/// the wrapper it reads `None` and fails for a reason that has nothing to do
+/// with the pipeline. The `has` check makes a future change to `RunResult`'s
+/// shape say so outright instead of quietly handing back `undefined`.
+async fn run_value(core: &BtermCore, line: &str) -> Result<JsValue, JsValue> {
+    let out = run_line(core, line).await?;
+    assert!(
+        Reflect::has(&out, &"value".into()).unwrap_or(false),
+        "run() must resolve with a RunResult ({{ value, log, err }})"
+    );
+    Ok(Reflect::get(&out, &"value".into()).expect("RunResult.value"))
+}
+
+/// The `log`/`err` entries carried by a `RunResult` or a `RunError`.
+fn entries(v: &JsValue, key: &str) -> Vec<String> {
+    Reflect::get(v, &key.into())
+        .ok()
+        .and_then(|a| a.dyn_into::<Array>().ok())
+        .map(|a| a.iter().filter_map(|e| e.as_string()).collect())
+        .unwrap_or_default()
+}
+
+fn contains(entries: &[String], needle: &str) -> bool {
+    entries.iter().any(|e| e.contains(needle))
+}
+
+/// Hand control back to the event loop for one macrotask.
+async fn tick() {
+    let p = js_sys::Promise::new(&mut |resolve, _| {
+        let f = Function::new_with_args("r", "setTimeout(r, 0);");
+        let _ = f.call1(&JsValue::NULL, &resolve);
+    });
+    let _ = JsFuture::from(p).await;
+}
+
+/// Register a TS command whose body is `body`.
+fn command(core: &BtermCore, name: &str, body: &str) {
+    let sig = js_sys::JSON::parse(&format!(r#"{{"name":"{name}"}}"#)).expect("sig");
+    core.register_command(sig, Function::new_with_args("args, input, ctx", body))
+        .expect("registered");
+}
+
+#[wasm_bindgen_test]
+async fn a_partial_write_survives_a_throw_in_the_default_line_mode() {
+    // The headline case. `line` is the DEFAULT mode, so a write with no
+    // delimiter in it is still sitting in the buffer when the command
+    // throws -- and the throw returns out of `JsCommand::run` well before
+    // the drain at the bottom of its body. `RunError` promises to carry
+    // whatever the pipeline wrote before it failed; that has to include the
+    // text that explains what it was doing when it died, which in practice
+    // is exactly the partial line.
+    let core = make_core();
+    command(
+        &core,
+        "halfway",
+        "ctx.log.write('starting fetch'); ctx.err.write('warning: slow'); throw new Error('boom');",
+    );
+    let err = run_line(&core, "halfway").await.expect_err("rejects");
+    let log = entries(&err, "log");
+    let errs = entries(&err, "err");
+    assert!(contains(&log, "starting fetch"), "partial log lost on throw: {log:?}");
+    assert!(contains(&errs, "warning: slow"), "partial err lost on throw: {errs:?}");
+    core.dispose();
+}
+
+#[wasm_bindgen_test]
+async fn a_block_mode_write_survives_a_throw_without_flush() {
+    // Block mode holds everything until `flush()`, so even a complete line
+    // is still buffered when the command throws.
+    let core = make_core();
+    command(
+        &core,
+        "held",
+        r#"ctx.log.mode('block'); ctx.log.write('one\ntwo\n'); throw new Error('boom');"#,
+    );
+    let err = run_line(&core, "held").await.expect_err("rejects");
+    let log = entries(&err, "log");
+    assert!(contains(&log, "one"), "block-mode buffer lost on throw: {log:?}");
+    assert!(contains(&log, "two"), "block-mode buffer lost on throw: {log:?}");
+    core.dispose();
+}
+
+#[wasm_bindgen_test]
+async fn a_block_mode_write_that_never_flushes_appears_once_on_success() {
+    // Two drains now exist for a command that returns normally -- the one
+    // at the bottom of `JsCommand::run` and the run-scoped one -- so this
+    // pins that the second finds an empty buffer rather than emitting the
+    // text twice.
+    let core = make_core();
+    command(&core, "held", "ctx.log.mode('block'); ctx.log.write('once'); return 1;");
+    let out = run_line(&core, "held").await.expect("resolves");
+    let log = entries(&out, "log");
+    let hits = log.iter().filter(|e| e.contains("once")).count();
+    assert_eq!(hits, 1, "buffered text emitted {hits} times: {log:?}");
+    core.dispose();
+}
+
+#[wasm_bindgen_test]
+async fn a_partial_write_survives_ctrl_c() {
+    // Ctrl-C is the case no amount of care inside the command body can
+    // cover: `Abortable::poll` returns `Ready(Err(Aborted))` *before*
+    // polling the inner future, so a suspended body never runs again. The
+    // flush has to come from the abort path itself.
+    //
+    // The `tick()` is load-bearing, not incidental: `run()` registers its
+    // task inside the spawned future, which `future_to_promise` does not
+    // poll until a microtask later, so a Ctrl-C fed in the same tick finds
+    // an empty task registry and aborts nothing. See the longer note in
+    // `abort_signal_fires_on_ctrl_c`.
+    let core = make_core();
+    command(
+        &core,
+        "hangs",
+        "ctx.log.write('partial before ctrl-c'); return new Promise((res, rej) => { ctx.signal.addEventListener('abort', () => rej(new Error('interrupted'))); });",
+    );
+    let pending = core.run(0, "hangs".to_string());
+    tick().await;
+    core.feed(0, "\x03");
+    let err = JsFuture::from(pending).await.expect_err("aborted run rejects");
+    let log = entries(&err, "log");
+    assert!(contains(&log, "partial before ctrl-c"), "partial log lost on Ctrl-C: {log:?}");
+    core.dispose();
 }
 
 #[wasm_bindgen_test]
 async fn run_resolves_scalar_and_plain_objects() {
     let core = make_core();
-    let v = run_line(&core, "echo 5").await.expect("resolves");
+    let v = run_value(&core, "echo 5").await.expect("resolves");
     assert_eq!(v.as_f64(), Some(5.0));
 
     // Records must arrive as plain objects (never Map).
-    let v = run_line(&core, "echo '{\"a\":1}' | from json").await.expect("resolves");
+    let v = run_value(&core, "echo '{\"a\":1}' | from json").await.expect("resolves");
     assert!(v.is_object());
     assert!(!v.is_instance_of::<js_sys::Map>());
     let a = Reflect::get(&v, &"a".into()).expect("field a");
@@ -58,14 +190,14 @@ async fn ts_command_sync_return_and_int_conversion() {
     let sig = js_sys::JSON::parse(r#"{"name":"answer","summary":"the answer"}"#).expect("sig");
     let f = Function::new_with_args("args, input, ctx", "return 42;");
     core.register_command(sig, f).expect("registered");
-    let v = run_line(&core, "answer").await.expect("resolves");
+    let v = run_value(&core, "answer").await.expect("resolves");
     assert_eq!(v.as_f64(), Some(42.0));
 
     // Integral JS numbers become Int — usable by first/last.
     let sig = js_sys::JSON::parse(r#"{"name":"nums"}"#).expect("sig");
     let f = Function::new_with_args("args", "return [10, 20, 30];");
     core.register_command(sig, f).expect("registered");
-    let v = run_line(&core, "nums | head 2 | length").await.expect("resolves");
+    let v = run_value(&core, "nums | head 2 | length").await.expect("resolves");
     assert_eq!(v.as_f64(), Some(2.0));
     core.dispose();
 }
@@ -82,7 +214,7 @@ async fn ts_command_async_and_args_shape() {
         "return Promise.resolve({ nPos: args.positionals.length, limit: args.flags.limit ?? null, hasEmit: typeof ctx.emit === 'function', hasSignal: ctx.signal instanceof AbortSignal });",
     );
     core.register_command(sig, f).expect("registered");
-    let v = run_line(&core, "shape a b --limit 7").await.expect("resolves");
+    let v = run_value(&core, "shape a b --limit 7").await.expect("resolves");
     assert_eq!(Reflect::get(&v, &"nPos".into()).expect("nPos").as_f64(), Some(2.0));
     assert_eq!(Reflect::get(&v, &"limit".into()).expect("limit").as_f64(), Some(7.0));
     assert_eq!(Reflect::get(&v, &"hasEmit".into()).expect("hasEmit").as_bool(), Some(true));
@@ -96,25 +228,38 @@ async fn grep_uses_real_regex_in_the_browser() {
     let sig = js_sys::JSON::parse(r#"{"name":"rows"}"#).expect("sig");
     let f = Function::new_with_args(
         "args",
-        r#"return [{t:"Rust lang"},{t:"WebAssembly"},{t:"rust book"}];"#,
+        // "Learning Rust" holds "Rust" without starting with it, so the `^`
+        // assertion below still separates a real anchor from a plain
+        // substring search — a substring dialect would count three, not two.
+        r#"return [{t:"Rust lang"},{t:"WebAssembly"},{t:"rust book"},
+                  {t:"Rust by example"},{t:"WebAssembly spec"},{t:"Learning Rust"}];"#,
     );
     core.register_command(sig, f).expect("registered");
 
-    // Anchors: only "Rust lang" starts with capital R-u-s-t.
-    let v = run_line(&core, "rows | grep '^Rust' | length").await.expect("resolves");
-    assert_eq!(v.as_f64(), Some(1.0), "^ anchor is regex, not a literal");
+    // Every count below is deliberately ≥ 2. A stage that leaves exactly one
+    // row collapses to a bare record on the inter-stage channel (the
+    // batch-model note in `bterm-core`'s `builtins`), and `length` then
+    // rejects it as "expects a list or string" — which would fail this test
+    // for a reason having nothing to do with regex. Non-singleton data keeps
+    // each assertion about the thing it names.
 
-    // Alternation + case-insensitive.
-    let v = run_line(&core, "rows | grep 'rust|assembly' -i | length").await.expect("resolves");
-    assert_eq!(v.as_f64(), Some(3.0), "| is alternation");
+    // Anchors: two rows *begin* with capital "Rust". "rust book" is excluded
+    // by case and "Learning Rust" by position — the latter is what proves `^`
+    // anchors rather than being matched literally or ignored.
+    let v = run_value(&core, "rows | grep '^Rust' | length").await.expect("resolves");
+    assert_eq!(v.as_f64(), Some(2.0), "^ anchor is regex, not a literal");
 
-    // Character class + quantifier.
-    let v = run_line(&core, r#"rows | grep '[A-Z][a-z]+As' | length"#).await.expect("resolves");
-    assert_eq!(v.as_f64(), Some(1.0));
+    // Alternation + case-insensitive: every row matches one side or the other.
+    let v = run_value(&core, "rows | grep 'rust|assembly' -i | length").await.expect("resolves");
+    assert_eq!(v.as_f64(), Some(6.0), "| is alternation");
 
-    // Invert still composes with regex.
-    let v = run_line(&core, "rows | grep '^Rust' -v | length").await.expect("resolves");
+    // Character class + quantifier — both "WebAssembly…" rows, no others.
+    let v = run_value(&core, r#"rows | grep '[A-Z][a-z]+As' | length"#).await.expect("resolves");
     assert_eq!(v.as_f64(), Some(2.0));
+
+    // Invert still composes with regex: the four rows `^Rust` did not match.
+    let v = run_value(&core, "rows | grep '^Rust' -v | length").await.expect("resolves");
+    assert_eq!(v.as_f64(), Some(4.0));
     core.dispose();
 }
 
@@ -130,7 +275,7 @@ async fn grep_invalid_regex_is_a_clean_error_not_a_crash() {
         .unwrap_or_default();
     assert!(msg.contains("invalid regex pattern"), "message: {msg}");
 
-    let v = run_line(&core, "echo 5").await.expect("engine still alive");
+    let v = run_value(&core, "echo 5").await.expect("engine still alive");
     assert_eq!(v.as_f64(), Some(5.0));
     core.dispose();
 }
@@ -141,33 +286,41 @@ async fn inline_functions_project_and_filter() {
     let sig = js_sys::JSON::parse(r#"{"name":"rows"}"#).expect("sig");
     let f = Function::new_with_args(
         "args",
-        r#"return [{id:1,name:"a"},{id:7,name:"b"},{id:9,name:"c"}];"#,
+        // `bb` sits mid-list so that the `^b` grep below leaves two rows
+        // rather than one: a lone survivor collapses to a bare record (the
+        // batch-model note in `bterm-core`'s `builtins`) and there would be
+        // no list left to assert the "keeps whole rows" part on. Mid-list
+        // rather than appended so `tail` still lands on `c`.
+        r#"return [{id:1,name:"a"},{id:7,name:"b"},{id:3,name:"bb"},{id:9,name:"c"}];"#,
     );
     core.register_command(sig, f).expect("registered");
 
     // The shape from the original sketch: project one field, filter by
     // another, then compose with the rest of the pipeline.
-    let v = run_line(&core, "rows | map '(o) => o.name' | length").await.expect("resolves");
-    assert_eq!(v.as_f64(), Some(3.0));
+    let v = run_value(&core, "rows | map '(o) => o.name' | length").await.expect("resolves");
+    assert_eq!(v.as_f64(), Some(4.0));
 
-    let v = run_line(&core, "rows | filter '(o) => o.id > 5' | length").await.expect("resolves");
+    let v = run_value(&core, "rows | filter '(o) => o.id > 5' | length").await.expect("resolves");
     assert_eq!(v.as_f64(), Some(2.0));
 
     // Computed projection — not expressible as a field path at all.
     // Bare `tail` yields the scalar; `tail 1` would yield a one-item list.
-    let v = run_line(&core, "rows | map '(o) => o.name + o.id' | tail").await.expect("resolves");
+    let v = run_value(&core, "rows | map '(o) => o.name + o.id' | tail").await.expect("resolves");
     assert_eq!(v.as_string().as_deref(), Some("c9"));
 
     // `--on` with a function: filter on a computed key while keeping rows.
-    let v = run_line(&core, "rows | grep '^b' --on '(o) => o.name' | map id")
+    // "b" and "bb" match; their ids survive, so the rows came through whole
+    // rather than having been projected down to the computed key.
+    let v = run_value(&core, "rows | grep '^b' --on '(o) => o.name' | map id")
         .await
         .expect("resolves");
     let arr: Array = v.dyn_into().expect("list");
-    assert_eq!(arr.length(), 1);
+    assert_eq!(arr.length(), 2);
     assert_eq!(arr.get(0).as_f64(), Some(7.0));
+    assert_eq!(arr.get(1).as_f64(), Some(3.0));
 
     // Computed sort key: descending by negating, so the largest id leads.
-    let v = run_line(&core, "rows | sort-by --on '(o) => -o.id' | map id | head")
+    let v = run_value(&core, "rows | sort-by --on '(o) => -o.id' | map id | head")
         .await
         .expect("resolves");
     assert_eq!(v.as_f64(), Some(9.0));
@@ -180,14 +333,17 @@ async fn registered_functions_work_without_eval() {
     let sig = js_sys::JSON::parse(r#"{"name":"rows"}"#).expect("sig");
     core.register_command(
         sig,
-        Function::new_with_args("args", r#"return [{id:1},{id:7}];"#),
+        // Three rows so two survive `@big`: one survivor would collapse to a
+        // bare record and `length` would reject it. Same shape as the native
+        // `closure_filters_without_any_host_engine`.
+        Function::new_with_args("args", r#"return [{id:1},{id:7},{id:9}];"#),
     )
     .expect("registered");
 
     core.register_fn("big", Function::new_with_args("o", "return o.id > 5;"))
         .expect("register_fn");
-    let v = run_line(&core, "rows | filter @big | length").await.expect("resolves");
-    assert_eq!(v.as_f64(), Some(1.0));
+    let v = run_value(&core, "rows | filter @big | length").await.expect("resolves");
+    assert_eq!(v.as_f64(), Some(2.0));
 
     // Unknown name gets a did-you-mean rather than a bare failure.
     let err = run_line(&core, "rows | filter @bigg").await.expect_err("unknown");
@@ -231,7 +387,7 @@ async fn callable_errors_are_clean_and_survivable() {
     assert!(msg.contains("boom"), "message: {msg}");
 
     // Engine survives both.
-    let v = run_line(&core, "echo 7").await.expect("still alive");
+    let v = run_value(&core, "echo 7").await.expect("still alive");
     assert_eq!(v.as_f64(), Some(7.0));
     core.dispose();
 }
@@ -244,27 +400,32 @@ async fn native_closures_match_the_cli_exactly() {
     let sig = js_sys::JSON::parse(r#"{"name":"rows"}"#).expect("sig");
     core.register_command(
         sig,
-        Function::new_with_args("args", r#"return [{a:2,b:3},{a:10,b:1}];"#),
+        // Three rows so `a > 5` leaves two: one survivor would collapse to a
+        // bare record and `length` would reject it, exactly as the native
+        // `closure_filters_without_any_host_engine` had to account for.
+        // `a:7` last keeps the two `head` assertions below unchanged.
+        Function::new_with_args("args", r#"return [{a:2,b:3},{a:10,b:1},{a:7,b:4}];"#),
     )
     .expect("registered");
 
-    let v = run_line(&core, "rows | filter {|o| $o.a > 5} | length").await.expect("resolves");
-    assert_eq!(v.as_f64(), Some(1.0));
+    let v = run_value(&core, "rows | filter {|o| $o.a > 5} | length").await.expect("resolves");
+    assert_eq!(v.as_f64(), Some(2.0));
 
-    let v = run_line(&core, "rows | map {|o| $o.a * $o.b} | head").await.expect("resolves");
+    let v = run_value(&core, "rows | map {|o| $o.a * $o.b} | head").await.expect("resolves");
     assert_eq!(v.as_f64(), Some(6.0));
 
     // Computed descending sort key, expressible in no column.
-    let v = run_line(&core, "rows | sort-by --on {|o| -$o.a} | map a | head")
+    let v = run_value(&core, "rows | sort-by --on {|o| -$o.a} | map a | head")
         .await
         .expect("resolves");
     assert_eq!(v.as_f64(), Some(10.0));
 
-    // Closures and JS lambdas coexist in one pipeline.
-    let v = run_line(&core, "rows | filter {|o| $o.a > 1} | map '(o) => o.b' | length")
+    // Closures and JS lambdas coexist in one pipeline. Every row clears
+    // `a > 1`, so all three reach the JS lambda.
+    let v = run_value(&core, "rows | filter {|o| $o.a > 1} | map '(o) => o.b' | length")
         .await
         .expect("resolves");
-    assert_eq!(v.as_f64(), Some(2.0));
+    assert_eq!(v.as_f64(), Some(3.0));
     core.dispose();
 }
 
@@ -298,7 +459,7 @@ async fn builtin_collision_rejected_and_replace_allowed() {
     core.register_command(sig1, Function::new_with_args("a", "return 1;")).expect("first ok");
     let sig2 = js_sys::JSON::parse(r#"{"name":"mine"}"#).expect("sig");
     core.register_command(sig2, Function::new_with_args("a", "return 2;")).expect("replace ok");
-    let v = run_line(&core, "mine").await.expect("resolves");
+    let v = run_value(&core, "mine").await.expect("resolves");
     assert_eq!(v.as_f64(), Some(2.0), "replacement wins");
 
     core.unregister_command("mine");
@@ -347,6 +508,15 @@ async fn abort_signal_fires_on_ctrl_c() {
     let _ = Reflect::set(&js_sys::global(), &"__aborted".into(), &JsValue::FALSE);
 
     let pending = core.run(0, "hang".to_string());
+    // `run()` registers its task *inside* the spawned future, and
+    // `future_to_promise` does not poll that until a microtask later. A
+    // Ctrl-C fed in the same tick therefore finds an empty task registry,
+    // aborts nothing, and leaves this test awaiting a promise that never
+    // settles -- at which point Node's event loop empties and the runner
+    // exits silently, taking every not-yet-run test in this file with it.
+    // (The same-tick race is real in the product too, not an artifact of
+    // the test; it is worth fixing at the source.)
+    tick().await;
     core.feed(0, "\x03"); // Ctrl-C aborts pane 0's runs
     let err = JsFuture::from(pending).await.expect_err("aborted run rejects");
     let msg = Reflect::get(&err, &"message".into())

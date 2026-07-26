@@ -23,6 +23,9 @@ use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
 
+/// SGR reset. Prefixed to every chunk of pane output — see `emit_output`.
+const RESET: &str = "\x1b[0m";
+
 pub struct Engine {
     pub registry: CommandRegistry,
     pub mux: Mux,
@@ -123,8 +126,21 @@ impl Engine {
 
     /// Queue pane output. `text` uses `\n` endings (or raw control
     /// sequences); it is CRLF-converted here, the single choke point.
+    ///
+    /// Every chunk is also reset-prefixed here rather than at each call
+    /// site. A command's SGR can outlive the command — an aborted body never
+    /// resumes, so its trailing reset never runs — and the engine's own
+    /// paints are then drawn in the command's colours. That is not only
+    /// cosmetic for the prompt: `prompt_line` starts with `\r\x1b[K`, and
+    /// erase-to-end-of-line fills with the *current* background, so a leaked
+    /// background repaints the shell's own line. Doing it at the choke point
+    /// keeps the invariant one line of code instead of a reset scattered
+    /// over every emitter, and means a new emitter cannot forget it.
     pub fn emit_output(&mut self, pane: u32, text: &str) {
-        self.emit(EngineEvent::PaneOutput { pane, data: crlf(text) });
+        if text.is_empty() {
+            return;
+        }
+        self.emit(EngineEvent::PaneOutput { pane, data: format!("{RESET}{}", crlf(text)) });
     }
 
     pub fn emit(&mut self, event: EngineEvent) {
@@ -312,7 +328,7 @@ impl Engine {
             self.emit(EngineEvent::PaneOpened { pane: *pane });
             // The new xterm needs a prompt to be usable.
             let prompt = self.prompt_line(*pane);
-            self.emit(EngineEvent::PaneOutput { pane: *pane, data: prompt });
+            self.emit_output(*pane, &prompt);
         }
         for pane in &outcome.closed_panes {
             self.emit(EngineEvent::PaneClosed { pane: *pane });
@@ -506,11 +522,31 @@ struct PaneSink<A: EngineAccess> {
 impl<A: EngineAccess> crate::sink::Sink for PaneSink<A> {
     fn write(&self, record: crate::sink::Record) {
         const RED: &str = "\x1b[31m";
-        const RESET: &str = "\x1b[0m";
         let clean = record.text();
-        let line = match record.channel() {
-            crate::sink::Channel::Log => format!("{clean}\n"),
-            crate::sink::Channel::Err => format!("{RED}{clean}{RESET}\n"),
+        // Every record is reset-prefixed, raw or not -- by `emit_output`,
+        // which does it for every chunk of pane output rather than only for
+        // records. The allowlist permits SGR on the argument that a
+        // command's styling is bounded by a reset at the command boundary --
+        // and that argument is false on the abort path: `Abortable::poll`
+        // returns Ready(Err(Aborted)) *before* polling the inner future
+        // (abort.rs:58), so a suspended command body never resumes and a
+        // trailing reset never runs. A command that writes `\x1b[8m`
+        // (conceal) and then hangs would otherwise leave every later
+        // command's output invisible. Resetting per chunk makes cross-command
+        // SGR bleed structurally impossible instead of dependent on cleanup
+        // that cancellation can skip.
+        //
+        // A raw write otherwise owns its formatting: no appended newline (a
+        // partial write must stay partial) and no colour wrapper (the command
+        // may be emitting its own SGR, and re-wrapping per write would fight
+        // it).
+        let line = if record.is_raw() {
+            clean.to_string()
+        } else {
+            match record.channel() {
+                crate::sink::Channel::Log => format!("{clean}\n"),
+                crate::sink::Channel::Err => format!("{RED}{clean}{RESET}\n"),
+            }
         };
         self.access.with(|e| e.emit_output(self.pane, &line));
         // Flush after the borrow closes, never inside `with` — flushing may
@@ -808,10 +844,12 @@ fn finish_pane(e: &mut Engine, pane: u32, ok: bool) {
         p.running = false;
         p.editor.set_last_status(ok);
     }
+    // Through `emit_output`, not `emit`: the prompt opens with `\r\x1b[K`,
+    // and erase-to-end-of-line fills with the current background. A command
+    // that leaked a background colour would otherwise paint the shell's own
+    // prompt line with it.
     let prompt = e.prompt_line(pane);
-    if !prompt.is_empty() {
-        e.emit(EngineEvent::PaneOutput { pane, data: prompt });
-    }
+    e.emit_output(pane, &prompt);
 }
 
 #[cfg(test)]
@@ -848,6 +886,37 @@ mod tests {
                 _ => String::new(),
             })
             .collect()
+    }
+
+    #[test]
+    fn every_pane_chunk_is_reset_prefixed_including_the_engine_s_own_paints() {
+        // A command's SGR outlives it on the abort path, so the engine's own
+        // paints are drawn in whatever the command left set. For the prompt
+        // that is not merely cosmetic: `prompt_line` opens with `\r\x1b[K`,
+        // and erase-to-end-of-line fills with the *current* background, so a
+        // leaked background repaints the shell's own line. `emit_output`
+        // prefixes every chunk, which covers rendered values, `Rendered`
+        // text, error renders, progressive paints and the prompt alike --
+        // one choke point rather than a reset per call site.
+        let access = engine();
+        let events = feed_and_run(&access, "echo hi\r");
+        let chunks: Vec<&String> = events
+            .iter()
+            .filter_map(|ev| match ev {
+                EngineEvent::PaneOutput { data, .. } => Some(data),
+                _ => None,
+            })
+            .collect();
+        assert!(!chunks.is_empty(), "the run painted nothing");
+        for chunk in &chunks {
+            assert!(chunk.starts_with("\x1b[0m"), "unreset pane chunk: {chunk:?}");
+        }
+        let last = chunks.last().map(|s| s.as_str()).unwrap_or_default();
+        assert!(last.contains("❯"), "the prompt is the last chunk: {last:?}");
+        assert!(
+            last.starts_with("\x1b[0m\r\x1b[K"),
+            "the reset must precede the erase, or `\\x1b[K` fills with a leaked background: {last:?}"
+        );
     }
 
     #[test]
@@ -1072,6 +1141,46 @@ mod tests {
         assert_eq!(access.flushes.get(), 1, "write should flush immediately");
         sink.write(Record::err("two"));
         assert_eq!(access.flushes.get(), 2, "each write should flush, not just the last");
+    }
+
+    #[test]
+    fn the_pane_emits_a_raw_record_verbatim() {
+        // A partial write must not gain a newline, and must not be wrapped
+        // in the err channel's colour -- a progress bar owns its own line.
+        let access = engine();
+        let pane = active_pane(&access);
+        let sink = PaneSink { access: access.clone(), pane };
+        sink.write(crate::sink::Record::raw_log("50%\r"));
+        let out = output_text(&access.with(|e| e.drain_events()));
+        assert!(out.contains("50%\r"), "raw text altered: {out:?}");
+        assert!(!out.contains("50%\r\n"), "newline appended: {out:?}");
+
+        let access2 = engine();
+        let pane2 = active_pane(&access2);
+        let sink2 = PaneSink { access: access2.clone(), pane: pane2 };
+        sink2.write(crate::sink::Record::raw_err("oops"));
+        let out2 = output_text(&access2.with(|e| e.drain_events()));
+        assert!(!out2.contains("\x1b[31m"), "raw err was colour-wrapped: {out2:?}");
+    }
+
+    #[test]
+    fn every_pane_record_is_reset_prefixed_so_sgr_cannot_bleed() {
+        // The allowlist permits SGR only because styling is bounded. It
+        // cannot be bounded by cleanup at the command boundary: `Abortable`
+        // returns Ready(Err(Aborted)) without resuming a suspended body
+        // (abort.rs:58), so a command that writes conceal (`\x1b[8m`) and
+        // then hangs would leave later output invisible forever. Prefixing
+        // every record with a reset makes that unreachable.
+        let access = engine();
+        let pane = active_pane(&access);
+        let sink = PaneSink { access: access.clone(), pane };
+        sink.write(crate::sink::Record::raw_log("\x1b[8mhidden"));
+        sink.write(crate::sink::Record::log("after"));
+        let out = output_text(&access.with(|e| e.drain_events()));
+        // The innocent second write starts from a clean slate.
+        let after = out.find("after").expect("second write painted");
+        let reset_before = out[..after].rfind("\x1b[0m").expect("reset precedes it");
+        assert!(reset_before < after, "no reset before the following record");
     }
 
     /// Writes to both diagnostic channels so the wiring from `execute_line`

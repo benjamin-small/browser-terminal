@@ -349,9 +349,11 @@ just test-e2e   # Playwright smoke suite (type-checks first)
 just pack       # npm pack dry-run
 ```
 
-Current wasm size: ~466 KB raw, ~203 KB gzipped (up from ~456 KB / ~200 KB
-pre-progressive-rendering: stage 5a's `StreamRenderer`, the pane throttle,
-and the host's probe-deadline machinery add a small, fixed cost). `just
-size` runs a `twiggy` audit; see the design spec for the measured breakdown
-and why the original 350 KB target is not reachable without cutting
-features.
+Current wasm size: ~477 KB raw, ~208 KB gzipped (up from ~466 KB / ~203 KB
+pre-output-buffering: stage 5b's `OutputBuffer`, the allowlist writer
+sanitizer, the per-channel writer objects on `ctx`, and the run-scoped
+buffer registry that flushes them on error and Ctrl-C add ~11 KB; stage 5a's
+`StreamRenderer`, the pane throttle, and the host's probe-deadline machinery
+had added a similar fixed cost before that). `just size` runs a `twiggy`
+audit; see the design spec for the measured breakdown and why the original
+350 KB target is not reachable without cutting features.

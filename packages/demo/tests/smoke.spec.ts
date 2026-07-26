@@ -9,7 +9,10 @@ import type { RunError } from 'browser-terminal';
 // `window.bt` is typed by the demo itself (src/main.ts declares the global
 // from the library's own `BrowserTerminal`), so this suite checks against the
 // real public API — a signature change breaks the typecheck instead of
-// silently leaving these tests describing an API that no longer exists.
+// silently leaving these tests describing an API that no longer exists. That
+// covers the writer API these tests drive too: `ctx.log`/`ctx.err` are
+// `ChannelWriter` in the library's public types, so the mirror this file used
+// to declare would only have been one more thing able to drift.
 
 function shadow(selector: string) {
   return `document.querySelector('[data-browser-terminal]').shadowRoot.querySelector('${selector}')`;
@@ -461,4 +464,67 @@ test('watch streams DOM events and head terminates it', async ({ page }) => {
   await page.waitForTimeout(150);
   await page.mouse.click(10, 10);
   expect(await again).toEqual({ type: 'click', target: expect.any(String) });
+});
+
+test('a progress bar redraws in place rather than scrolling', async ({ page }) => {
+  await page.goto('/');
+  await waitForTerminal(page);
+
+  // Must be typed into the pane: `run()` collects through CollectingSink and
+  // never paints, and the whole claim here is about what the terminal shows.
+  const ta = page.locator('[data-browser-terminal]').locator('.xterm-helper-textarea');
+  await ta.click();
+  await ta.pressSequentially('progress 5');
+  await ta.press('Enter');
+
+  // Wait for completion (5 steps x 80ms plus slack).
+  await page.waitForFunction(
+    () => {
+      const root = document.querySelector('[data-browser-terminal]')!.shadowRoot!;
+      return (root.querySelector('.xterm-rows')?.textContent ?? '').includes('done in 5 steps');
+    },
+    null,
+    { timeout: 5000 },
+  );
+
+  const text = await page.evaluate(() => {
+    const root = document.querySelector('[data-browser-terminal]')!.shadowRoot!;
+    return root.querySelector('.xterm-rows')?.textContent ?? '';
+  });
+
+  // Five writes, one visible bar: `\r` returned to column 0 each time, so
+  // only the final 100% state survives. Without in-place rewrite there
+  // would be one line per step.
+  expect(text).toContain('100%');
+  const barLines = (text.match(/100%/g) ?? []).length;
+  expect(barLines).toBe(1);
+  // The intermediate percentages must NOT still be on screen.
+  expect(text).not.toContain('20%');
+});
+
+test('block mode holds delimiter-bearing writes until flush', async ({ page }) => {
+  await page.goto('/');
+  await waitForTerminal(page);
+
+  const log = await page.evaluate(async () => {
+    window.bt.registerCommand({ name: 'batched', summary: 'block mode' }, async (_a, _i, ctx) => {
+      ctx.log.mode('block');
+      // Every write ends in the line delimiter, which is what makes this a
+      // test of *block* mode rather than of buffering in general: under the
+      // DEFAULT line mode each of these flushes on its own newline and
+      // arrives as its own entry. Delimiter-free writes would be held by
+      // line mode too, so they could not tell the two apart.
+      ctx.log.write('one\n');
+      ctx.log.write('two\n');
+      ctx.log.write('three\n');
+      ctx.log.flush();
+      return 'done';
+    });
+    const r = await window.bt.run('batched');
+    return r.log;
+  });
+
+  // Exactly one entry carrying all three lines. Line mode would give three
+  // entries; byte mode would also give three. Only block coalesces.
+  expect(log).toEqual(['one\ntwo\nthree\n']);
 });

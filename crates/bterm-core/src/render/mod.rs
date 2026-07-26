@@ -131,6 +131,87 @@ pub fn diagnostic_text(s: &str) -> String {
     cell_text(s)
 }
 
+/// Display text for a command's *raw* write (`ctx.log.write`), which is
+/// allowed a narrow set of control sequences that `diagnostic_text` strips.
+///
+/// The rule that makes this safe: **no permitted sequence moves the cursor
+/// upward or to an absolute position.** `\n` *is* permitted, so a raw write
+/// is not confined to one line — a command can open new lines below itself.
+/// What it cannot do is climb back: nothing here moves up, positions the
+/// cursor absolutely, clears the screen, reads the cursor back (that injects
+/// into the input stream), or touches OSC. So a hostile command can only
+/// garble lines it opened itself, which it can already do with plain text;
+/// output written before it — the prompt, an earlier command — is out of
+/// reach.
+///
+/// SGR is permitted because it cannot move anything. Its containment comes
+/// from `PaneSink` reset-prefixing *every* record (see `engine.rs`), not from
+/// any reset at the command boundary — there is no such reset, and there
+/// could not usefully be one: `Abortable::poll` returns without resuming a
+/// suspended command, so boundary cleanup never runs on Ctrl-C, which is
+/// exactly the case a command that sets a colour and then hangs would
+/// exploit. Per-record reset holds even then.
+pub fn writer_text(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            match chars.peek() {
+                Some('[') => {
+                    chars.next();
+                    let mut params = String::new();
+                    let mut final_byte = None;
+                    for c2 in chars.by_ref() {
+                        if ('\x40'..='\x7e').contains(&c2) {
+                            final_byte = Some(c2);
+                            break;
+                        }
+                        params.push(c2);
+                    }
+                    let Some(fin) = final_byte else { continue };
+                    // `C`/`D` cannot leave the line, `K` erases within it,
+                    // and `m` is not spatial at all. The digit guard rejects
+                    // private modes like `\x1b[?25l`.
+                    let keep = matches!(fin, 'C' | 'D' | 'K' | 'm')
+                        && params.chars().all(|p| p.is_ascii_digit() || p == ';');
+                    if keep {
+                        out.push('\x1b');
+                        out.push('[');
+                        out.push_str(&params);
+                        out.push(fin);
+                    }
+                }
+                // String-type escapes (OSC/DCS/APC/PM/SOS): swallow the whole
+                // body, as `strip_escapes` does — a partial body left behind
+                // is visible litter.
+                Some(']') | Some('P') | Some('_') | Some('^') | Some('X') => {
+                    chars.next();
+                    while let Some(c2) = chars.next() {
+                        if c2 == '\x07' {
+                            break;
+                        }
+                        if c2 == '\x1b' {
+                            chars.next(); // the `\` of ST
+                            break;
+                        }
+                    }
+                }
+                Some(_) => {
+                    chars.next();
+                }
+                None => {}
+            }
+            continue;
+        }
+        // `\r` and `\b` rewrite within the line; `\n` and `\t` are ordinary
+        // text a writer may emit. Every other C0 control is dropped.
+        if matches!(c, '\r' | '\n' | '\t' | '\x08') || !c.is_control() {
+            out.push(c);
+        }
+    }
+    out
+}
+
 fn format_float(f: f64) -> String {
     if f.fract() == 0.0 && f.abs() < 1e15 {
         format!("{f:.1}")
@@ -490,5 +571,63 @@ mod tests {
         // or smuggle colour codes into our styling.
         let hostile = "\x1b[2J\x1b[Hcleared\nsecond line";
         assert_eq!(diagnostic_text(hostile), "cleared second line");
+    }
+
+    #[test]
+    fn writer_text_keeps_only_current_line_sequences() {
+        // Allowed: everything here can only affect the line being written.
+        assert_eq!(writer_text("50%\r"), "50%\r");
+        assert_eq!(writer_text("ab\x08"), "ab\x08");
+        assert_eq!(writer_text("\x1b[5Cx"), "\x1b[5Cx");
+        assert_eq!(writer_text("\x1b[3Dx"), "\x1b[3Dx");
+        assert_eq!(writer_text("a\x1b[K"), "a\x1b[K");
+        assert_eq!(writer_text("a\x1b[2K"), "a\x1b[2K");
+        assert_eq!(writer_text("\x1b[31mred\x1b[0m"), "\x1b[31mred\x1b[0m");
+    }
+
+    #[test]
+    fn writer_text_strips_everything_that_escapes_the_line() {
+        // Cursor up/down would overwrite the prompt or another command's
+        // output; absolute positioning goes anywhere on screen.
+        assert_eq!(writer_text("\x1b[Aup"), "up");
+        assert_eq!(writer_text("\x1b[2Bdown"), "down");
+        assert_eq!(writer_text("\x1b[3;4Hxy"), "xy");
+        assert_eq!(writer_text("\x1b[10fxy"), "xy");
+        // Clearing the screen, and the cursor report -- which injects text
+        // into the INPUT stream, not the output.
+        assert_eq!(writer_text("\x1b[2Jgone"), "gone");
+        assert_eq!(writer_text("\x1b[6nprobe"), "probe");
+        // Save/restore escapes the line boundary when paired with a move.
+        assert_eq!(writer_text("\x1b[sx\x1b[u"), "x");
+        // Private-mode sequences (hide cursor) are not on the allowlist.
+        assert_eq!(writer_text("\x1b[?25lhidden"), "hidden");
+        // String-type escapes: title-setting, clipboard, Sixel payloads.
+        assert_eq!(writer_text("\x1b]0;title\x07after"), "after");
+        assert_eq!(writer_text("\x1bPq#0;2;0;0#0~~@@\x1b\\tail"), "tail");
+        assert_eq!(writer_text("\x1b_apc\x1b\\z"), "z");
+        // A lone ESC, and a two-char escape.
+        assert_eq!(writer_text("a\x1b"), "a");
+        assert_eq!(writer_text("a\x1b7b"), "ab");
+    }
+
+    #[test]
+    fn writer_text_keeps_newlines_but_drops_other_controls() {
+        // A writer may legitimately emit newlines (line mode appends one);
+        // other C0 controls are not on the allowlist.
+        assert_eq!(writer_text("a\nb"), "a\nb");
+        assert_eq!(writer_text("a\x07b"), "ab");
+        assert_eq!(writer_text("a\x00b"), "ab");
+    }
+
+    #[test]
+    fn writer_text_handles_unterminated_and_malformed_escapes() {
+        // An unterminated CSI consumes to the end rather than emitting a
+        // partial sequence that a terminal might complete with later text.
+        assert_eq!(writer_text("a\x1b[31"), "a");
+        assert_eq!(writer_text("a\x1b["), "a");
+        // An unterminated string escape swallows its body (no litter).
+        assert_eq!(writer_text("a\x1b]0;never-ends"), "a");
+        // An SGR with a huge/odd param list is still just styling.
+        assert_eq!(writer_text("\x1b[1;38;5;196mx\x1b[0m"), "\x1b[1;38;5;196mx\x1b[0m");
     }
 }
