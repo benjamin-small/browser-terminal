@@ -73,6 +73,13 @@ jobs:
       - name: Build wasm + library
         run: just build
 
+      # `vite build` below transpiles without checking, so this step is the
+      # only thing that type-checks the demo and its Playwright spec. Runs the
+      # npm script rather than `just typecheck` because `just build` above has
+      # already produced the dist/*.d.ts it resolves against.
+      - name: Type-check the demo
+        run: npm --prefix packages/demo run typecheck
+
       # GitHub Pages serves from /<repo>/, so every demo needs a matching
       # base or its asset and .wasm URLs resolve to the domain root.
       - name: Build demos
