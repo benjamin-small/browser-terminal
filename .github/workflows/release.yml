@@ -58,9 +58,10 @@ jobs:
         env:
           BINARYEN_VERSION: '131'
         run: |
+          binaryen_root="$RUNNER_TEMP/binaryen-version_${BINARYEN_VERSION}"
           curl -sSfL "https://github.com/WebAssembly/binaryen/releases/download/version_${BINARYEN_VERSION}/binaryen-version_${BINARYEN_VERSION}-x86_64-linux.tar.gz" \
-            | tar xz
-          echo "$PWD/binaryen-version_${BINARYEN_VERSION}/bin" >> "$GITHUB_PATH"
+            | tar xz -C "$RUNNER_TEMP"
+          echo "$binaryen_root/bin" >> "$GITHUB_PATH"
       - name: Check binaryen is recent enough
         run: |
           wasm-opt --version
@@ -77,6 +78,16 @@ jobs:
           # Points npm at the public registry and wires NODE_AUTH_TOKEN into
           # the generated .npmrc, so no token is ever written by hand.
           registry-url: https://registry.npmjs.org
+
+      - name: Require npm token for publishing
+        if: ${{ github.event_name == 'push' || !inputs.dry_run }}
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ -z "$NODE_AUTH_TOKEN" ]; then
+            echo "::error::NPM_TOKEN secret is not set; add a granular npm access token with publish rights"
+            exit 1
+          fi
 
       # A tag that disagrees with the manifest publishes a version nobody can
       # find from the source. Cheapest possible check, done before any build.
@@ -150,10 +161,6 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
-          if [ -z "$NODE_AUTH_TOKEN" ]; then
-            echo "::error::NPM_TOKEN secret is not set; add a granular npm access token with publish rights"
-            exit 1
-          fi
           # Publishing the exact tarball that was just verified, rather than
           # re-packing from the directory, so what ships is byte-for-byte what
           # booted in the browser a step ago.
