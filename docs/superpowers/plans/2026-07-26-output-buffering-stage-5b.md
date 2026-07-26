@@ -364,12 +364,23 @@ In `crates/bterm-core/src/engine.rs`, `PaneSink::write` becomes:
         // partial write must stay partial) and no colour wrapper (the
         // command may be emitting its own SGR, and re-wrapping per write
         // would fight it).
+        //
+        // But it is PREFIXED with a reset, unconditionally. The allowlist
+        // permits SGR on the argument that a command's styling is bounded by
+        // a reset at the command boundary -- and that argument is false on
+        // the abort path: `Abortable::poll` returns `Ready(Err(Aborted))`
+        // *before* polling the inner future (abort.rs:58), so a suspended
+        // command body never resumes and any trailing reset never runs. A
+        // command that writes `\x1b[8m` (conceal) and then hangs would leave
+        // every later command's output invisible. Resetting per record makes
+        // cross-command SGR bleed structurally impossible instead of
+        // dependent on cleanup that cancellation can skip.
         let line = if record.is_raw() {
-            clean.to_string()
+            format!("{RESET}{clean}")
         } else {
             match record.channel() {
-                crate::sink::Channel::Log => format!("{clean}\n"),
-                crate::sink::Channel::Err => format!("{RED}{clean}{RESET}\n"),
+                crate::sink::Channel::Log => format!("{RESET}{clean}\n"),
+                crate::sink::Channel::Err => format!("{RESET}{RED}{clean}{RESET}\n"),
             }
         };
         self.access.with(|e| e.emit_output(self.pane, &line));
@@ -407,9 +418,36 @@ In `crates/bterm-cli/src/main.rs`, `CliSink::write`:
 
 `CollectingSink` needs no change — it stores whole `Record`s, so `run()`'s `log`/`err` arrays keep working (a raw write appears as its own entry).
 
+- [ ] **Step 3b: Test the reset-prefix (the abort-safety property)**
+
+This is the security property an independent review found missing, so it gets
+a permanent test. Add to the engine test module:
+
+```rust
+    #[test]
+    fn every_pane_record_is_reset_prefixed_so_sgr_cannot_bleed() {
+        // The allowlist permits SGR only because styling is bounded. It
+        // cannot be bounded by cleanup at the command boundary: `Abortable`
+        // returns Ready(Err(Aborted)) without resuming a suspended body
+        // (abort.rs:58), so a command that writes conceal (`\x1b[8m`) and
+        // then hangs would leave later output invisible forever. Prefixing
+        // every record with a reset makes that unreachable.
+        let access = engine();
+        let pane = active_pane(&access);
+        let sink = PaneSink { access: access.clone(), pane };
+        sink.write(crate::sink::Record::raw_log("\x1b[8mhidden"));
+        sink.write(crate::sink::Record::log("after"));
+        let out = output_text(&access.with(|e| e.drain_events()));
+        // The innocent second write starts from a clean slate.
+        let after = out.find("after").expect("second write painted");
+        let reset_before = out[..after].rfind("\x1b[0m").expect("reset precedes it");
+        assert!(reset_before < after, "no reset before the following record");
+    }
+```
+
 - [ ] **Step 4: Run, verify pass**
 
-Run: `cargo test --workspace` → 213 (212 + 1). Existing sink/pane tests must still pass.
+Run: `cargo test --workspace` → 214 (212 + 2). Existing sink/pane tests must still pass.
 Run: `cargo clippy --workspace --all-targets` → clean.
 
 - [ ] **Step 5: Commit**
@@ -744,6 +782,12 @@ Per channel you need an `Rc<RefCell<OutputBuffer>>` shared by the four closures.
             }
             ctx.sink.write(bterm_core::sink::Record::raw_log("\x1b[0m"));
 ```
+
+**This boundary reset is belt-and-braces, not the guarantee.** It does not run
+when a command is aborted (`Abortable::poll` returns without resuming a
+suspended body — abort.rs:58), which is exactly the case a hostile or hung
+command exploits. The real protection is `PaneSink` prefixing every record
+with a reset (Task 3); this one just tidies the common path.
 
 Keep every closure alive until after these flushes (extend the existing `drop(...)` calls to the end).
 
