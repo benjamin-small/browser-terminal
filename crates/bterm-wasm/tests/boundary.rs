@@ -37,6 +37,117 @@ async fn run_line(core: &BtermCore, line: &str) -> Result<JsValue, JsValue> {
     JsFuture::from(core.run(0, line.to_string())).await
 }
 
+/// The `log`/`err` entries carried by a `RunResult` or a `RunError`.
+fn entries(v: &JsValue, key: &str) -> Vec<String> {
+    Reflect::get(v, &key.into())
+        .ok()
+        .and_then(|a| a.dyn_into::<Array>().ok())
+        .map(|a| a.iter().filter_map(|e| e.as_string()).collect())
+        .unwrap_or_default()
+}
+
+fn contains(entries: &[String], needle: &str) -> bool {
+    entries.iter().any(|e| e.contains(needle))
+}
+
+/// Hand control back to the event loop for one macrotask.
+async fn tick() {
+    let p = js_sys::Promise::new(&mut |resolve, _| {
+        let f = Function::new_with_args("r", "setTimeout(r, 0);");
+        let _ = f.call1(&JsValue::NULL, &resolve);
+    });
+    let _ = JsFuture::from(p).await;
+}
+
+/// Register a TS command whose body is `body`.
+fn command(core: &BtermCore, name: &str, body: &str) {
+    let sig = js_sys::JSON::parse(&format!(r#"{{"name":"{name}"}}"#)).expect("sig");
+    core.register_command(sig, Function::new_with_args("args, input, ctx", body))
+        .expect("registered");
+}
+
+#[wasm_bindgen_test]
+async fn a_partial_write_survives_a_throw_in_the_default_line_mode() {
+    // The headline case. `line` is the DEFAULT mode, so a write with no
+    // delimiter in it is still sitting in the buffer when the command
+    // throws -- and the throw returns out of `JsCommand::run` well before
+    // the drain at the bottom of its body. `RunError` promises to carry
+    // whatever the pipeline wrote before it failed; that has to include the
+    // text that explains what it was doing when it died, which in practice
+    // is exactly the partial line.
+    let core = make_core();
+    command(
+        &core,
+        "halfway",
+        "ctx.log.write('starting fetch'); ctx.err.write('warning: slow'); throw new Error('boom');",
+    );
+    let err = run_line(&core, "halfway").await.expect_err("rejects");
+    let log = entries(&err, "log");
+    let errs = entries(&err, "err");
+    assert!(contains(&log, "starting fetch"), "partial log lost on throw: {log:?}");
+    assert!(contains(&errs, "warning: slow"), "partial err lost on throw: {errs:?}");
+    core.dispose();
+}
+
+#[wasm_bindgen_test]
+async fn a_block_mode_write_survives_a_throw_without_flush() {
+    // Block mode holds everything until `flush()`, so even a complete line
+    // is still buffered when the command throws.
+    let core = make_core();
+    command(
+        &core,
+        "held",
+        r#"ctx.log.mode('block'); ctx.log.write('one\ntwo\n'); throw new Error('boom');"#,
+    );
+    let err = run_line(&core, "held").await.expect_err("rejects");
+    let log = entries(&err, "log");
+    assert!(contains(&log, "one"), "block-mode buffer lost on throw: {log:?}");
+    assert!(contains(&log, "two"), "block-mode buffer lost on throw: {log:?}");
+    core.dispose();
+}
+
+#[wasm_bindgen_test]
+async fn a_block_mode_write_that_never_flushes_appears_once_on_success() {
+    // Two drains now exist for a command that returns normally -- the one
+    // at the bottom of `JsCommand::run` and the run-scoped one -- so this
+    // pins that the second finds an empty buffer rather than emitting the
+    // text twice.
+    let core = make_core();
+    command(&core, "held", "ctx.log.mode('block'); ctx.log.write('once'); return 1;");
+    let out = run_line(&core, "held").await.expect("resolves");
+    let log = entries(&out, "log");
+    let hits = log.iter().filter(|e| e.contains("once")).count();
+    assert_eq!(hits, 1, "buffered text emitted {hits} times: {log:?}");
+    core.dispose();
+}
+
+#[wasm_bindgen_test]
+async fn a_partial_write_survives_ctrl_c() {
+    // Ctrl-C is the case no amount of care inside the command body can
+    // cover: `Abortable::poll` returns `Ready(Err(Aborted))` *before*
+    // polling the inner future, so a suspended body never runs again. The
+    // flush has to come from the abort path itself.
+    //
+    // The `tick()` is load-bearing, not incidental: `run()` registers its
+    // task inside the spawned future, which `future_to_promise` does not
+    // poll until a microtask later, so a Ctrl-C fed in the same tick finds
+    // an empty task registry and aborts nothing. See the longer note in
+    // `abort_signal_fires_on_ctrl_c`.
+    let core = make_core();
+    command(
+        &core,
+        "hangs",
+        "ctx.log.write('partial before ctrl-c'); return new Promise((res, rej) => { ctx.signal.addEventListener('abort', () => rej(new Error('interrupted'))); });",
+    );
+    let pending = core.run(0, "hangs".to_string());
+    tick().await;
+    core.feed(0, "\x03");
+    let err = JsFuture::from(pending).await.expect_err("aborted run rejects");
+    let log = entries(&err, "log");
+    assert!(contains(&log, "partial before ctrl-c"), "partial log lost on Ctrl-C: {log:?}");
+    core.dispose();
+}
+
 #[wasm_bindgen_test]
 async fn run_resolves_scalar_and_plain_objects() {
     let core = make_core();
@@ -347,6 +458,15 @@ async fn abort_signal_fires_on_ctrl_c() {
     let _ = Reflect::set(&js_sys::global(), &"__aborted".into(), &JsValue::FALSE);
 
     let pending = core.run(0, "hang".to_string());
+    // `run()` registers its task *inside* the spawned future, and
+    // `future_to_promise` does not poll that until a microtask later. A
+    // Ctrl-C fed in the same tick therefore finds an empty task registry,
+    // aborts nothing, and leaves this test awaiting a promise that never
+    // settles -- at which point Node's event loop empties and the runner
+    // exits silently, taking every not-yet-run test in this file with it.
+    // (The same-tick race is real in the product too, not an artifact of
+    // the test; it is worth fixing at the source.)
+    tick().await;
     core.feed(0, "\x03"); // Ctrl-C aborts pane 0's runs
     let err = JsFuture::from(pending).await.expect_err("aborted run rejects");
     let msg = Reflect::get(&err, &"message".into())
