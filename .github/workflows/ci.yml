@@ -1,0 +1,81 @@
+name: CI
+
+# pages.yml is a deploy pipeline: it only fires on a push to main, so until
+# this workflow existed nothing checked a branch or a pull request — the Rust
+# suite and the type-check both ran for the first time after the merge. This
+# is the one that runs before it.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# A newer push to the same ref makes the in-flight run irrelevant — unlike
+# the deploy workflow, nothing here is half-published if it's cancelled.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # Its own job rather than a step in `typecheck`: the native suite needs
+  # nothing but a Rust toolchain, so making it queue behind the wasm target,
+  # wasm-bindgen, binaryen, and npm install would delay the fastest and
+  # broadest signal in the repo for no reason. In parallel, a red Rust suite
+  # is also distinguishable from a red type-check at a glance.
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test --workspace
+
+  typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      # Rust is here because a type-check needs the generated bindings: the
+      # library's index.ts imports ./wasm/bterm_wasm.js, which wasm-bindgen
+      # emits and .gitignore keeps out of the tree. Same version-from-
+      # Cargo.toml read as pages.yml — the CLI must match the crate exactly
+      # or it refuses to process the module.
+      - id: wb
+        run: |
+          v=$(grep -m1 'wasm-bindgen = "=' crates/bterm-wasm/Cargo.toml | sed 's/.*"=\(.*\)".*/\1/')
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "wasm-bindgen pinned at $v"
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-bindgen-cli@${{ steps.wb.outputs.version }},just
+
+      # `just build` runs wasm-opt, so binaryen has to exist. This job never
+      # ships or instantiates the binary it produces — only the .d.ts beside
+      # it matter — so it skips the "is binaryen new enough to not mangle
+      # externref" assertion that pages.yml makes before publishing.
+      - name: Install binaryen
+        env:
+          BINARYEN_VERSION: '131'
+        run: |
+          curl -sSfL "https://github.com/WebAssembly/binaryen/releases/download/version_${BINARYEN_VERSION}/binaryen-version_${BINARYEN_VERSION}-x86_64-linux.tar.gz" \
+            | tar xz
+          echo "$PWD/binaryen-version_${BINARYEN_VERSION}/bin" >> "$GITHUB_PATH"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+
+      # The same entry point developers run. It builds the library first
+      # (which type-checks it, via `tsc -p` with declaration output) and then
+      # checks packages/demo against the emitted dist/index.d.ts — including
+      # tests/smoke.spec.ts, whose `vite build` never looked at types.
+      - run: just typecheck

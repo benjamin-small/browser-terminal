@@ -1,5 +1,6 @@
 # just build    — wasm + TypeScript package
 # just test     — native Rust tests (fast, the bulk)
+# just typecheck— tsc over the demo (its `vite build` never checks types)
 # just test-wasm— wasm-bindgen boundary tests under Node
 # just test-e2e — Playwright smoke suite against the demo
 # just demo     — build everything and run the Vite demo
@@ -28,7 +29,16 @@ test:
 test-wasm:
     cargo test -p bterm-wasm --target wasm32-unknown-unknown
 
-test-e2e: build
+# The demo's `vite build` transpiles without checking, so this is the only
+# thing that type-checks packages/demo — including the Playwright spec, which
+# types `window.bt` from the library's real exports. Depends on `build`: the
+# demo resolves `browser-terminal` to its emitted dist/index.d.ts.
+typecheck: build
+    npm --prefix packages/demo run typecheck
+
+# Type-check first: no point running the smoke suite against a spec that
+# describes an API the library no longer has.
+test-e2e: typecheck
     cd packages/demo && npx playwright test
 
 demo: build

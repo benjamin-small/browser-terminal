@@ -4,6 +4,18 @@ import { codePanel, helpPanel } from './code';
 // the page is the code that actually ran.
 import selfSource from './main.ts?raw';
 
+declare global {
+  interface Window {
+    /**
+     * The live instance, for programmatic runs from the console — and the
+     * handle the Playwright suite drives. Declared here, next to the
+     * assignment that creates it, so the tests type it from the library's
+     * real API instead of a mirror that can drift.
+     */
+    bt: BrowserTerminal;
+  }
+}
+
 /**
  * The single-file build inlines the wasm and hands it over on `globalThis`
  * before this bundle runs, so nothing is ever fetched. In the normal build
@@ -158,7 +170,7 @@ async function main(): Promise<void> {
   );
 
   // Expose for programmatic-run experiments in the console.
-  (window as unknown as { bt: BrowserTerminal }).bt = bt;
+  window.bt = bt;
 }
 
 void main();

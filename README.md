@@ -344,7 +344,8 @@ just test       # native Rust tests (fast, the bulk)
 just test-wasm  # wasm-bindgen boundary tests under Node
 just build      # wasm + TS package build
 just demo       # run the Vite demo
-just test-e2e   # Playwright smoke suite
+just typecheck  # tsc over the demo (its `vite build` never checks types)
+just test-e2e   # Playwright smoke suite (type-checks first)
 just pack       # npm pack dry-run
 ```
 

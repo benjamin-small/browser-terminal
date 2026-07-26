@@ -1,0 +1,23 @@
+{
+  // `vite build` transpiles without checking, so nothing here is type-checked
+  // unless something runs `tsc --noEmit` — that's what `npm run typecheck`
+  // (and `just typecheck`) is for. `tests` is in scope deliberately: the spec
+  // types `window.bt` from the library's real exports, so an API change that
+  // the tests no longer match is a compile error rather than a silent drift.
+  //
+  // `browser-terminal` resolves through the workspace symlink to its
+  // published `dist/index.d.ts`, so the library must be built first —
+  // `just typecheck` depends on `just build` for that reason.
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    // For Vite's `?raw` import in src/main.ts.
+    "types": ["vite/client"],
+    "strict": true,
+    "skipLibCheck": true,
+    "noEmit": true
+  },
+  "include": ["src", "tests", "vite.config.ts", "playwright.config.ts"]
+}

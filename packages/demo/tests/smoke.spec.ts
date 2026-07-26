@@ -4,23 +4,12 @@
  * prefix-key splits, session pills, and dispose.
  */
 import { expect, test } from '@playwright/test';
+import type { RunError } from 'browser-terminal';
 
-declare global {
-  interface Window {
-    bt: {
-      run(line: string): Promise<{ value: unknown; log: string[]; err: string[] }>;
-      dispose(): void;
-      registerCommand(
-        spec: { name: string; summary?: string },
-        fn: (
-          args: unknown,
-          input: unknown,
-          ctx: { log(s: string): void; err(s: string): void; emit(s: string): void },
-        ) => unknown,
-      ): void;
-    };
-  }
-}
+// `window.bt` is typed by the demo itself (src/main.ts declares the global
+// from the library's own `BrowserTerminal`), so this suite checks against the
+// real public API — a signature change breaks the typecheck instead of
+// silently leaving these tests describing an API that no longer exists.
 
 function shadow(selector: string) {
   return `document.querySelector('[data-browser-terminal]').shadowRoot.querySelector('${selector}')`;
@@ -325,7 +314,17 @@ test('a failed run still hands back the diagnostics it wrote', async ({ page }) 
 
   // A failure is exactly when the log leading up to it matters most, so
   // rejecting with only the message would throw away the useful part.
-  const result = await page.evaluate(() => {
+  //
+  // The explicit type argument keeps the two `then` branches from inferring
+  // a union that the assertions below can't read through — the diagnostic
+  // fields only exist on the rejection path.
+  const result = await page.evaluate<{
+    resolved: boolean;
+    message?: string;
+    isError?: boolean;
+    log?: string[];
+    err?: string[];
+  }>(() => {
     window.bt.registerCommand({ name: 'loud-fail', summary: 'probe' }, (_a, _i, ctx) => {
       ctx.log('step one ok');
       ctx.err('about to fail');
@@ -333,7 +332,7 @@ test('a failed run still hands back the diagnostics it wrote', async ({ page }) 
     });
     return window.bt.run('loud-fail').then(
       () => ({ resolved: true }),
-      (e: Error & { log?: string[]; err?: string[] }) => ({
+      (e: RunError) => ({
         resolved: false,
         message: e.message,
         isError: e instanceof Error,
