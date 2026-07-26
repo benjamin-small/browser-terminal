@@ -27,3 +27,6 @@ packages/demo/dist-standalone/
 
 # Assembled Pages site (built by CI)
 _site/
+
+# Copied from the repo root at package build time so npm ships it.
+packages/browser-terminal/LICENSE

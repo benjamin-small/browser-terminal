@@ -42,7 +42,7 @@
     "dist"
   ],
   "scripts": {
-    "build": "node scripts/gen-xterm-css.mjs && tsc -p tsconfig.json && rm -rf dist/wasm && cp -R src/wasm dist/wasm"
+    "build": "node scripts/gen-xterm-css.mjs && tsc -p tsconfig.json && rm -rf dist/wasm && cp -R src/wasm dist/wasm && cp ../../LICENSE ./LICENSE"
   },
   "dependencies": {
     "@xterm/addon-fit": "^0.11.0",
