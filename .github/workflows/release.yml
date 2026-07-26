@@ -84,8 +84,11 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
-          if [ -z "$NODE_AUTH_TOKEN" ]; then
-            echo "::error::NPM_TOKEN secret is not set; add a granular npm access token with publish rights"
+          # A whitespace-only secret can pass a simple `-z` check but npm
+          # still treats it as unauthenticated. Validate the token shape too,
+          # without ever printing the credential.
+          if [[ ! "$NODE_AUTH_TOKEN" =~ ^npm_[[:alnum:]_-]+$ ]]; then
+            echo "::error::NPM_TOKEN is missing or malformed; add a granular npm access token with publish rights"
             exit 1
           fi
 
