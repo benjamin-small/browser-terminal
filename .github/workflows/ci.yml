@@ -72,6 +72,31 @@ jobs:
           node-version: 20
           cache: npm
 
+      # The boundary suite is the only thing that exercises Value <-> JS
+      # conversion, JsCommand invocation, `run()`'s resolved shape and Ctrl-C
+      # through an AbortSignal — none of it reachable without a JS engine, so
+      # `cargo test --workspace` cannot stand in for it. pages.yml runs it too,
+      # but that fires only on push to main: without this step the suite still
+      # would not gate a pull request, which is exactly how ten of its tests
+      # went stale against two deliberate API changes while CI stayed green.
+      #
+      # It rides in the `typecheck` job rather than getting its own because
+      # every prerequisite is already provisioned here — the wasm32 target,
+      # the pinned wasm-bindgen-cli that ships the runner, and Node. A
+      # separate job would re-install all three, several minutes of setup, to
+      # run a suite that finishes in under a second. It sits ahead of `npm ci`
+      # for the same reason: nothing it needs comes from npm.
+      - name: Boundary tests (wasm32, under Node)
+        run: |
+          # .cargo/config.toml names the runner rather than invoking it, so a
+          # missing binary surfaces as a confusing "no such command" against
+          # the target. Say what is actually absent instead.
+          if ! command -v wasm-bindgen-test-runner >/dev/null; then
+            echo "::error::wasm-bindgen-test-runner not on PATH; the wasm-bindgen-cli install step did not provide it"
+            exit 1
+          fi
+          just test-wasm
+
       - run: npm ci
 
       # The same entry point developers run. It builds the library first
