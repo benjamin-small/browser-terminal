@@ -58,3 +58,11 @@ demo-standalone: build
 
 pack: build
     npm --prefix packages/browser-terminal pack --dry-run
+
+# Build and serve the demo against the *published* npm package — no Rust, no
+# repo source for the library. The one check that the workspace symlink can
+# never make. See docker/demo-npm/README.md.
+demo-npm version="0.1.0":
+    docker build -f docker/demo-npm/Dockerfile --build-arg BTERM_VERSION={{version}} -t bterm-demo-npm .
+    @echo "→ http://localhost:8080"
+    docker run --rm -p 8080:8080 bterm-demo-npm

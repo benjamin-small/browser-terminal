@@ -1,0 +1,24 @@
+# The build context is the repo root because the Dockerfile copies the demo
+# application from packages/demo. Everything the library is built *from* is
+# excluded, so a stray COPY cannot quietly reintroduce the source and
+# invalidate the whole point of the image.
+crates/
+packages/browser-terminal/
+target/
+
+**/node_modules/
+**/dist/
+**/dist-standalone/
+**/test-results/
+**/playwright-report/
+*.tgz
+
+.git/
+.github/
+.claude/
+docs/
+site/
+scripts/
+**/tests/
+**/*.md
+**/.DS_Store
