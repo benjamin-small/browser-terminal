@@ -138,6 +138,70 @@ impl Engine {
         &self.host_vars
     }
 
+    /// Inject a value visible only in `session`, shadowing any host value of
+    /// the same name.
+    ///
+    /// The id comes from the host's snapshot rather than being implied by
+    /// whichever session is active: an ambient target would land the value
+    /// somewhere else entirely if the user switched sessions between the
+    /// host's read and its write, and nothing would say so.
+    pub fn set_session_var(
+        &mut self,
+        session: crate::mux::SessionId,
+        name: &str,
+        value: Value,
+    ) -> Result<(), ShellError> {
+        if !crate::lex::is_valid_var_name(name) {
+            return Err(ShellError::runtime(format!(
+                "`{name}` is not a valid variable name: use letters, digits and `_`"
+            )));
+        }
+        let s = self
+            .mux
+            .sessions
+            .get_mut(&session)
+            .ok_or_else(|| ShellError::runtime(format!("no session with id {session}")))?;
+        s.vars.insert(name.to_string(), value);
+        Ok(())
+    }
+
+    /// Remove a session-scoped value, revealing any host value it shadowed.
+    /// `Ok(false)` means the session exists but the name was not set;
+    /// `Err` means the session does not exist. Keeping those distinct is
+    /// the point — a host must not read "session gone" as "already unset".
+    pub fn unset_session_var(
+        &mut self,
+        session: crate::mux::SessionId,
+        name: &str,
+    ) -> Result<bool, ShellError> {
+        let s = self
+            .mux
+            .sessions
+            .get_mut(&session)
+            .ok_or_else(|| ShellError::runtime(format!("no session with id {session}")))?;
+        Ok(s.vars.remove(name).is_some())
+    }
+
+    /// One session's own value, ignoring the host layer. Reads name a layer
+    /// and never merge, so this answers "did I set it here?" rather than
+    /// "what would `$name` be?" — the latter is what the shell's `vars` is for.
+    pub fn session_var(
+        &self,
+        session: crate::mux::SessionId,
+        name: &str,
+    ) -> Result<Option<&Value>, ShellError> {
+        Ok(self.session_vars(session)?.get(name))
+    }
+
+    /// One session's own layer, ignoring the host one.
+    pub fn session_vars(&self, session: crate::mux::SessionId) -> Result<&Scope, ShellError> {
+        self.mux
+            .sessions
+            .get(&session)
+            .map(|s| &s.vars)
+            .ok_or_else(|| ShellError::runtime(format!("no session with id {session}")))
+    }
+
     pub fn pane(&self, id: u32) -> Option<&PaneShell> {
         self.mux.pane(id)
     }
@@ -647,9 +711,9 @@ fn make_ctx<A: EngineAccess>(
 /// closure call — but nothing else decides what a submitted line can see.)
 ///
 /// Host underneath, session on top: a session's own value wins. That map is
-/// always empty today, so the `extend` is a no-op — but writing the
-/// precedence now means shell-level assignment lands later without anyone
-/// rereading this function.
+/// populated by `set_session_var`, so the `extend` is what makes a
+/// session-scoped value shadow a host one — and shell-level assignment will
+/// land later without anyone rereading this function.
 ///
 /// Returns an owned clone, so a pipeline holds the values as they were when
 /// its line started. A `set_host_var` mid-run is invisible to it and takes
@@ -1707,6 +1771,93 @@ mod tests {
             Some(&Value::Int(2)),
             "but the next line does"
         );
+    }
+
+    // --- session variables ---
+
+    #[test]
+    fn a_session_variable_resolves_in_that_session() {
+        let access = engine();
+        let sid = access.with(|e| e.mux.active_session);
+        access.with(|e| {
+            e.set_session_var(sid, "scratch", Value::Str("mine".into())).expect("valid");
+        });
+        assert_eq!(
+            run_line(&access, "echo $scratch").expect("resolves"),
+            Value::Str("mine".into())
+        );
+    }
+
+    #[test]
+    fn a_session_variable_shadows_the_host_one_without_destroying_it() {
+        let access = engine();
+        let sid = access.with(|e| e.mux.active_session);
+        access.with(|e| {
+            e.set_host_var("x", Value::Str("host".into())).expect("valid");
+            e.set_session_var(sid, "x", Value::Str("session".into())).expect("valid");
+        });
+        assert_eq!(
+            run_line(&access, "echo $x").expect("resolves"),
+            Value::Str("session".into())
+        );
+        // The host layer is untouched — shadowing hides a value, it does not
+        // overwrite one. Reading the layer directly is how a host tells the
+        // difference, since a read never merges.
+        access.with(|e| {
+            assert_eq!(e.host_var("x"), Some(&Value::Str("host".into())));
+            assert_eq!(
+                e.session_var(sid, "x").expect("live session"),
+                Some(&Value::Str("session".into()))
+            );
+        });
+    }
+
+    #[test]
+    fn unsetting_a_session_variable_reveals_the_host_one_again() {
+        let access = engine();
+        let sid = access.with(|e| e.mux.active_session);
+        access.with(|e| {
+            e.set_host_var("x", Value::Str("host".into())).expect("valid");
+            e.set_session_var(sid, "x", Value::Str("session".into())).expect("valid");
+            assert!(e.unset_session_var(sid, "x").expect("live session"));
+            assert!(!e.unset_session_var(sid, "x").expect("live session"), "already gone");
+        });
+        assert_eq!(
+            run_line(&access, "echo $x").expect("resolves"),
+            Value::Str("host".into())
+        );
+    }
+
+    #[test]
+    fn an_unknown_session_id_errors_rather_than_silently_doing_nothing() {
+        let access = engine();
+        access.with(|e| {
+            let missing: crate::mux::SessionId = 9999;
+            let err = e
+                .set_session_var(missing, "x", Value::Int(1))
+                .expect_err("no such session");
+            assert!(err.msg.contains("9999"), "the error should name the id: {}", err.msg);
+            assert!(e.unset_session_var(missing, "x").is_err());
+            assert!(e.session_var(missing, "x").is_err());
+            assert!(e.session_vars(missing).is_err());
+        });
+    }
+
+    #[test]
+    fn an_invalid_session_variable_name_is_rejected_by_the_lexer_rule() {
+        let access = engine();
+        let sid = access.with(|e| e.mux.active_session);
+        access.with(|e| {
+            assert!(e.set_session_var(sid, "a b", Value::Int(1)).is_err());
+            // Names only the real rule allows, so an ASCII-only pattern
+            // creeping in here is caught. `is_alphanumeric` is Unicode-aware
+            // and there is no leading-character restriction.
+            e.set_session_var(sid, "café", Value::Int(7))
+                .expect("unicode letters are var chars");
+            e.set_session_var(sid, "1", Value::Int(8)).expect("a leading digit is legal");
+        });
+        assert_eq!(run_line(&access, "echo $café").expect("resolves"), Value::Int(7));
+        assert_eq!(run_line(&access, "echo $1").expect("resolves"), Value::Int(8));
     }
 }
 
