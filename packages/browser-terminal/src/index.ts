@@ -17,6 +17,7 @@ import type {
   RunResult,
   SelectorFn,
   Value,
+  VarScope,
 } from './types.js';
 
 export type {
@@ -44,6 +45,7 @@ export type {
   SelectorFn,
   Shape,
   Value,
+  VarScope,
 } from './types.js';
 
 export interface CreateOptions {
@@ -229,12 +231,17 @@ export class BrowserTerminal {
    * keeps the values it started with, so a long command cannot see one of
    * its arguments change underneath it.
    *
+   * `opts` names the layer: omitted is the engine-wide host one,
+   * `{ scope: 'session', session: id }` is one session's, which shadows the
+   * host value there. Throws on an id naming no session — a stale id is a
+   * bug, and a silent no-op would strand the value nowhere.
+   *
    * Throws if `name` is not usable as `$name` (letters, digits and `_`).
    * The value is stored as a typed value and never parsed as shell source.
    */
-  setVariable(name: string, value: Value): void {
+  setVariable(name: string, value: Value, opts?: VarScope): void {
     this.assertLive();
-    this.core.set_variable(name, value);
+    this.core.set_variable(name, value, opts);
   }
 
   /**
@@ -242,40 +249,62 @@ export class BrowserTerminal {
    * value is applied, so a bad name leaves the previous state untouched —
    * a half-applied batch would leave the shell running against a mix of
    * fresh and stale state.
+   *
+   * `opts` names the layer exactly as it does for {@link setVariable}, and
+   * the whole batch lands in one layer. An unknown session id fails the
+   * batch whole, like a bad name does.
    */
-  setVariables(values: Record<string, Value>): void {
+  setVariables(values: Record<string, Value>, opts?: VarScope): void {
     this.assertLive();
-    this.core.set_variables(values);
-  }
-
-  /** Remove an injected variable. Returns whether it was set. */
-  unsetVariable(name: string): boolean {
-    this.assertLive();
-    return this.core.unset_variable(name);
+    this.core.set_variables(values, opts);
   }
 
   /**
-   * The value of an injected variable, or `undefined` if it is not set.
+   * Remove an injected variable from the layer `opts` names. Returns
+   * whether it was set.
+   *
+   * The one place an unknown session id is not an error: `boolean` has
+   * nowhere to put one, and a name that is not set in a session that does
+   * not exist is, truthfully, not set.
+   */
+  unsetVariable(name: string, opts?: VarScope): boolean {
+    this.assertLive();
+    return this.core.unset_variable(name, opts);
+  }
+
+  /**
+   * The value of an injected variable in the layer `opts` names, or
+   * `undefined` if it is not set there.
+   *
+   * One layer, never a merged view: a session read that fell through to the
+   * host value would answer a question you did not ask. For "what would
+   * `$name` be here?", the shell's `vars` shows the resolved view.
    *
    * `undefined` rather than `null`, because `null` is itself a legal value
-   * to inject — the two have to stay distinguishable.
+   * to inject — the two have to stay distinguishable. Like `unsetVariable`,
+   * this has no error channel, so an id naming no session also reads back
+   * `undefined` rather than throwing.
    */
-  getVariable(name: string): Value | undefined {
+  getVariable(name: string, opts?: VarScope): Value | undefined {
     this.assertLive();
-    const v: unknown = this.core.get_variable(name);
+    const v: unknown = this.core.get_variable(name, opts);
     return v === undefined ? undefined : (v as Value);
   }
 
   /**
-   * Everything injected through this API, as a plain object.
+   * Everything injected into the layer `opts` names, as a plain object.
    *
-   * The host layer only, so `setVariables(x)` then `variables()` round
-   * trips. The shell's `vars` command answers a different question — what
-   * `$name` resolves to in a given pane — and shows the merged view.
+   * One layer, never a merged view, so `setVariables(x, opts)` then
+   * `variables(opts)` round trips. The shell's `vars` command answers a
+   * different question — what `$name` resolves to in a given pane — and
+   * shows the merged view.
+   *
+   * Keys come back sorted. As with the other reads there is no error
+   * channel, so an id naming no session reads back `undefined`.
    */
-  variables(): Record<string, Value> {
+  variables(opts?: VarScope): Record<string, Value> {
     this.assertLive();
-    return this.core.variables() as Record<string, Value>;
+    return this.core.variables(opts) as Record<string, Value>;
   }
 
   /**

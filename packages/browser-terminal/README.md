@@ -160,6 +160,34 @@ bt.unsetVariable('game');   // true if it was set
 `null`. In the terminal, `vars` lists what is visible and pipes like any
 other table (`vars | grep game`).
 
+### Scoping a variable to one session
+
+By default a variable is engine-wide. To scope one to a single session,
+pass an id from `bt.snapshot.sessions`:
+
+```ts
+const [first] = bt.snapshot!.sessions;
+bt.setVariable('scratch', 'local', { scope: 'session', session: first.id });
+```
+
+A session value shadows a host value of the same name, in that session
+only. Reads name a layer rather than merging, so both remain readable:
+
+```ts
+bt.getVariable('scratch');                                          // the host value
+bt.getVariable('scratch', { scope: 'session', session: first.id }); // that session's
+```
+
+For "what would `$scratch` actually be here?", the shell's `vars` shows
+the resolved view with a `scope` column saying where each value came from:
+`vars | filter {|v| $v.scope == 'session'}`.
+
+Sessions are addressed by explicit id rather than "whichever is active",
+because a user can switch sessions between your read and your write. An
+unknown id throws from `setVariable` and `setVariables`. The reads have
+nowhere to put an error, so `unsetVariable` returns `false` for one and
+`getVariable` / `variables` return `undefined`.
+
 ## Limitations
 
 - **One instance per page.** `create()` throws if one is already live; call
