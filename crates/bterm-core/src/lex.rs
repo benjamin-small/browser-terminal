@@ -108,6 +108,17 @@ fn is_var_char(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
 }
 
+/// Is `name` usable as `$name`?
+///
+/// The single definition of that rule. Callers that validate a variable
+/// name — the host-variable setters in particular — must use this rather
+/// than writing their own pattern: `is_var_char` accepts anything Unicode
+/// considers alphanumeric, so `café` and `1` are legal names, and an ASCII
+/// regex would reject names the lexer is perfectly happy with.
+pub fn is_valid_var_name(name: &str) -> bool {
+    !name.is_empty() && name.chars().all(is_var_char)
+}
+
 pub fn lex(src: &str) -> Result<Vec<Token>, ShellError> {
     let mut tokens = Vec::new();
     let bytes = src.as_bytes();
@@ -569,5 +580,34 @@ mod tests {
         let toks = lex("echo 'hi'").expect("lex ok");
         assert_eq!(toks[0].span, Span::new(0, 4));
         assert_eq!(toks[1].span, Span::new(5, 9));
+    }
+
+    #[test]
+    fn valid_var_names_match_what_the_lexer_accepts() {
+        // Accepted — these are not exotic, they are what `is_var_char`
+        // already allows. Rust's `is_alphanumeric` is Unicode-aware, and
+        // digits are legal including in leading position.
+        for name in ["game", "_x", "a1", "A_B_2", "café", "日本", "1"] {
+            assert!(is_valid_var_name(name), "should accept `{name}`");
+        }
+        // Rejected — every one of these would fail to lex as `$name`.
+        for name in ["", " ", "a b", "a-b", "a.b", "a$b", "a\n"] {
+            assert!(!is_valid_var_name(name), "should reject `{name}`");
+        }
+    }
+
+    #[test]
+    fn a_valid_name_round_trips_through_the_lexer() {
+        // The guarantee that matters: anything `is_valid_var_name` accepts
+        // must actually lex as a variable token. Without this the two rules
+        // can drift apart silently.
+        for name in ["game", "_x", "café", "1"] {
+            let tokens = lex(&format!("${name}")).expect("should lex");
+            assert!(
+                matches!(&tokens[0].kind, TokenKind::Var(v) if v == name),
+                "`${name}` did not lex as a Var token: {:?}",
+                tokens[0].kind
+            );
+        }
     }
 }
