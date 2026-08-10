@@ -192,6 +192,28 @@ async function main(): Promise<void> {
   );
   // #endregion
 
+  // #region variables
+  // Host state as shell variables: the page owns `$project`, the shell
+  // reads it. Nothing is serialized into the command text, so the value
+  // can be a whole record rather than something that survives quoting.
+  bt.setVariables({
+    project: { name: 'browser-terminal', language: 'Rust + TypeScript' },
+    greeting: 'hello',
+  });
+
+  bt.registerCommand(
+    {
+      name: 'describe',
+      summary: 'Describe a project record passed as a variable',
+      required: [{ name: 'project', shape: 'any', desc: 'usually $project' }],
+    },
+    ({ positionals }) => {
+      const p = positionals[0] as { name?: string; language?: string } | null;
+      return p ? `${p.name} — ${p.language}` : 'nothing to describe';
+    },
+  );
+  // #endregion
+
   // Show the real wiring on the page.
   const host = document.getElementById('source');
   host?.append(
@@ -200,6 +222,7 @@ async function main(): Promise<void> {
     codePanel('A named selector function (@host)', selfSource, 'selector'),
     codePanel('A live streaming source (watch)', selfSource, 'watch'),
     codePanel('A progress bar (byte mode + \\r)', selfSource, 'progress'),
+    codePanel('Host state as $variables', selfSource, 'variables'),
   );
 
   // …and what that signature produces. Asking the engine rather than pasting
