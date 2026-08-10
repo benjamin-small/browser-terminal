@@ -591,17 +591,35 @@ async fn a_host_variable_reaches_a_command_as_an_argument() {
 #[wasm_bindgen_test]
 async fn typed_values_survive_the_round_trip() {
     let core = make_core();
-    // A record, an int and a null: the shapes a host actually injects.
-    // Text would round-trip trivially; these are what would break if the
-    // boundary reached for source text instead of typed Values.
+    // A record, a list, an int and a null: the shapes a host actually
+    // injects. Text would round-trip trivially; these are what would break
+    // if the boundary reached for source text instead of typed Values.
     let obj = js_sys::Object::new();
     Reflect::set(&obj, &"k".into(), &JsValue::from_f64(1.0)).expect("set");
     core.set_variable("rec", obj.into()).expect("valid");
+    core.set_variable("list", Array::of3(&1.0.into(), &2.0.into(), &"three".into()).into())
+        .expect("valid");
     core.set_variable("num", JsValue::from_f64(42.0)).expect("valid");
     core.set_variable("nothing", JsValue::NULL).expect("valid");
 
+    // The field, not just `is_object()`: a JS `Map` is also an object, and
+    // convert.rs exists precisely to keep records from becoming one. Reading
+    // `k` back fails on a Map, where the entry is not a property.
     let rec = core.get_variable("rec");
-    assert!(rec.is_object(), "a record must come back an object, got {rec:?}");
+    assert!(!rec.is_instance_of::<js_sys::Map>(), "a record must not come back a Map");
+    assert_eq!(
+        Reflect::get(&rec, &"k".into()).expect("field k").as_f64(),
+        Some(1.0),
+        "a record must come back a plain object with its field, got {rec:?}"
+    );
+
+    // A list stays a list, with its elements and their types intact.
+    let list = core.get_variable("list");
+    let arr: Array = list.dyn_into().expect("a list must come back a JS array");
+    assert_eq!(arr.length(), 3);
+    assert_eq!(arr.get(0).as_f64(), Some(1.0));
+    assert_eq!(arr.get(2).as_string().as_deref(), Some("three"));
+
     assert_eq!(core.get_variable("num").as_f64(), Some(42.0));
     assert!(core.get_variable("nothing").is_null(), "a set null stays null");
     core.dispose();
@@ -623,6 +641,24 @@ async fn unset_is_undefined_and_is_not_the_same_as_null() {
 }
 
 #[wasm_bindgen_test]
+async fn the_variable_methods_throw_after_dispose_rather_than_aborting() {
+    // Reaching `WasmAccess::with` on a disposed engine panics, and under
+    // `panic = "abort"` a panic is not a catchable throw — it takes the
+    // whole module down. So an unguarded method here does not fail one
+    // assertion, it ends the run: this test's real subject is that each of
+    // these five returns at all.
+    let core = make_core();
+    core.set_variable("x", JsValue::from_f64(1.0)).expect("valid");
+    core.dispose();
+
+    assert!(core.set_variable("x", JsValue::from_f64(2.0)).is_err());
+    assert!(core.set_variables(js_sys::Object::new().into()).is_err());
+    assert!(!core.unset_variable("x"), "nothing is set on a disposed engine");
+    assert!(core.get_variable("x").is_undefined());
+    assert!(core.variables().is_undefined());
+}
+
+#[wasm_bindgen_test]
 async fn an_invalid_name_throws_and_stores_nothing() {
     let core = make_core();
     assert!(core.set_variable("a b", JsValue::from_str("x")).is_err());
@@ -632,14 +668,22 @@ async fn an_invalid_name_throws_and_stores_nothing() {
 
 #[wasm_bindgen_test]
 async fn a_unicode_name_is_accepted_because_the_lexer_accepts_it() {
-    // Pins the reuse of `is_valid_var_name` across the boundary. An
-    // ASCII-only guard here would reject a name the shell can reference,
-    // and this is the only place that would catch it.
+    // The singular path validates in the engine, so `engine.rs` covers the
+    // rule itself; what this half adds is that the name survives the
+    // boundary and still resolves as `$café` in a real pipeline.
     let core = make_core();
     core.set_variable("café", JsValue::from_f64(7.0)).expect("unicode letters are var chars");
     core.set_variable("1", JsValue::from_f64(8.0)).expect("a leading digit is legal");
     let v = run_value(&core, "echo $café").await.expect("resolves");
     assert_eq!(v.as_f64(), Some(7.0));
+
+    // The plural path re-writes the rule at the boundary rather than
+    // delegating to the engine, so it is the one place in the repo where an
+    // ASCII-only guard could creep back in and reject a name the shell can
+    // reference. Nothing else would catch that.
+    let obj = js_sys::Object::new();
+    Reflect::set(&obj, &"café".into(), &JsValue::from_f64(7.0)).expect("set");
+    core.set_variables(obj.into()).expect("set_variables must accept `café`");
     core.dispose();
 }
 
@@ -655,6 +699,29 @@ async fn set_variables_applies_all_or_nothing() {
         core.get_variable("good").is_undefined(),
         "nothing may be applied when the batch is rejected"
     );
+
+    // An unconvertible *value* has to be as atomic as a bad name. Both keys
+    // here are legal and `first` converts fine, so a boundary that validated
+    // every name up front and then converted-and-applied entry by entry
+    // would leave `first` stored and `third` not — the same half-applied
+    // state, arrived at down a different path.
+    let obj = js_sys::Object::new();
+    Reflect::set(&obj, &"first".into(), &JsValue::from_str("a")).expect("set");
+    Reflect::set(&obj, &"second".into(), &Function::new_no_args("return 1;")).expect("set");
+    Reflect::set(&obj, &"third".into(), &JsValue::from_str("c")).expect("set");
+
+    let err = core.set_variables(obj.into()).expect_err("a function is not a shell value");
+    let msg = err.as_string().unwrap_or_default();
+    assert!(msg.contains("second"), "the error must name the offending key: {msg}");
+    assert!(core.get_variable("first").is_undefined(), "a key before the failure must not land");
+    assert!(core.get_variable("third").is_undefined(), "a key after the failure must not land");
+
+    // An array is an object to `dyn_into`, and its indices stringify into
+    // legal variable names — so a host passing one by mistake would get
+    // `$0`/`$1` and no complaint.
+    let arr = Array::of2(&"zero".into(), &"one".into());
+    assert!(core.set_variables(arr.into()).is_err(), "an array is not a name → value object");
+    assert!(core.get_variable("0").is_undefined(), "array indices must not become variables");
     core.dispose();
 }
 

@@ -6,7 +6,11 @@
 //! can cross an await, and no `&mut self` exports exist. Events queue inside
 //! the borrow and flush to the JS callback only after it drops, so a JS
 //! handler that synchronously calls back into the engine cannot
-//! double-borrow. Every submitted pipeline runs inside an `Abortable` whose
+//! double-borrow. For the same reason, conversion to and from JS happens
+//! outside the borrow and never inside it: `js_to_value` walks property
+//! getters that can run host code, and that code calling back into the engine
+//! would find the `ENGINE` cell already borrowed — which `&self` exports do
+//! nothing to prevent. Every submitted pipeline runs inside an `Abortable` whose
 //! abort flag is checked before the body resumes — Ctrl-C and `dispose()`
 //! can always settle in-flight work without it touching the engine again.
 
@@ -390,6 +394,13 @@ impl BtermCore {
     /// Takes effect from the next command line: a pipeline already running
     /// keeps the values it started with.
     pub fn set_variable(&self, name: &str, value: JsValue) -> Result<(), JsValue> {
+        // Guard first, like every other engine-touching export: reaching
+        // `WasmAccess::with` on a disposed engine panics, and with
+        // `panic = "abort"` that kills the module rather than throwing
+        // something a caller could catch.
+        if !engine_alive() {
+            return Err(JsValue::from_str("browser-terminal: engine is disposed"));
+        }
         // Convert before borrowing: js_to_value can reach into JS, and no
         // JS call may happen inside an engine borrow.
         let converted = convert::js_to_value(&value).map_err(|e| JsValue::from_str(&e))?;
@@ -398,19 +409,36 @@ impl BtermCore {
             .map_err(|err| JsValue::from_str(&err.msg))
     }
 
-    /// Replace several variables at once.
+    /// Set several variables at once. Names not mentioned are left alone —
+    /// this merges into what is already injected rather than replacing it;
+    /// use `unsetVariable` to remove one.
     ///
-    /// Every name is validated before anything is applied, so one bad name
-    /// leaves the previous state untouched. A partial apply is the worst
-    /// outcome for a host synchronising editor state: some values land, one
-    /// stays stale, and the next command runs against a mix that looks
-    /// plausible.
+    /// Every name is validated and every value converted before anything is
+    /// applied, so one bad entry leaves the previous state untouched. A
+    /// partial apply is the worst outcome for a host synchronising editor
+    /// state: some values land, one stays stale, and the next command runs
+    /// against a mix that looks plausible.
     pub fn set_variables(&self, values: JsValue) -> Result<(), JsValue> {
+        if !engine_alive() {
+            return Err(JsValue::from_str("browser-terminal: engine is disposed"));
+        }
+        // An array passes `dyn_into::<Object>()` and its indices stringify
+        // into legal variable names, so without this a host that meant to
+        // pass a record would silently get `$0`, `$1`, … and no error.
+        if js_sys::Array::is_array(&values) {
+            return Err(JsValue::from_str(
+                "setVariables expects an object of name → value, not an array",
+            ));
+        }
         let obj: js_sys::Object = values
             .dyn_into()
             .map_err(|_| JsValue::from_str("setVariables expects an object"))?;
 
         // Convert and validate everything first — still outside any borrow.
+        // Both halves have to happen up front: validating names but
+        // converting as you apply leaves an unconvertible value half-way
+        // through the batch, which is the same broken state by a different
+        // route (`set_variables_applies_all_or_nothing` covers both).
         let mut pending: Vec<(String, bterm_core::value::Value)> = Vec::new();
         for entry in js_sys::Object::entries(&obj).iter() {
             let pair: js_sys::Array = entry.into();
@@ -420,7 +448,10 @@ impl BtermCore {
                     "`{name}` is not a valid variable name: use letters, digits and `_`"
                 )));
             }
-            let value = convert::js_to_value(&pair.get(1)).map_err(|e| JsValue::from_str(&e))?;
+            // Name the key: a batch can be large, and "cannot convert a JS
+            // function" on its own leaves the host hunting for which one.
+            let value = convert::js_to_value(&pair.get(1))
+                .map_err(|e| JsValue::from_str(&format!("`{name}`: {e}")))?;
             pending.push((name, value));
         }
 
@@ -434,16 +465,24 @@ impl BtermCore {
         Ok(())
     }
 
-    /// Remove an injected variable. Returns whether it was set.
+    /// Remove an injected variable. Returns whether it was set — and false
+    /// on a disposed engine, where nothing is set by definition.
     pub fn unset_variable(&self, name: &str) -> bool {
+        if !engine_alive() {
+            return false;
+        }
         WasmAccess.with(|e| e.unset_host_var(name))
     }
 
-    /// The value of an injected variable, or `undefined` if it is not set.
+    /// The value of an injected variable, or `undefined` if it is not set
+    /// (or the engine is disposed).
     ///
     /// `undefined` rather than null: a host can legitimately inject null,
     /// and the two must stay distinguishable.
     pub fn get_variable(&self, name: &str) -> JsValue {
+        if !engine_alive() {
+            return JsValue::UNDEFINED;
+        }
         let found = WasmAccess.with(|e| e.host_var(name).cloned());
         match found {
             Some(v) => convert::value_to_js(&v),
@@ -451,13 +490,23 @@ impl BtermCore {
         }
     }
 
-    /// Everything the host injected, as a plain object.
+    /// Everything the host injected, as a plain object — or `undefined` if
+    /// the engine is disposed.
     ///
-    /// The host layer only — the read-back of what this API set, so
-    /// `setVariables(x)` then `variables()` round-trips. The shell's `vars`
-    /// command shows the merged view instead, because it answers a
-    /// different question: what `$name` resolves to here.
+    /// The host layer only: what this API set, never the session or pane
+    /// scopes above it. The shell's `vars` command shows the merged view
+    /// instead, because it answers a different question — what `$name`
+    /// resolves to here.
+    ///
+    /// Every name passed to `setVariables` appears here, alongside anything
+    /// injected earlier and not unset. Values are what the shell holds, not
+    /// the objects handed in: they have been through the same conversion
+    /// command arguments take, so `undefined` reads back as `null` and key
+    /// order is not preserved.
     pub fn variables(&self) -> JsValue {
+        if !engine_alive() {
+            return JsValue::UNDEFINED;
+        }
         let pairs = WasmAccess.with(|e| {
             e.host_vars()
                 .iter()
