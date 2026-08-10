@@ -1,6 +1,7 @@
 # Host-injected shell variables — design
 
-**Status:** approved, not yet implemented
+**Status:** host scope implemented (`68710e2`…`6b9ed13`). Session scope
+approved, not yet implemented — see [Increment 2](#increment-2--session-scope).
 **Issue:** [#8 — Enhancement: inject host application values as shell `$variables`](https://github.com/benjamin-small/browser-terminal/issues/8)
 **Date:** 2026-08-10
 
@@ -35,12 +36,13 @@ revisiting the merge — see Precedence.
 
 | Question | Decision |
 | --- | --- |
-| Scope model | One engine-wide host scope. No `{ scope: 'session' }` option in this cut. |
+| Scope model | An engine-wide host scope (increment 1) and a per-session scope (increment 2). |
 | Precedence | Session values override host values. |
 | Freshness | Snapshot per command line. |
 | Read API | `getVariable` and `variables()` in addition to the setters. |
-| Shell visibility | A `vars` builtin, listing `name` and `value`. |
-| Storage | A field on `Engine`, beside `matcher` and `fn_compiler`. |
+| Shell visibility | A `vars` builtin, listing `name`, `scope` and `value`. |
+| Storage | Host: a field on `Engine`, beside `matcher` and `fn_compiler`. Session: the `vars: Scope` each `Session` already owns. |
+| Addressing a session | An explicit id from `snapshot.sessions`, never the implicit active one. |
 
 ### Why engine-wide rather than per-session
 
@@ -148,6 +150,10 @@ getVariable(name: string): Value | undefined;
 variables(): Record<string, Value>;
 ```
 
+> **Superseded by increment 2:** each gains an optional trailing `opts`
+> selecting the layer. Omitting it means host, so these signatures remain
+> valid calls.
+
 Values cross via the existing `js_to_value` / `value_to_js` — the same path
 command arguments take. Nothing is re-lexed as shell source, so a value
 containing `; rm -rf /` is a string containing those characters and cannot
@@ -212,6 +218,9 @@ deterministic for tests, predictable for a human. An empty scope yields `[]`,
 so `vars | length` answers 0 rather than erroring, consistent with the
 empty-stream rule in `stream::collect`.
 
+> **Superseded by increment 2:** the record gains a `scope` field. Sorting
+> and the empty-`[]` rule are unchanged.
+
 Full values are emitted; the table renderer truncates wide cells to the
 column width with `…`. Display truncates, the pipe preserves — so
 `vars | grep game | get value` returns the whole document. This is how every
@@ -262,6 +271,105 @@ it fails. A test that passes under both behaviours documents nothing, which
 is the failure mode this project has hit repeatedly — most recently a
 block-mode test whose writes contained no delimiter, and before that three
 tests that asserted a singleton-collapse bug as intended behaviour.
+
+## Increment 2 — session scope
+
+Increment 1 shipped the host layer and deferred `{ scope: 'session' }`,
+reasoning that adding it then would mean designing collision rules for a
+feature nobody had asked for. It has now been asked for.
+
+**The merge needs no change.** `scope_for_pane` was written for this:
+
+```rust
+let mut scope = e.host_vars.clone();
+scope.extend(session.vars.clone());   // session wins
+```
+
+The `extend` has been a no-op only because nothing could populate
+`Session.vars`. Shadowing, snapshot-per-line, interpolation, `run()`, and
+argument binding all come free and are already covered by increment 1's
+tests. What is missing is addressing, an options argument, and making
+shadowing visible.
+
+### Addressing: an explicit id, never the active session
+
+`{ scope: 'session', session: id }`, with ids from `snapshot.sessions`
+(`SessionInfo { id, name, active }`, already exposed).
+
+Not the implicit active session. Every other host-facing call in this
+library already names its target — `run(pane, line)`, `feed(pane, data)` —
+and an ambient "wherever the user happens to be looking" would be the only
+exception on the surface. The failure it enables is silent: a user presses
+`Ctrl-B )` between the host's read and its write, the value lands on the
+wrong session, and the next command reads a stale one with nothing
+indicating why.
+
+**An unknown id throws.** A stale or typo'd id is a bug, and a silent
+no-op would strand the value nowhere while every read looks plausible.
+
+**Killing a session drops its variables**, because `Session` owns the map.
+No extra teardown.
+
+### Reads mirror writes: a scope names a layer
+
+```ts
+type VarScope = { scope?: 'host' } | { scope: 'session'; session: number };
+
+setVariable(name: string, value: Value, opts?: VarScope): void;
+setVariables(values: Record<string, Value>, opts?: VarScope): void;
+unsetVariable(name: string, opts?: VarScope): boolean;
+getVariable(name: string, opts?: VarScope): Value | undefined;
+variables(opts?: VarScope): Record<string, Value>;
+```
+
+Omitting `opts` means host, so every existing call site keeps working and
+the default remains the scope that survives `session new`.
+
+A read returns **one layer, never a merged view**. `getVariable('x')` is
+the host value; `getVariable('x', { scope: 'session', session: 3 })` is
+session 3's own. Layers do not blur, so each read has exactly one meaning
+and `setVariables(x)` then `variables()` still round-trips per layer.
+
+The resolved question — "what would `$x` actually be here?" — is answered
+by the shell's `vars`, which already shows the merged view and pipes. A
+host needing it programmatically can `bt.run('vars')`. Adding a third
+`resolved: true` read form was considered and rejected: three ways to read
+one name, with a flag that silently changes which value comes back.
+
+### `vars` gains a `scope` column
+
+Output becomes `{ name, scope, value }` where `scope` is `"host"` or
+`"session"`.
+
+Without it, a session value shadowing a host one shows as a single
+indistinguishable row, and "why is `$game` not what I set?" becomes
+unanswerable from inside the shell — which is exactly where it gets asked.
+One field makes shadowing visible at the moment of confusion, and it pipes:
+`vars | filter {|v| $v.scope == 'session'}`.
+
+This changes `vars`'s output shape, so
+`vars_lists_injected_variables_sorted_by_name` is updated. That test
+asserts a shape, not a behavioural guarantee, so updating it is
+appropriate rather than a weakening — sorting by name and the empty-scope
+`[]` rule both stay pinned.
+
+`HostHooks::visible_vars` returns `Vec<(String, Value)>` today; it becomes
+`Vec<(String, VarOrigin, Value)>` (or equivalent) so the builtin can label
+each row without re-deriving the merge itself.
+
+### Testing
+
+Native: setting on one session is invisible to another; a session value
+shadows a host value of the same name **and the host value is still
+readable through its own layer**; an unknown session id errors; killing a
+session drops its variables; `vars` labels each row's origin.
+
+Boundary: the options argument crosses correctly, including that omitting
+it means host; an unknown id throws rather than aborting.
+
+Browser: two sessions with different values for one name, proving the
+right one resolves in each — the test that would catch an implicit-active
+implementation regressing back in.
 
 ## Documentation
 
