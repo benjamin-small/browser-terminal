@@ -380,6 +380,101 @@ impl BtermCore {
         js_fn::unregister(name);
     }
 
+    /// Inject a value the shell resolves as `$name`, for every session and
+    /// every pane, including ones created later.
+    ///
+    /// Throws on a name the shell could not reference. The value crosses as
+    /// a typed `Value` and is never parsed as shell source, so a string
+    /// containing `; rm -rf /` is that string and cannot become syntax.
+    ///
+    /// Takes effect from the next command line: a pipeline already running
+    /// keeps the values it started with.
+    pub fn set_variable(&self, name: &str, value: JsValue) -> Result<(), JsValue> {
+        // Convert before borrowing: js_to_value can reach into JS, and no
+        // JS call may happen inside an engine borrow.
+        let converted = convert::js_to_value(&value).map_err(|e| JsValue::from_str(&e))?;
+        WasmAccess
+            .with(|e| e.set_host_var(name, converted))
+            .map_err(|err| JsValue::from_str(&err.msg))
+    }
+
+    /// Replace several variables at once.
+    ///
+    /// Every name is validated before anything is applied, so one bad name
+    /// leaves the previous state untouched. A partial apply is the worst
+    /// outcome for a host synchronising editor state: some values land, one
+    /// stays stale, and the next command runs against a mix that looks
+    /// plausible.
+    pub fn set_variables(&self, values: JsValue) -> Result<(), JsValue> {
+        let obj: js_sys::Object = values
+            .dyn_into()
+            .map_err(|_| JsValue::from_str("setVariables expects an object"))?;
+
+        // Convert and validate everything first — still outside any borrow.
+        let mut pending: Vec<(String, bterm_core::value::Value)> = Vec::new();
+        for entry in js_sys::Object::entries(&obj).iter() {
+            let pair: js_sys::Array = entry.into();
+            let name = pair.get(0).as_string().unwrap_or_default();
+            if !bterm_core::lex::is_valid_var_name(&name) {
+                return Err(JsValue::from_str(&format!(
+                    "`{name}` is not a valid variable name: use letters, digits and `_`"
+                )));
+            }
+            let value = convert::js_to_value(&pair.get(1)).map_err(|e| JsValue::from_str(&e))?;
+            pending.push((name, value));
+        }
+
+        WasmAccess.with(|e| {
+            for (name, value) in pending {
+                // Already validated above; the engine re-checks and the
+                // error is unreachable, so drop it rather than unwrap.
+                let _ = e.set_host_var(&name, value);
+            }
+        });
+        Ok(())
+    }
+
+    /// Remove an injected variable. Returns whether it was set.
+    pub fn unset_variable(&self, name: &str) -> bool {
+        WasmAccess.with(|e| e.unset_host_var(name))
+    }
+
+    /// The value of an injected variable, or `undefined` if it is not set.
+    ///
+    /// `undefined` rather than null: a host can legitimately inject null,
+    /// and the two must stay distinguishable.
+    pub fn get_variable(&self, name: &str) -> JsValue {
+        let found = WasmAccess.with(|e| e.host_var(name).cloned());
+        match found {
+            Some(v) => convert::value_to_js(&v),
+            None => JsValue::UNDEFINED,
+        }
+    }
+
+    /// Everything the host injected, as a plain object.
+    ///
+    /// The host layer only — the read-back of what this API set, so
+    /// `setVariables(x)` then `variables()` round-trips. The shell's `vars`
+    /// command shows the merged view instead, because it answers a
+    /// different question: what `$name` resolves to here.
+    pub fn variables(&self) -> JsValue {
+        let pairs = WasmAccess.with(|e| {
+            e.host_vars()
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect::<Vec<_>>()
+        });
+        let obj = js_sys::Object::new();
+        for (name, value) in pairs {
+            let _ = js_sys::Reflect::set(
+                &obj,
+                &JsValue::from_str(&name),
+                &convert::value_to_js(&value),
+            );
+        }
+        obj.into()
+    }
+
     /// Programmatic execution: evaluate a line in a pane's context and
     /// resolve with `{ value, log, err }` — the final structured value
     /// plus whatever the pipeline wrote to its two diagnostic channels (no

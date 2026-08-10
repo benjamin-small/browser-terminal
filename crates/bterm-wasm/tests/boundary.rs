@@ -580,6 +580,102 @@ async fn feed_emits_pane_output_events() {
 }
 
 #[wasm_bindgen_test]
+async fn a_host_variable_reaches_a_command_as_an_argument() {
+    let core = make_core();
+    core.set_variable("greeting", JsValue::from_str("hello")).expect("valid name");
+    let out = run_value(&core, "echo $greeting").await.expect("resolves");
+    assert_eq!(out.as_string().as_deref(), Some("hello"));
+    core.dispose();
+}
+
+#[wasm_bindgen_test]
+async fn typed_values_survive_the_round_trip() {
+    let core = make_core();
+    // A record, an int and a null: the shapes a host actually injects.
+    // Text would round-trip trivially; these are what would break if the
+    // boundary reached for source text instead of typed Values.
+    let obj = js_sys::Object::new();
+    Reflect::set(&obj, &"k".into(), &JsValue::from_f64(1.0)).expect("set");
+    core.set_variable("rec", obj.into()).expect("valid");
+    core.set_variable("num", JsValue::from_f64(42.0)).expect("valid");
+    core.set_variable("nothing", JsValue::NULL).expect("valid");
+
+    let rec = core.get_variable("rec");
+    assert!(rec.is_object(), "a record must come back an object, got {rec:?}");
+    assert_eq!(core.get_variable("num").as_f64(), Some(42.0));
+    assert!(core.get_variable("nothing").is_null(), "a set null stays null");
+    core.dispose();
+}
+
+#[wasm_bindgen_test]
+async fn unset_is_undefined_and_is_not_the_same_as_null() {
+    let core = make_core();
+    core.set_variable("nothing", JsValue::NULL).expect("valid");
+    // The distinction the host needs: `sim: null` was injected on purpose,
+    // `missing` never existed.
+    assert!(core.get_variable("nothing").is_null(), "set-to-null reads back null");
+    assert!(core.get_variable("missing").is_undefined(), "never-set reads back undefined");
+
+    assert!(core.unset_variable("nothing"), "removing a set name reports true");
+    assert!(core.get_variable("nothing").is_undefined(), "and it is gone");
+    assert!(!core.unset_variable("nothing"), "removing it again reports false");
+    core.dispose();
+}
+
+#[wasm_bindgen_test]
+async fn an_invalid_name_throws_and_stores_nothing() {
+    let core = make_core();
+    assert!(core.set_variable("a b", JsValue::from_str("x")).is_err());
+    assert!(core.get_variable("a b").is_undefined());
+    core.dispose();
+}
+
+#[wasm_bindgen_test]
+async fn a_unicode_name_is_accepted_because_the_lexer_accepts_it() {
+    // Pins the reuse of `is_valid_var_name` across the boundary. An
+    // ASCII-only guard here would reject a name the shell can reference,
+    // and this is the only place that would catch it.
+    let core = make_core();
+    core.set_variable("café", JsValue::from_f64(7.0)).expect("unicode letters are var chars");
+    core.set_variable("1", JsValue::from_f64(8.0)).expect("a leading digit is legal");
+    let v = run_value(&core, "echo $café").await.expect("resolves");
+    assert_eq!(v.as_f64(), Some(7.0));
+    core.dispose();
+}
+
+#[wasm_bindgen_test]
+async fn set_variables_applies_all_or_nothing() {
+    let core = make_core();
+    let obj = js_sys::Object::new();
+    Reflect::set(&obj, &"good".into(), &JsValue::from_str("a")).expect("set");
+    Reflect::set(&obj, &"bad name".into(), &JsValue::from_str("b")).expect("set");
+
+    assert!(core.set_variables(obj.into()).is_err(), "one bad name fails the batch");
+    assert!(
+        core.get_variable("good").is_undefined(),
+        "nothing may be applied when the batch is rejected"
+    );
+    core.dispose();
+}
+
+#[wasm_bindgen_test]
+async fn variables_reads_back_what_was_set() {
+    let core = make_core();
+    let obj = js_sys::Object::new();
+    Reflect::set(&obj, &"a".into(), &JsValue::from_f64(1.0)).expect("set");
+    Reflect::set(&obj, &"b".into(), &JsValue::from_str("two")).expect("set");
+    core.set_variables(obj.into()).expect("all names valid");
+
+    let all = core.variables();
+    assert_eq!(Reflect::get(&all, &"a".into()).expect("get").as_f64(), Some(1.0));
+    assert_eq!(
+        Reflect::get(&all, &"b".into()).expect("get").as_string().as_deref(),
+        Some("two")
+    );
+    core.dispose();
+}
+
+#[wasm_bindgen_test]
 async fn abort_signal_fires_on_ctrl_c() {
     let core = make_core();
     let sig = js_sys::JSON::parse(r#"{"name":"hang"}"#).expect("sig");
