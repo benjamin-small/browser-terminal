@@ -84,7 +84,9 @@ await BrowserTerminal.create({
 Other surface: `registerCommand` / `unregisterCommand`, `registerFn` /
 `unregisterFn` (a named function usable as `@name` in any selector position —
 the CSP-safe alternative to inline closures), `run`, `snapshot`,
-`setPanelMode`, `panelMode`, `show` / `hide` / `toggle`, `dispose`.
+`setPanelMode`, `panelMode`, `show` / `hide` / `toggle`, `dispose`, and the
+variable API below (`setVariable` / `setVariables`, `getVariable`,
+`unsetVariable`, `variables`).
 
 ## Writing commands
 
@@ -124,6 +126,39 @@ rather than two spellings of one. The first passes a *message* — the shell
 frames and sanitizes it. The second passes *terminal bytes* — you own the
 framing. Mixing both on one channel can interleave out of order, since the
 line call bypasses the buffer.
+
+## Host state as shell variables
+
+Inject application state and reference it as `$name`, instead of pasting it
+into the command text:
+
+```ts
+bt.setVariables({
+  game: gameDefinition,      // any Value: string, number, record, list, null
+  build: currentBuild,
+});
+
+await bt.run('simulate --game $game --build $build');
+```
+
+Variables are visible in every pane and session, including ones created
+afterwards, and inside interpolation (`"run-$game"`). Values cross as typed
+values and are never parsed as shell source, so a string containing `;` or
+`|` stays a string.
+
+A change takes effect from the next command line — a pipeline already
+running keeps the values it started with, so a long command cannot see one
+of its arguments change halfway through.
+
+```ts
+bt.getVariable('game');     // the value, or undefined if unset
+bt.variables();             // everything you injected
+bt.unsetVariable('game');   // true if it was set
+```
+
+`undefined` from `getVariable` means "not set"; `null` means you injected
+`null`. In the terminal, `vars` lists what is visible and pipes like any
+other table (`vars | grep game`).
 
 ## Limitations
 

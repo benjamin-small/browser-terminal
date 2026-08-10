@@ -11,7 +11,13 @@ import init, { BtermCore } from './wasm/bterm_wasm.js';
 import { PaneManager } from './panes.js';
 import { PanelHost, type PanelMode } from './panels.js';
 import type { Effects, EngineEvent, HostMsg, LayoutSnapshot } from './events.js';
-import type { CommandFn, CommandSpec, RunResult, SelectorFn } from './types.js';
+import type {
+  CommandFn,
+  CommandSpec,
+  RunResult,
+  SelectorFn,
+  Value,
+} from './types.js';
 
 export type {
   DividerInfo,
@@ -204,6 +210,72 @@ export class BrowserTerminal {
   unregisterFn(name: string): void {
     this.assertLive();
     this.core.unregister_fn(name);
+  }
+
+  /**
+   * Inject a value the shell resolves as `$name` — how a host page passes
+   * its own state to a command without serializing it into the command
+   * text or inventing a filename:
+   *
+   * ```ts
+   * bt.setVariable('game', gameDefinition);
+   * await bt.run('rtce evaluate --game $game');
+   * ```
+   *
+   * Visible to every session and pane, including ones created later, and
+   * inside string interpolation (`"level-$game"`).
+   *
+   * Takes effect from the next command line: a pipeline already running
+   * keeps the values it started with, so a long command cannot see one of
+   * its arguments change underneath it.
+   *
+   * Throws if `name` is not usable as `$name` (letters, digits and `_`).
+   * The value is stored as a typed value and never parsed as shell source.
+   */
+  setVariable(name: string, value: Value): void {
+    this.assertLive();
+    this.core.set_variable(name, value);
+  }
+
+  /**
+   * Replace several variables at once. Every name is validated before any
+   * value is applied, so a bad name leaves the previous state untouched —
+   * a half-applied batch would leave the shell running against a mix of
+   * fresh and stale state.
+   */
+  setVariables(values: Record<string, Value>): void {
+    this.assertLive();
+    this.core.set_variables(values);
+  }
+
+  /** Remove an injected variable. Returns whether it was set. */
+  unsetVariable(name: string): boolean {
+    this.assertLive();
+    return this.core.unset_variable(name);
+  }
+
+  /**
+   * The value of an injected variable, or `undefined` if it is not set.
+   *
+   * `undefined` rather than `null`, because `null` is itself a legal value
+   * to inject — the two have to stay distinguishable.
+   */
+  getVariable(name: string): Value | undefined {
+    this.assertLive();
+    const v: unknown = this.core.get_variable(name);
+    return v === undefined ? undefined : (v as Value);
+  }
+
+  /**
+   * Everything injected through this API, as a plain object.
+   *
+   * The host layer only, so `setVariables(x)` then `variables()` round
+   * trips. The shell's `vars` command answers a different question — what
+   * `$name` resolves to in a given pane — and shows the merged view.
+   */
+  variables(): Record<string, Value> {
+    this.assertLive();
+    return this.core.variables() as Record<string, Value>;
   }
 
   /**
