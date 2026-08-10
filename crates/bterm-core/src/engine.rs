@@ -18,6 +18,7 @@ use crate::callable::{FnCompiler, NoFnCompiler};
 use crate::matcher::{PatternMatcher, SubstringMatcher};
 use crate::registry::{Command, CommandRegistry, ExecContext, HostHooks, MuxAction, PipelineData};
 use crate::render::render;
+use crate::signature::Scope;
 use crate::value::Value;
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
@@ -33,6 +34,10 @@ pub struct Engine {
     matcher: Rc<dyn PatternMatcher>,
     /// Supplied by the host: JavaScript in the browser, absent natively.
     fn_compiler: Rc<dyn FnCompiler>,
+    /// Supplied by the host: values injected as `$name`, visible to every
+    /// session. Sessions keep their own `vars`, which win on collision —
+    /// see `scope_for_pane`.
+    host_vars: Scope,
     prefix_armed: bool,
     events: VecDeque<EngineEvent>,
     /// The in-flight progressive renderer for a pane, tagged with the run
@@ -74,6 +79,7 @@ impl Engine {
             mux: Mux::new(),
             matcher: Rc::new(SubstringMatcher),
             fn_compiler: Rc::new(NoFnCompiler),
+            host_vars: Scope::new(),
             prefix_armed: false,
             events: VecDeque::new(),
             pending_render: HashMap::new(),
@@ -99,6 +105,37 @@ impl Engine {
 
     pub fn fn_compiler(&self) -> Rc<dyn FnCompiler> {
         self.fn_compiler.clone()
+    }
+
+    /// Inject a value the shell will resolve as `$name`.
+    ///
+    /// Rejects a name the lexer could not parse, rather than storing
+    /// something unreachable: `is_valid_var_name` is the same rule the
+    /// lexer applies, so anything accepted here is referenceable.
+    pub fn set_host_var(&mut self, name: &str, value: Value) -> Result<(), ShellError> {
+        if !crate::lex::is_valid_var_name(name) {
+            return Err(ShellError::runtime(format!(
+                "`{name}` is not a valid variable name: use letters, digits and `_`"
+            )));
+        }
+        self.host_vars.insert(name.to_string(), value);
+        Ok(())
+    }
+
+    /// Remove an injected value. Returns whether it was set, so a host can
+    /// tell a real removal from a no-op without a second call.
+    pub fn unset_host_var(&mut self, name: &str) -> bool {
+        self.host_vars.remove(name).is_some()
+    }
+
+    pub fn host_var(&self, name: &str) -> Option<&Value> {
+        self.host_vars.get(name)
+    }
+
+    /// The host layer alone. `scope_for_pane` is what merges it with a
+    /// session's own variables.
+    pub fn host_vars(&self) -> &Scope {
+        &self.host_vars
     }
 
     pub fn pane(&self, id: u32) -> Option<&PaneShell> {
@@ -597,13 +634,32 @@ fn make_ctx<A: EngineAccess>(
     }
 }
 
-fn scope_for_pane<A: EngineAccess>(access: &A, pane: u32) -> crate::signature::Scope {
+/// The variables a pipeline in `pane` can see.
+///
+/// The only place a `Scope` is built, which is why one merge here covers
+/// interactive panes, `run()`, positional arguments, flag values, and
+/// `"…$name…"` interpolation.
+///
+/// Host underneath, session on top: a session's own value wins. That map is
+/// always empty today, so the `extend` is a no-op — but writing the
+/// precedence now means shell-level assignment lands later without anyone
+/// rereading this function.
+///
+/// Returns an owned clone, so a pipeline holds the values as they were when
+/// its line started. A `set_host_var` mid-run is invisible to it and takes
+/// effect on the next line. That is deliberate: under live lookup a single
+/// pipeline could bind one name to two values in two stages.
+fn scope_for_pane<A: EngineAccess>(access: &A, pane: u32) -> Scope {
     access.with(|e| {
-        e.mux
+        let mut scope = e.host_vars.clone();
+        if let Some(session) = e
+            .mux
             .session_of_pane(pane)
             .and_then(|sid| e.mux.sessions.get(&sid))
-            .map(|s| s.vars.clone())
-            .unwrap_or_default()
+        {
+            scope.extend(session.vars.clone());
+        }
+        scope
     })
 }
 
@@ -1476,5 +1532,115 @@ mod tests {
         // '1' and would make a plain `contains('1')` a false positive.
         assert!(forced.contains("\x1b[36m2"), "B's row painted: {forced:?}");
         assert!(!forced.contains("\x1b[36m1"), "A's row must not appear: {forced:?}");
+    }
+
+    // --- host variables ---
+
+    /// Evaluate a line the way the programmatic `run()` API does, so a test
+    /// can assert on the resulting `Value` rather than on painted text.
+    /// Diagnostics go to a throwaway sink; only the final value is of
+    /// interest here.
+    fn run_line(access: &Rc<RefCell<Engine>>, line: &str) -> Result<Value, ShellError> {
+        let pane = active_pane(access);
+        let sink: Rc<dyn Sink> = Rc::new(crate::sink::CollectingSink::default());
+        block_on(eval_to_value(access.clone(), pane, line.to_string(), 0, sink))
+    }
+
+    #[test]
+    fn a_host_variable_resolves_in_a_command() {
+        let access = engine();
+        access.with(|e| {
+            e.set_host_var("greeting", Value::Str("hello".into())).expect("valid name");
+        });
+        let out = run_line(&access, "echo $greeting").expect("resolves");
+        assert_eq!(out, Value::Str("hello".into()));
+    }
+
+    #[test]
+    fn a_session_variable_overrides_a_host_variable() {
+        let access = engine();
+        access.with(|e| {
+            e.set_host_var("x", Value::Str("host".into())).expect("valid name");
+            let sid = e.mux.active_session;
+            if let Some(s) = e.mux.sessions.get_mut(&sid) {
+                s.vars.insert("x".into(), Value::Str("session".into()));
+            }
+        });
+        assert_eq!(
+            run_line(&access, "echo $x").expect("resolves"),
+            Value::Str("session".into())
+        );
+    }
+
+    #[test]
+    fn setting_a_host_variable_again_replaces_it() {
+        let access = engine();
+        access.with(|e| {
+            e.set_host_var("x", Value::Int(1)).expect("valid");
+            e.set_host_var("x", Value::Int(2)).expect("valid");
+        });
+        assert_eq!(run_line(&access, "echo $x").expect("resolves"), Value::Int(2));
+    }
+
+    #[test]
+    fn unsetting_restores_the_unknown_variable_error() {
+        let access = engine();
+        access.with(|e| {
+            e.set_host_var("x", Value::Int(1)).expect("valid");
+            assert!(e.unset_host_var("x"), "was set, so removal reports true");
+            assert!(!e.unset_host_var("x"), "already gone, so a second removal reports false");
+        });
+        let err = run_line(&access, "echo $x").expect_err("no longer set");
+        assert!(err.msg.contains("unknown variable `$x`"), "{}", err.msg);
+    }
+
+    #[test]
+    fn an_invalid_name_is_rejected_rather_than_stored() {
+        let access = engine();
+        access.with(|e| {
+            let err = e.set_host_var("a b", Value::Int(1)).expect_err("space is not a var char");
+            assert!(err.msg.contains("a b"), "the error should name the offender: {}", err.msg);
+            assert!(e.host_vars().is_empty(), "nothing should have been stored");
+            assert_eq!(e.host_var("a b"), None);
+        });
+    }
+
+    #[test]
+    fn interpolation_sees_host_variables() {
+        let access = engine();
+        access.with(|e| {
+            e.set_host_var("name", Value::Str("world".into())).expect("valid");
+        });
+        assert_eq!(
+            run_line(&access, r#"echo "hello-$name""#).expect("resolves"),
+            Value::Str("hello-world".into())
+        );
+    }
+
+    #[test]
+    fn a_pipeline_keeps_the_values_its_line_started_with() {
+        // The scope is cloned per line, so changing a variable while a
+        // pipeline runs cannot change what that pipeline sees. Asserted on
+        // the scope itself rather than through a timing-dependent command,
+        // so it cannot go flaky.
+        let access = engine();
+        let pane = active_pane(&access);
+        access.with(|e| {
+            e.set_host_var("x", Value::Int(1)).expect("valid");
+        });
+        let taken = scope_for_pane(&access, pane);
+        access.with(|e| {
+            e.set_host_var("x", Value::Int(2)).expect("valid");
+        });
+        assert_eq!(
+            taken.get("x"),
+            Some(&Value::Int(1)),
+            "an already-taken scope must not see a later write"
+        );
+        assert_eq!(
+            scope_for_pane(&access, pane).get("x"),
+            Some(&Value::Int(2)),
+            "but the next line does"
+        );
     }
 }
