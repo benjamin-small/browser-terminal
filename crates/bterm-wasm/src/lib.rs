@@ -207,6 +207,47 @@ fn spawn_pipeline(pane: u32, line: String) {
     });
 }
 
+/// Which layer a variable call targets.
+enum VarTarget {
+    Host,
+    Session(u32),
+}
+
+/// Read the optional `{ scope, session }` argument.
+///
+/// Absent means host, so every call written before session scope existed
+/// keeps working. An unrecognised `scope` is an error rather than a
+/// fallback to host: a typo that silently wrote to the wrong layer would
+/// be found later, by someone reading a value that was never set where
+/// they looked.
+///
+/// Pure JS work — call it before opening an engine borrow.
+fn var_target(opts: &JsValue) -> Result<VarTarget, JsValue> {
+    if opts.is_undefined() || opts.is_null() {
+        return Ok(VarTarget::Host);
+    }
+    let scope = js_sys::Reflect::get(opts, &JsValue::from_str("scope"))
+        .ok()
+        .and_then(|v| v.as_string());
+    match scope.as_deref() {
+        None | Some("host") => Ok(VarTarget::Host),
+        Some("session") => {
+            let id = js_sys::Reflect::get(opts, &JsValue::from_str("session"))
+                .ok()
+                .and_then(|v| v.as_f64())
+                .ok_or_else(|| {
+                    JsValue::from_str(
+                        "{ scope: 'session' } needs a `session` id from snapshot.sessions",
+                    )
+                })?;
+            Ok(VarTarget::Session(id as u32))
+        }
+        Some(other) => Err(JsValue::from_str(&format!(
+            "unknown scope `{other}`: expected 'host' or 'session'"
+        ))),
+    }
+}
+
 /// Handle to the engine held by the TypeScript wrapper.
 #[wasm_bindgen]
 pub struct BtermCore {}
@@ -387,13 +428,17 @@ impl BtermCore {
     /// Inject a value the shell resolves as `$name`, for every session and
     /// every pane, including ones created later.
     ///
+    /// The optional `opts` names the layer: omitted (or `{ scope: 'host' }`)
+    /// writes the engine-wide one, `{ scope: 'session', session: id }` writes
+    /// a single session's, which shadows it there.
+    ///
     /// Throws on a name the shell could not reference. The value crosses as
     /// a typed `Value` and is never parsed as shell source, so a string
     /// containing `; rm -rf /` is that string and cannot become syntax.
     ///
     /// Takes effect from the next command line: a pipeline already running
     /// keeps the values it started with.
-    pub fn set_variable(&self, name: &str, value: JsValue) -> Result<(), JsValue> {
+    pub fn set_variable(&self, name: &str, value: JsValue, opts: JsValue) -> Result<(), JsValue> {
         // Guard first, like every other engine-touching export: reaching
         // `WasmAccess::with` on a disposed engine panics, and with
         // `panic = "abort"` that kills the module rather than throwing
@@ -401,11 +446,14 @@ impl BtermCore {
         if !engine_alive() {
             return Err(JsValue::from_str("browser-terminal: engine is disposed"));
         }
-        // Convert before borrowing: js_to_value can reach into JS, and no
-        // JS call may happen inside an engine borrow.
+        // Both conversions are JS work and happen before the borrow opens.
+        let target = var_target(&opts)?;
         let converted = convert::js_to_value(&value).map_err(|e| JsValue::from_str(&e))?;
         WasmAccess
-            .with(|e| e.set_host_var(name, converted))
+            .with(|e| match target {
+                VarTarget::Host => e.set_host_var(name, converted),
+                VarTarget::Session(id) => e.set_session_var(id, name, converted),
+            })
             .map_err(|err| JsValue::from_str(&err.msg))
     }
 
@@ -418,10 +466,15 @@ impl BtermCore {
     /// partial apply is the worst outcome for a host synchronising editor
     /// state: some values land, one stays stale, and the next command runs
     /// against a mix that looks plausible.
-    pub fn set_variables(&self, values: JsValue) -> Result<(), JsValue> {
+    ///
+    /// `opts` names the layer, exactly as it does for `setVariable`; the
+    /// whole batch lands in one layer.
+    pub fn set_variables(&self, values: JsValue, opts: JsValue) -> Result<(), JsValue> {
         if !engine_alive() {
             return Err(JsValue::from_str("browser-terminal: engine is disposed"));
         }
+        // Parsed before the borrow opens, like every other JS read here.
+        let target = var_target(&opts)?;
         // An array passes `dyn_into::<Object>()` and its indices stringify
         // into legal variable names, so without this a host that meant to
         // pass a record would silently get `$0`, `$1`, … and no error.
@@ -455,48 +508,90 @@ impl BtermCore {
             pending.push((name, value));
         }
 
-        WasmAccess.with(|e| {
-            for (name, value) in pending {
-                // Already validated above; the engine re-checks and the
-                // error is unreachable, so drop it rather than unwrap.
-                let _ = e.set_host_var(&name, value);
+        let applied: Result<(), bterm_core::error::ShellError> = WasmAccess.with(|e| {
+            // An unknown session id has to fail the batch whole, like a bad
+            // name does — so the target is checked before anything lands,
+            // not discovered part-way through the loop.
+            if let VarTarget::Session(id) = target {
+                e.session_vars(id)?;
             }
+            for (name, value) in pending {
+                // Names are already validated above and the session id just
+                // above that; the engine re-checks and both errors are
+                // unreachable here, so drop them rather than unwrap.
+                match target {
+                    VarTarget::Host => {
+                        let _ = e.set_host_var(&name, value);
+                    }
+                    VarTarget::Session(id) => {
+                        let _ = e.set_session_var(id, &name, value);
+                    }
+                }
+            }
+            Ok(())
         });
-        Ok(())
+        applied.map_err(|err| JsValue::from_str(&err.msg))
     }
 
-    /// Remove an injected variable. Returns whether it was set — and false
-    /// on a disposed engine, where nothing is set by definition.
-    pub fn unset_variable(&self, name: &str) -> bool {
+    /// Remove an injected variable from the layer `opts` names. Returns
+    /// whether it was set — and false on a disposed engine, where nothing is
+    /// set by definition.
+    pub fn unset_variable(&self, name: &str, opts: JsValue) -> bool {
         if !engine_alive() {
             return false;
         }
-        WasmAccess.with(|e| e.unset_host_var(name))
+        // A malformed `opts` removes nothing: `-> bool` has nowhere to put an
+        // error, and reporting `true` for a target that was never touched
+        // would be worse than reporting `false`.
+        let Ok(target) = var_target(&opts) else {
+            return false;
+        };
+        WasmAccess.with(|e| match target {
+            VarTarget::Host => e.unset_host_var(name),
+            // The one place a bad session id is not an error: `-> bool` has
+            // nowhere to put one, and a name that is not set in a session
+            // that does not exist is, truthfully, not set. The inconsistency
+            // with the other four is deliberate — do not "fix" it by
+            // widening the return type.
+            VarTarget::Session(id) => e.unset_session_var(id, name).unwrap_or(false),
+        })
     }
 
-    /// The value of an injected variable, or `undefined` if it is not set
-    /// (or the engine is disposed).
+    /// The value of an injected variable in the layer `opts` names, or
+    /// `undefined` if it is not set there (or the engine is disposed, or the
+    /// session id names no session).
+    ///
+    /// One layer, never a merged view: a read that silently fell through to
+    /// the host value would answer a question the caller did not ask.
     ///
     /// `undefined` rather than null: a host can legitimately inject null,
     /// and the two must stay distinguishable.
-    pub fn get_variable(&self, name: &str) -> JsValue {
+    pub fn get_variable(&self, name: &str, opts: JsValue) -> JsValue {
         if !engine_alive() {
             return JsValue::UNDEFINED;
         }
-        let found = WasmAccess.with(|e| e.host_var(name).cloned());
+        let Ok(target) = var_target(&opts) else {
+            return JsValue::UNDEFINED;
+        };
+        let found = WasmAccess.with(|e| match target {
+            VarTarget::Host => e.host_var(name).cloned(),
+            VarTarget::Session(id) => e.session_var(id, name).ok().flatten().cloned(),
+        });
         match found {
             Some(v) => convert::value_to_js(&v),
             None => JsValue::UNDEFINED,
         }
     }
 
-    /// Everything the host injected, as a plain object — or `undefined` if
-    /// the engine is disposed.
+    /// Everything injected into the layer `opts` names, as a plain object —
+    /// or `undefined` if the engine is disposed, or the session id names no
+    /// session.
     ///
-    /// The host layer only: what this API set, never the session or pane
-    /// scopes above it. The shell's `vars` command shows the merged view
-    /// instead, because it answers a different question — what `$name`
-    /// resolves to here.
+    /// One layer, never a merged view: with `opts` omitted this is the host
+    /// scope alone, and with `{ scope: 'session', session: id }` it is that
+    /// session's own, never the two folded together. The shell's `vars`
+    /// command shows the merged view instead, because it answers a different
+    /// question — what `$name` resolves to here.
     ///
     /// Every name passed to `setVariables` appears here, alongside anything
     /// injected earlier and not unset. Values are what the shell holds, not
@@ -509,16 +604,32 @@ impl BtermCore {
     /// differently each time — enough to churn a snapshot test or a diff
     /// for no reason. The `vars` builtin sorts for the same reason; this
     /// keeps the programmatic view as predictable as the shell one.
-    pub fn variables(&self) -> JsValue {
+    pub fn variables(&self, opts: JsValue) -> JsValue {
         if !engine_alive() {
             return JsValue::UNDEFINED;
         }
-        let mut pairs = WasmAccess.with(|e| {
-            e.host_vars()
-                .iter()
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect::<Vec<_>>()
+        let Ok(target) = var_target(&opts) else {
+            return JsValue::UNDEFINED;
+        };
+        let pairs = WasmAccess.with(|e| match target {
+            VarTarget::Host => Some(
+                e.host_vars()
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect::<Vec<_>>(),
+            ),
+            VarTarget::Session(id) => e.session_vars(id).ok().map(|s| {
+                s.iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect::<Vec<_>>()
+            }),
         });
+        // An id naming no session reads back `undefined`, the same answer
+        // `getVariable` gives it — an empty object would claim the session
+        // exists and simply holds nothing.
+        let Some(mut pairs) = pairs else {
+            return JsValue::UNDEFINED;
+        };
         pairs.sort_by(|a, b| a.0.cmp(&b.0));
         let obj = js_sys::Object::new();
         for (name, value) in pairs {

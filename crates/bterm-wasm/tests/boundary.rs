@@ -582,7 +582,8 @@ async fn feed_emits_pane_output_events() {
 #[wasm_bindgen_test]
 async fn a_host_variable_reaches_a_command_as_an_argument() {
     let core = make_core();
-    core.set_variable("greeting", JsValue::from_str("hello")).expect("valid name");
+    core.set_variable("greeting", JsValue::from_str("hello"), JsValue::UNDEFINED)
+        .expect("valid name");
     let out = run_value(&core, "echo $greeting").await.expect("resolves");
     assert_eq!(out.as_string().as_deref(), Some("hello"));
     core.dispose();
@@ -596,16 +597,20 @@ async fn typed_values_survive_the_round_trip() {
     // if the boundary reached for source text instead of typed Values.
     let obj = js_sys::Object::new();
     Reflect::set(&obj, &"k".into(), &JsValue::from_f64(1.0)).expect("set");
-    core.set_variable("rec", obj.into()).expect("valid");
-    core.set_variable("list", Array::of3(&1.0.into(), &2.0.into(), &"three".into()).into())
-        .expect("valid");
-    core.set_variable("num", JsValue::from_f64(42.0)).expect("valid");
-    core.set_variable("nothing", JsValue::NULL).expect("valid");
+    core.set_variable("rec", obj.into(), JsValue::UNDEFINED).expect("valid");
+    core.set_variable(
+        "list",
+        Array::of3(&1.0.into(), &2.0.into(), &"three".into()).into(),
+        JsValue::UNDEFINED,
+    )
+    .expect("valid");
+    core.set_variable("num", JsValue::from_f64(42.0), JsValue::UNDEFINED).expect("valid");
+    core.set_variable("nothing", JsValue::NULL, JsValue::UNDEFINED).expect("valid");
 
     // The field, not just `is_object()`: a JS `Map` is also an object, and
     // convert.rs exists precisely to keep records from becoming one. Reading
     // `k` back fails on a Map, where the entry is not a property.
-    let rec = core.get_variable("rec");
+    let rec = core.get_variable("rec", JsValue::UNDEFINED);
     assert!(!rec.is_instance_of::<js_sys::Map>(), "a record must not come back a Map");
     assert_eq!(
         Reflect::get(&rec, &"k".into()).expect("field k").as_f64(),
@@ -614,29 +619,41 @@ async fn typed_values_survive_the_round_trip() {
     );
 
     // A list stays a list, with its elements and their types intact.
-    let list = core.get_variable("list");
+    let list = core.get_variable("list", JsValue::UNDEFINED);
     let arr: Array = list.dyn_into().expect("a list must come back a JS array");
     assert_eq!(arr.length(), 3);
     assert_eq!(arr.get(0).as_f64(), Some(1.0));
     assert_eq!(arr.get(2).as_string().as_deref(), Some("three"));
 
-    assert_eq!(core.get_variable("num").as_f64(), Some(42.0));
-    assert!(core.get_variable("nothing").is_null(), "a set null stays null");
+    assert_eq!(core.get_variable("num", JsValue::UNDEFINED).as_f64(), Some(42.0));
+    assert!(core.get_variable("nothing", JsValue::UNDEFINED).is_null(), "a set null stays null");
     core.dispose();
 }
 
 #[wasm_bindgen_test]
 async fn unset_is_undefined_and_is_not_the_same_as_null() {
     let core = make_core();
-    core.set_variable("nothing", JsValue::NULL).expect("valid");
+    core.set_variable("nothing", JsValue::NULL, JsValue::UNDEFINED).expect("valid");
     // The distinction the host needs: `sim: null` was injected on purpose,
     // `missing` never existed.
-    assert!(core.get_variable("nothing").is_null(), "set-to-null reads back null");
-    assert!(core.get_variable("missing").is_undefined(), "never-set reads back undefined");
+    assert!(
+        core.get_variable("nothing", JsValue::UNDEFINED).is_null(),
+        "set-to-null reads back null"
+    );
+    assert!(
+        core.get_variable("missing", JsValue::UNDEFINED).is_undefined(),
+        "never-set reads back undefined"
+    );
 
-    assert!(core.unset_variable("nothing"), "removing a set name reports true");
-    assert!(core.get_variable("nothing").is_undefined(), "and it is gone");
-    assert!(!core.unset_variable("nothing"), "removing it again reports false");
+    assert!(core.unset_variable("nothing", JsValue::UNDEFINED), "removing a set name reports true");
+    assert!(
+        core.get_variable("nothing", JsValue::UNDEFINED).is_undefined(),
+        "and it is gone"
+    );
+    assert!(
+        !core.unset_variable("nothing", JsValue::UNDEFINED),
+        "removing it again reports false"
+    );
     core.dispose();
 }
 
@@ -648,21 +665,21 @@ async fn the_variable_methods_throw_after_dispose_rather_than_aborting() {
     // assertion, it ends the run: this test's real subject is that each of
     // these five returns at all.
     let core = make_core();
-    core.set_variable("x", JsValue::from_f64(1.0)).expect("valid");
+    core.set_variable("x", JsValue::from_f64(1.0), JsValue::UNDEFINED).expect("valid");
     core.dispose();
 
-    assert!(core.set_variable("x", JsValue::from_f64(2.0)).is_err());
-    assert!(core.set_variables(js_sys::Object::new().into()).is_err());
-    assert!(!core.unset_variable("x"), "nothing is set on a disposed engine");
-    assert!(core.get_variable("x").is_undefined());
-    assert!(core.variables().is_undefined());
+    assert!(core.set_variable("x", JsValue::from_f64(2.0), JsValue::UNDEFINED).is_err());
+    assert!(core.set_variables(js_sys::Object::new().into(), JsValue::UNDEFINED).is_err());
+    assert!(!core.unset_variable("x", JsValue::UNDEFINED), "nothing is set on a disposed engine");
+    assert!(core.get_variable("x", JsValue::UNDEFINED).is_undefined());
+    assert!(core.variables(JsValue::UNDEFINED).is_undefined());
 }
 
 #[wasm_bindgen_test]
 async fn an_invalid_name_throws_and_stores_nothing() {
     let core = make_core();
-    assert!(core.set_variable("a b", JsValue::from_str("x")).is_err());
-    assert!(core.get_variable("a b").is_undefined());
+    assert!(core.set_variable("a b", JsValue::from_str("x"), JsValue::UNDEFINED).is_err());
+    assert!(core.get_variable("a b", JsValue::UNDEFINED).is_undefined());
     core.dispose();
 }
 
@@ -672,8 +689,10 @@ async fn a_unicode_name_is_accepted_because_the_lexer_accepts_it() {
     // rule itself; what this half adds is that the name survives the
     // boundary and still resolves as `$café` in a real pipeline.
     let core = make_core();
-    core.set_variable("café", JsValue::from_f64(7.0)).expect("unicode letters are var chars");
-    core.set_variable("1", JsValue::from_f64(8.0)).expect("a leading digit is legal");
+    core.set_variable("café", JsValue::from_f64(7.0), JsValue::UNDEFINED)
+        .expect("unicode letters are var chars");
+    core.set_variable("1", JsValue::from_f64(8.0), JsValue::UNDEFINED)
+        .expect("a leading digit is legal");
     let v = run_value(&core, "echo $café").await.expect("resolves");
     assert_eq!(v.as_f64(), Some(7.0));
 
@@ -683,7 +702,7 @@ async fn a_unicode_name_is_accepted_because_the_lexer_accepts_it() {
     // reference. Nothing else would catch that.
     let obj = js_sys::Object::new();
     Reflect::set(&obj, &"café".into(), &JsValue::from_f64(7.0)).expect("set");
-    core.set_variables(obj.into()).expect("set_variables must accept `café`");
+    core.set_variables(obj.into(), JsValue::UNDEFINED).expect("set_variables must accept `café`");
     core.dispose();
 }
 
@@ -694,9 +713,12 @@ async fn set_variables_applies_all_or_nothing() {
     Reflect::set(&obj, &"good".into(), &JsValue::from_str("a")).expect("set");
     Reflect::set(&obj, &"bad name".into(), &JsValue::from_str("b")).expect("set");
 
-    assert!(core.set_variables(obj.into()).is_err(), "one bad name fails the batch");
     assert!(
-        core.get_variable("good").is_undefined(),
+        core.set_variables(obj.into(), JsValue::UNDEFINED).is_err(),
+        "one bad name fails the batch"
+    );
+    assert!(
+        core.get_variable("good", JsValue::UNDEFINED).is_undefined(),
         "nothing may be applied when the batch is rejected"
     );
 
@@ -710,18 +732,32 @@ async fn set_variables_applies_all_or_nothing() {
     Reflect::set(&obj, &"second".into(), &Function::new_no_args("return 1;")).expect("set");
     Reflect::set(&obj, &"third".into(), &JsValue::from_str("c")).expect("set");
 
-    let err = core.set_variables(obj.into()).expect_err("a function is not a shell value");
+    let err = core
+        .set_variables(obj.into(), JsValue::UNDEFINED)
+        .expect_err("a function is not a shell value");
     let msg = err.as_string().unwrap_or_default();
     assert!(msg.contains("second"), "the error must name the offending key: {msg}");
-    assert!(core.get_variable("first").is_undefined(), "a key before the failure must not land");
-    assert!(core.get_variable("third").is_undefined(), "a key after the failure must not land");
+    assert!(
+        core.get_variable("first", JsValue::UNDEFINED).is_undefined(),
+        "a key before the failure must not land"
+    );
+    assert!(
+        core.get_variable("third", JsValue::UNDEFINED).is_undefined(),
+        "a key after the failure must not land"
+    );
 
     // An array is an object to `dyn_into`, and its indices stringify into
     // legal variable names — so a host passing one by mistake would get
     // `$0`/`$1` and no complaint.
     let arr = Array::of2(&"zero".into(), &"one".into());
-    assert!(core.set_variables(arr.into()).is_err(), "an array is not a name → value object");
-    assert!(core.get_variable("0").is_undefined(), "array indices must not become variables");
+    assert!(
+        core.set_variables(arr.into(), JsValue::UNDEFINED).is_err(),
+        "an array is not a name → value object"
+    );
+    assert!(
+        core.get_variable("0", JsValue::UNDEFINED).is_undefined(),
+        "array indices must not become variables"
+    );
     core.dispose();
 }
 
@@ -731,9 +767,9 @@ async fn variables_reads_back_what_was_set() {
     let obj = js_sys::Object::new();
     Reflect::set(&obj, &"a".into(), &JsValue::from_f64(1.0)).expect("set");
     Reflect::set(&obj, &"b".into(), &JsValue::from_str("two")).expect("set");
-    core.set_variables(obj.into()).expect("all names valid");
+    core.set_variables(obj.into(), JsValue::UNDEFINED).expect("all names valid");
 
-    let all = core.variables();
+    let all = core.variables(JsValue::UNDEFINED);
     assert_eq!(Reflect::get(&all, &"a".into()).expect("get").as_f64(), Some(1.0));
     assert_eq!(
         Reflect::get(&all, &"b".into()).expect("get").as_string().as_deref(),
@@ -750,16 +786,90 @@ async fn variables_come_back_sorted_by_name() {
     // expected answer by luck.
     let core = make_core();
     for name in ["zeta", "alpha", "mid", "beta"] {
-        core.set_variable(name, JsValue::from_f64(1.0)).expect("valid name");
+        core.set_variable(name, JsValue::from_f64(1.0), JsValue::UNDEFINED).expect("valid name");
     }
 
-    let keys = js_sys::Object::keys(&core.variables().into());
+    let keys = js_sys::Object::keys(&core.variables(JsValue::UNDEFINED).into());
     let got: Vec<String> = keys.iter().filter_map(|k| k.as_string()).collect();
     assert_eq!(
         got,
         vec!["alpha", "beta", "mid", "zeta"],
         "a host serializing this must get the same bytes for the same state"
     );
+    core.dispose();
+}
+
+#[wasm_bindgen_test]
+async fn omitting_opts_still_means_the_host_layer() {
+    // Every call site written before session scope existed must keep
+    // working, which is why host is the default rather than an explicit
+    // choice the caller has to make.
+    let core = make_core();
+    core.set_variable("g", JsValue::from_str("host"), JsValue::UNDEFINED).expect("valid");
+    assert_eq!(
+        core.get_variable("g", JsValue::UNDEFINED).as_string().as_deref(),
+        Some("host")
+    );
+    core.dispose();
+}
+
+#[wasm_bindgen_test]
+async fn a_session_scoped_value_shadows_the_host_one_in_that_session() {
+    let core = make_core();
+    let snap = core.snapshot();
+    let sessions = Reflect::get(&snap, &"sessions".into()).expect("sessions");
+    let first = js_sys::Array::from(&sessions).get(0);
+    let sid = Reflect::get(&first, &"id".into()).expect("id").as_f64().expect("number");
+
+    let opts = js_sys::Object::new();
+    Reflect::set(&opts, &"scope".into(), &"session".into()).expect("set");
+    Reflect::set(&opts, &"session".into(), &JsValue::from_f64(sid)).expect("set");
+
+    core.set_variable("x", JsValue::from_str("host"), JsValue::UNDEFINED).expect("valid");
+    core.set_variable("x", JsValue::from_str("session"), opts.clone().into()).expect("valid");
+
+    // Reads name a layer and never merge, so each returns its own.
+    assert_eq!(
+        core.get_variable("x", JsValue::UNDEFINED).as_string().as_deref(),
+        Some("host")
+    );
+    assert_eq!(
+        core.get_variable("x", opts.clone().into()).as_string().as_deref(),
+        Some("session")
+    );
+    // What actually resolves is the session one.
+    let v = run_value(&core, "echo $x").await.expect("resolves");
+    assert_eq!(v.as_string().as_deref(), Some("session"));
+    core.dispose();
+}
+
+#[wasm_bindgen_test]
+async fn an_unknown_session_id_throws_rather_than_aborting() {
+    let core = make_core();
+    let opts = js_sys::Object::new();
+    Reflect::set(&opts, &"scope".into(), &"session".into()).expect("set");
+    Reflect::set(&opts, &"session".into(), &JsValue::from_f64(9999.0)).expect("set");
+
+    assert!(core.set_variable("x", JsValue::from_str("v"), opts.clone().into()).is_err());
+    assert!(core.get_variable("x", opts.clone().into()).is_undefined());
+    core.dispose();
+}
+
+#[wasm_bindgen_test]
+async fn a_malformed_scope_option_is_rejected() {
+    let core = make_core();
+
+    // `scope: 'session'` with no id has no target at all.
+    let no_id = js_sys::Object::new();
+    Reflect::set(&no_id, &"scope".into(), &"session".into()).expect("set");
+    assert!(core.set_variable("x", JsValue::from_f64(1.0), no_id.into()).is_err());
+
+    // An unrecognised scope is a typo, not a silent fallback to host —
+    // falling back would put the value somewhere the caller did not ask for.
+    let bogus = js_sys::Object::new();
+    Reflect::set(&bogus, &"scope".into(), &"sesion".into()).expect("set");
+    assert!(core.set_variable("x", JsValue::from_f64(1.0), bogus.into()).is_err());
+    assert!(core.get_variable("x", JsValue::UNDEFINED).is_undefined(), "nothing stored");
     core.dispose();
 }
 
