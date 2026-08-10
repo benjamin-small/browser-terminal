@@ -743,6 +743,27 @@ async fn variables_reads_back_what_was_set() {
 }
 
 #[wasm_bindgen_test]
+async fn variables_come_back_sorted_by_name() {
+    // The underlying Scope is a HashMap, so insertion order tells you
+    // nothing about iteration order. Names are inserted in reverse and in
+    // a jumble precisely so an unsorted implementation cannot land on the
+    // expected answer by luck.
+    let core = make_core();
+    for name in ["zeta", "alpha", "mid", "beta"] {
+        core.set_variable(name, JsValue::from_f64(1.0)).expect("valid name");
+    }
+
+    let keys = js_sys::Object::keys(&core.variables().into());
+    let got: Vec<String> = keys.iter().filter_map(|k| k.as_string()).collect();
+    assert_eq!(
+        got,
+        vec!["alpha", "beta", "mid", "zeta"],
+        "a host serializing this must get the same bytes for the same state"
+    );
+    core.dispose();
+}
+
+#[wasm_bindgen_test]
 async fn abort_signal_fires_on_ctrl_c() {
     let core = make_core();
     let sig = js_sys::JSON::parse(r#"{"name":"hang"}"#).expect("sig");

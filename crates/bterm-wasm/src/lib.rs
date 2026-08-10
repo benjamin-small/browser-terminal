@@ -501,18 +501,25 @@ impl BtermCore {
     /// Every name passed to `setVariables` appears here, alongside anything
     /// injected earlier and not unset. Values are what the shell holds, not
     /// the objects handed in: they have been through the same conversion
-    /// command arguments take, so `undefined` reads back as `null` and key
-    /// order is not preserved.
+    /// command arguments take, so `undefined` reads back as `null`.
+    ///
+    /// Keys come back sorted. The underlying `Scope` is a `HashMap`, whose
+    /// iteration order varies run to run, so without this a host doing
+    /// `JSON.stringify(bt.variables())` would see the same state serialize
+    /// differently each time — enough to churn a snapshot test or a diff
+    /// for no reason. The `vars` builtin sorts for the same reason; this
+    /// keeps the programmatic view as predictable as the shell one.
     pub fn variables(&self) -> JsValue {
         if !engine_alive() {
             return JsValue::UNDEFINED;
         }
-        let pairs = WasmAccess.with(|e| {
+        let mut pairs = WasmAccess.with(|e| {
             e.host_vars()
                 .iter()
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect::<Vec<_>>()
         });
+        pairs.sort_by(|a, b| a.0.cmp(&b.0));
         let obj = js_sys::Object::new();
         for (name, value) in pairs {
             let _ = js_sys::Reflect::set(
