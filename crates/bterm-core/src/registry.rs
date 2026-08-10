@@ -71,6 +71,13 @@ pub trait HostHooks {
     fn history(&self) -> Vec<String> {
         Vec::new()
     }
+    /// Variables visible to a pipeline here, as `$name` would resolve them:
+    /// the host's injected values with any session-local ones layered on
+    /// top. Named for the question it answers — `Engine::host_vars` returns
+    /// only the host layer.
+    fn visible_vars(&self) -> Vec<(String, Value)> {
+        Vec::new()
+    }
     /// `clear` builtin: wipe the screen.
     fn request_clear(&self) {}
     /// `help` with no args: (name, summary) for every registered command.

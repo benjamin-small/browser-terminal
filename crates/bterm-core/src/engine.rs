@@ -486,6 +486,10 @@ impl<A: EngineAccess> HostHooks for EngineHost<A> {
             .unwrap_or_default()
     }
 
+    fn visible_vars(&self) -> Vec<(String, Value)> {
+        scope_for_pane(&self.access, self.pane).into_iter().collect()
+    }
+
     fn request_clear(&self) {
         self.access.with(|e| e.emit_output(self.pane, "\x1b[2J\x1b[H"));
         self.access.events_ready();
@@ -1705,3 +1709,4 @@ mod tests {
         );
     }
 }
+
