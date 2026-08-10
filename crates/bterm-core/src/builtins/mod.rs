@@ -719,16 +719,19 @@ fn history(ctx: ExecContext, _call: BoundCall, _input: PipelineData) -> Result<P
 }
 
 fn vars(ctx: ExecContext, _call: BoundCall, _input: PipelineData) -> Result<PipelineData, ShellError> {
-    let mut pairs = ctx.host.visible_vars();
-    // Sorted so the table is stable between runs: a HashMap iterates in an
-    // arbitrary order, which would make the output shuffle and any test
-    // asserting on it flaky.
-    pairs.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut rows = ctx.host.visible_vars();
+    // Sorted so the table is stable between runs: the underlying maps
+    // iterate in an arbitrary order, which would make the output shuffle
+    // and any test asserting on it flaky.
+    rows.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(PipelineData::Value(Value::List(
-        pairs
-            .into_iter()
-            .map(|(name, value)| {
-                Value::record([("name".to_string(), Value::Str(name)), ("value".to_string(), value)])
+        rows.into_iter()
+            .map(|row| {
+                Value::record([
+                    ("name".to_string(), Value::Str(row.name)),
+                    ("scope".to_string(), Value::Str(row.origin.as_str().to_string())),
+                    ("value".to_string(), row.value),
+                ])
             })
             .collect(),
     )))
@@ -766,13 +769,21 @@ mod tests {
         fn help_for(&self, name: &str) -> Option<String> {
             (name == "echo").then(|| "echo help text".to_string())
         }
-        fn visible_vars(&self) -> Vec<(String, Value)> {
+        fn visible_vars(&self) -> Vec<crate::registry::VisibleVar> {
+            use crate::registry::{VarOrigin, VisibleVar};
             // Deliberately out of order, so the sort in `vars` is doing real
-            // work — an unsorted implementation renders zebra first and
-            // `vars_lists_injected_variables_sorted_by_name` catches it.
+            // work, and deliberately mixed-origin so the label is too.
             vec![
-                ("zebra".into(), Value::Int(2)),
-                ("alpha".into(), Value::Str("first".into())),
+                VisibleVar {
+                    name: "zebra".into(),
+                    origin: VarOrigin::Session,
+                    value: Value::Int(2),
+                },
+                VisibleVar {
+                    name: "alpha".into(),
+                    origin: VarOrigin::Host,
+                    value: Value::Str("first".into()),
+                },
             ]
         }
     }
@@ -921,14 +932,25 @@ mod tests {
             Value::List(vec![
                 Value::record([
                     ("name".to_string(), Value::Str("alpha".into())),
+                    ("scope".to_string(), Value::Str("host".into())),
                     ("value".to_string(), Value::Str("first".into())),
                 ]),
                 Value::record([
                     ("name".to_string(), Value::Str("zebra".into())),
+                    ("scope".to_string(), Value::Str("session".into())),
                     ("value".to_string(), Value::Int(2)),
                 ]),
             ])
         );
+    }
+
+    #[test]
+    fn vars_labels_where_each_value_came_from() {
+        // The column exists so a shadowed value is visible at the moment
+        // someone asks why `$x` is not what they set. Filtering on it is
+        // the point, so it has to pipe.
+        let v = eval("vars | filter {|r| $r.scope == 'session'} | get name").expect("eval");
+        assert_eq!(v, Value::Str("zebra".into()));
     }
 
     #[test]

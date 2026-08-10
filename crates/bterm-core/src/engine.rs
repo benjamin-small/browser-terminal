@@ -550,8 +550,35 @@ impl<A: EngineAccess> HostHooks for EngineHost<A> {
             .unwrap_or_default()
     }
 
-    fn visible_vars(&self) -> Vec<(String, Value)> {
-        scope_for_pane(&self.access, self.pane).into_iter().collect()
+    fn visible_vars(&self) -> Vec<crate::registry::VisibleVar> {
+        use crate::registry::{VarOrigin, VisibleVar};
+        self.access.with(|e| {
+            let session_vars = e
+                .mux
+                .session_of_pane(self.pane)
+                .and_then(|sid| e.mux.sessions.get(&sid))
+                .map(|s| s.vars.clone())
+                .unwrap_or_default();
+            // A shadowed host entry is dropped rather than listed twice:
+            // `vars` answers what a name resolves to, and a name resolves
+            // to one value.
+            let mut out: Vec<VisibleVar> = e
+                .host_vars()
+                .iter()
+                .filter(|(name, _)| !session_vars.contains_key(*name))
+                .map(|(name, value)| VisibleVar {
+                    name: name.clone(),
+                    origin: VarOrigin::Host,
+                    value: value.clone(),
+                })
+                .collect();
+            out.extend(session_vars.into_iter().map(|(name, value)| VisibleVar {
+                name,
+                origin: VarOrigin::Session,
+                value,
+            }));
+            out
+        })
     }
 
     fn request_clear(&self) {
@@ -1841,6 +1868,30 @@ mod tests {
             assert!(e.session_var(missing, "x").is_err());
             assert!(e.session_vars(missing).is_err());
         });
+    }
+
+    #[test]
+    fn vars_shows_a_shadowed_name_once_labelled_session() {
+        let access = engine();
+        let sid = access.with(|e| e.mux.active_session);
+        access.with(|e| {
+            e.set_host_var("shared", Value::Str("host".into())).expect("valid");
+            e.set_host_var("only_host", Value::Int(1)).expect("valid");
+            e.set_session_var(sid, "shared", Value::Str("session".into())).expect("valid");
+        });
+        // Two names, not three: the shadowed host entry is hidden, not
+        // duplicated. `map` keeps every stage non-singleton.
+        assert_eq!(run_line(&access, "vars | length").expect("resolves"), Value::Int(2));
+        assert_eq!(
+            run_line(&access, "vars | filter {|r| $r.name == 'shared'} | map {|r| $r.scope}")
+                .expect("resolves"),
+            Value::Str("session".into())
+        );
+        assert_eq!(
+            run_line(&access, "vars | filter {|r| $r.name == 'shared'} | map {|r| $r.value}")
+                .expect("resolves"),
+            Value::Str("session".into())
+        );
     }
 
     #[test]

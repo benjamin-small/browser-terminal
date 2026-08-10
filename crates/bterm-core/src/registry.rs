@@ -64,6 +64,33 @@ pub enum MuxAction {
     SessionPrev,
 }
 
+/// Which layer a visible variable came from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VarOrigin {
+    /// Injected engine-wide by the host; visible in every session.
+    Host,
+    /// Injected into one session, shadowing any host value of that name.
+    Session,
+}
+
+impl VarOrigin {
+    /// The label the `vars` table shows.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            VarOrigin::Host => "host",
+            VarOrigin::Session => "session",
+        }
+    }
+}
+
+/// One row of what `$name` would resolve to here.
+#[derive(Clone, Debug, PartialEq)]
+pub struct VisibleVar {
+    pub name: String,
+    pub origin: VarOrigin,
+    pub value: Value,
+}
+
 /// Host services a command may touch. Implemented by the CLI (stdout,
 /// readline history) and by the wasm engine (pane output, pane history).
 pub trait HostHooks {
@@ -73,9 +100,11 @@ pub trait HostHooks {
     }
     /// Variables visible to a pipeline here, as `$name` would resolve them:
     /// the host's injected values with any session-local ones layered on
-    /// top. Named for the question it answers — `Engine::host_vars` returns
-    /// only the host layer.
-    fn visible_vars(&self) -> Vec<(String, Value)> {
+    /// top, each labelled with where it came from. A shadowed host value is
+    /// absent rather than listed twice — a name resolves to one thing.
+    /// Named for the question it answers; `Engine::host_vars` returns only
+    /// the host layer.
+    fn visible_vars(&self) -> Vec<VisibleVar> {
         Vec::new()
     }
     /// `clear` builtin: wipe the screen.
