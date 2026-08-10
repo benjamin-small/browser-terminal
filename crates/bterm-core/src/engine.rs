@@ -636,9 +636,11 @@ fn make_ctx<A: EngineAccess>(
 
 /// The variables a pipeline in `pane` can see.
 ///
-/// The only place a `Scope` is built, which is why one merge here covers
-/// interactive panes, `run()`, positional arguments, flag values, and
-/// `"…$name…"` interpolation.
+/// The only place the engine derives an evaluation scope, which is why one
+/// merge here covers interactive panes, `run()`, positional arguments, flag
+/// values, and `"…$name…"` interpolation. (A `Scope` is a plain map and is
+/// constructed elsewhere — an empty one per session, a derived one per
+/// closure call — but nothing else decides what a submitted line can see.)
 ///
 /// Host underneath, session on top: a session's own value wins. That map is
 /// always empty today, so the `extend` is a no-op — but writing the
@@ -1602,7 +1604,19 @@ mod tests {
             assert!(err.msg.contains("a b"), "the error should name the offender: {}", err.msg);
             assert!(e.host_vars().is_empty(), "nothing should have been stored");
             assert_eq!(e.host_var("a b"), None);
+
+            // Names the lexer accepts that an ASCII-only rule would not: this
+            // is what pins the reuse of `is_valid_var_name` rather than a
+            // hand-written pattern. `is_var_char` is Unicode-aware and
+            // imposes no leading-character rule.
+            e.set_host_var("café", Value::Int(7)).expect("unicode letters are var chars");
+            e.set_host_var("1", Value::Int(8)).expect("a leading digit is legal");
         });
+        // Accepted *and* referenceable: the rule is only right if the lexer
+        // agrees, so assert through evaluation rather than on the validator's
+        // return value alone.
+        assert_eq!(run_line(&access, "echo $café").expect("resolves"), Value::Int(7));
+        assert_eq!(run_line(&access, "echo $1").expect("resolves"), Value::Int(8));
     }
 
     #[test]
@@ -1617,12 +1631,59 @@ mod tests {
         );
     }
 
+    /// Sets `$x` to 2 when it runs, so a line can mutate a host variable
+    /// partway through and the rest of that line can be checked against it.
+    struct Bump(Rc<RefCell<Engine>>);
+    impl Command for Bump {
+        fn signature(&self) -> &Signature {
+            static SIG: std::sync::OnceLock<Signature> = std::sync::OnceLock::new();
+            SIG.get_or_init(|| Signature::build("bump", "sets the host variable x to 2"))
+        }
+        fn run(
+            &self,
+            _ctx: ExecContext,
+            _call: BoundCall,
+            _input: crate::chan::Receiver,
+            _output: crate::chan::Sender,
+        ) -> LocalBoxFuture<Result<(), ShellError>> {
+            // A short synchronous borrow, released before this returns: the
+            // future below never holds one across an await.
+            let result = self
+                .0
+                .with(|e| e.set_host_var("x", Value::Int(2)));
+            crate::registry::ready(result)
+        }
+    }
+
     #[test]
     fn a_pipeline_keeps_the_values_its_line_started_with() {
-        // The scope is cloned per line, so changing a variable while a
-        // pipeline runs cannot change what that pipeline sees. Asserted on
-        // the scope itself rather than through a timing-dependent command,
-        // so it cannot go flaky.
+        // The teeth of the freshness guarantee: `bump` really does change the
+        // engine's host variable mid-line, and `echo $x` -- a later pipeline
+        // of the *same* line -- must still report what the line started with.
+        // Re-deriving the scope per pipeline (live lookup) makes this say 2.
+        let access = engine();
+        access.with(|e| {
+            e.registry.register_builtin(Rc::new(Bump(access.clone())));
+            e.set_host_var("x", Value::Int(1)).expect("valid");
+        });
+        assert_eq!(
+            run_line(&access, "bump; echo $x").expect("resolves"),
+            Value::Int(1),
+            "a line sees the values it started with, not a mid-line write"
+        );
+        // The write did land -- otherwise the assertion above would pass for
+        // the wrong reason.
+        access.with(|e| assert_eq!(e.host_var("x"), Some(&Value::Int(2)), "bump ran"));
+        // And the next line picks it up.
+        assert_eq!(run_line(&access, "echo $x").expect("resolves"), Value::Int(2));
+    }
+
+    #[test]
+    fn scope_for_pane_returns_an_owned_snapshot() {
+        // Narrower than the test above: it only shows that host variables
+        // reach the derived scope and that the scope is owned, so a later
+        // write cannot reach back into one already taken. It says nothing
+        // about when evaluation takes it -- that is the mid-line test's job.
         let access = engine();
         let pane = active_pane(&access);
         access.with(|e| {
