@@ -27,7 +27,7 @@ checksum = "b588b76d00fde79687d7646a9b5bdf3cc0f655e0bbd080335a95d7e96f3587da"
 
 [[package]]
 name = "bterm-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bterm-core",
  "rustyline",
@@ -35,7 +35,7 @@ dependencies = [
 
 [[package]]
 name = "bterm-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "indexmap",
  "serde",
@@ -45,7 +45,7 @@ dependencies = [
 
 [[package]]
 name = "bterm-wasm"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bterm-core",
  "js-sys",

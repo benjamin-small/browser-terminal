@@ -1,6 +1,6 @@
 {
   "name": "@benjamin-small/browser-terminal",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "A terminal/tmux experience for any web page, powered by a Rust/WASM core with structured-value pipes.",
   "license": "Apache-2.0",
   "author": "Benjamin Small",
