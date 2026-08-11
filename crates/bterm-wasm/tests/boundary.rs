@@ -558,7 +558,7 @@ async fn signature_typo_errors_loudly() {
     let err = core
         .register_command(sig, Function::new_with_args("a", "return 1;"))
         .expect_err("unknown field must error");
-    let msg = err.as_string().unwrap_or_default();
+    let msg = err_message(&err);
     assert!(msg.contains("invalid command signature"), "{msg}");
     core.dispose();
 }
@@ -743,7 +743,7 @@ async fn set_variables_applies_all_or_nothing() {
     let err = core
         .set_variables(obj.into(), JsValue::UNDEFINED)
         .expect_err("a function is not a shell value");
-    let msg = err.as_string().unwrap_or_default();
+    let msg = err_message(&err);
     assert!(msg.contains("second"), "the error must name the offending key: {msg}");
     assert!(
         core.get_variable("first", JsValue::UNDEFINED).expect("host layer").is_undefined(),
@@ -948,4 +948,103 @@ async fn abort_signal_fires_on_ctrl_c() {
         .unwrap_or(false);
     assert!(aborted, "TS command observed the AbortSignal");
     core.dispose();
+}
+
+/// Every rejection this crate produces must be a real `Error`.
+///
+/// A raw string throw satisfies `is_err()` — which is all any other test
+/// here checks — while breaking the one line every JS consumer writes:
+/// `catch (e) { … e.message }` reads `undefined`. `run()` already rejects
+/// with a real Error, so a string throw anywhere else means the same
+/// library behaves two different ways.
+fn assert_is_js_error(v: &JsValue, what: &str) {
+    assert!(
+        v.is_instance_of::<js_sys::Error>(),
+        "{what} threw a {} rather than an Error: {:?}",
+        if v.as_string().is_some() { "string" } else { "non-Error value" },
+        v
+    );
+    let msg = v
+        .clone()
+        .dyn_into::<js_sys::Error>()
+        .expect("checked above")
+        .message();
+    assert!(
+        !String::from(msg).is_empty(),
+        "{what} threw an Error with an empty message"
+    );
+}
+
+#[wasm_bindgen_test]
+async fn every_rejection_is_a_real_error_with_a_message() {
+    let core = make_core();
+
+    let bad_session = js_sys::Object::new();
+    Reflect::set(&bad_session, &"scope".into(), &"session".into()).expect("set");
+    Reflect::set(&bad_session, &"session".into(), &JsValue::from_f64(9999.0)).expect("set");
+
+    assert_is_js_error(
+        &core
+            .set_variable("x", JsValue::from_f64(1.0), bad_session.clone().into())
+            .unwrap_err(),
+        "set_variable with an unknown session",
+    );
+    assert_is_js_error(
+        &core
+            .set_variable("a b", JsValue::from_f64(1.0), JsValue::UNDEFINED)
+            .unwrap_err(),
+        "set_variable with an invalid name",
+    );
+    assert_is_js_error(
+        &core.get_variable("x", bad_session.clone().into()).unwrap_err(),
+        "get_variable with an unknown session",
+    );
+    assert_is_js_error(
+        &core.variables(bad_session.clone().into()).unwrap_err(),
+        "variables with an unknown session",
+    );
+    assert_is_js_error(
+        &core
+            .set_variables(JsValue::from_f64(1.0), JsValue::UNDEFINED)
+            .unwrap_err(),
+        "set_variables given a non-object",
+    );
+
+    // A registration failure is the same story from a different method.
+    let sig = js_sys::JSON::parse(r#"{"name":"echo"}"#).expect("sig");
+    assert_is_js_error(
+        &core
+            .register_command(sig, Function::new_no_args("return 1;"))
+            .unwrap_err(),
+        "register_command colliding with a builtin",
+    );
+    assert_is_js_error(
+        &core
+            .register_fn("", Function::new_no_args("return 1;"))
+            .unwrap_err(),
+        "register_fn with an empty name",
+    );
+
+    core.dispose();
+
+    // And after dispose, where the message is the only clue a consumer gets.
+    assert_is_js_error(
+        &core
+            .set_variable("x", JsValue::from_f64(1.0), JsValue::UNDEFINED)
+            .unwrap_err(),
+        "set_variable after dispose",
+    );
+}
+
+/// The text of a thrown error, however it was thrown.
+///
+/// The two callers above used to read `err.as_string()`, which worked only
+/// because this crate threw bare strings — it reads `None` from a real
+/// `Error`. What each one asserts about the *content* is unchanged; only
+/// the way the content is reached had to move.
+fn err_message(err: &JsValue) -> String {
+    err.clone()
+        .dyn_into::<js_sys::Error>()
+        .map(|e| String::from(e.message()))
+        .unwrap_or_else(|v| v.as_string().unwrap_or_default())
 }

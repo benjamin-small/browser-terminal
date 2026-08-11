@@ -106,6 +106,17 @@ fn string_array(lines: &[String]) -> js_sys::Array {
     lines.iter().map(|s| JsValue::from_str(s)).collect()
 }
 
+/// Every error this crate hands to JS goes through here.
+///
+/// `JsValue::from_str` throws a bare string: `catch (e) { e.message }` —
+/// the line every consumer writes — reads `undefined`, and the text is
+/// only reachable via `String(e)`. `run()` has always rejected with a real
+/// `Error`, so a string throw anywhere else means one library behaving two
+/// ways. Nothing caught it because asserting `is_err()` is true either way.
+fn js_error(msg: impl AsRef<str>) -> JsValue {
+    js_sys::Error::new(msg.as_ref()).into()
+}
+
 /// Build `run()`'s rejection: a real `Error` carrying whatever the pipeline
 /// wrote before it failed.
 ///
@@ -236,13 +247,13 @@ fn var_target(opts: &JsValue) -> Result<VarTarget, JsValue> {
                 .ok()
                 .and_then(|v| v.as_f64())
                 .ok_or_else(|| {
-                    JsValue::from_str(
+                    js_error(
                         "{ scope: 'session' } needs a `session` id from snapshot.sessions",
                     )
                 })?;
             Ok(VarTarget::Session(id as u32))
         }
-        Some(other) => Err(JsValue::from_str(&format!(
+        Some(other) => Err(js_error(format!(
             "unknown scope `{other}`: expected 'host' or 'session'"
         ))),
     }
@@ -259,7 +270,7 @@ impl BtermCore {
     #[wasm_bindgen(constructor)]
     pub fn new(on_event: js_sys::Function) -> Result<BtermCore, JsValue> {
         if engine_alive() {
-            return Err(JsValue::from_str(
+            return Err(js_error(
                 "browser-terminal: one instance per page in v1; call dispose() first.",
             ));
         }
@@ -293,11 +304,11 @@ impl BtermCore {
             return Ok(());
         }
         let json = js_sys::JSON::stringify(&msg)
-            .map_err(|_| JsValue::from_str("invalid HostMsg: not JSON-serializable"))?;
+            .map_err(|_| js_error("invalid HostMsg: not JSON-serializable"))?;
         let msg: bterm_core::protocol::HostMsg = serde_json::from_str(
-            &json.as_string().ok_or_else(|| JsValue::from_str("invalid HostMsg"))?,
+            &json.as_string().ok_or_else(|| js_error("invalid HostMsg"))?,
         )
-        .map_err(|e| JsValue::from_str(&format!("invalid HostMsg: {e}")))?;
+        .map_err(|e| js_error(format!("invalid HostMsg: {e}")))?;
 
         let result = WasmAccess.with(|e| e.handle_msg(msg));
         if !result.closed_panes.is_empty() {
@@ -363,22 +374,22 @@ impl BtermCore {
     /// console warning.
     pub fn register_command(&self, sig: JsValue, f: js_sys::Function) -> Result<(), JsValue> {
         if !engine_alive() {
-            return Err(JsValue::from_str("browser-terminal: engine is disposed"));
+            return Err(js_error("browser-terminal: engine is disposed"));
         }
         // Through JSON text, not serde_wasm_bindgen::from_value:
         // serde-wasm-bindgen reads struct fields by direct property lookup,
         // which silently ignores unknown fields — a TS author's typo
         // (`flag` vs `flags`) must error loudly instead.
         let sig_json = js_sys::JSON::stringify(&sig)
-            .map_err(|_| JsValue::from_str("invalid command signature: not JSON-serializable"))?;
+            .map_err(|_| js_error("invalid command signature: not JSON-serializable"))?;
         let sig: Signature = serde_json::from_str(
             &sig_json
                 .as_string()
-                .ok_or_else(|| JsValue::from_str("invalid command signature"))?,
+                .ok_or_else(|| js_error("invalid command signature"))?,
         )
-        .map_err(|e| JsValue::from_str(&format!("invalid command signature: {e}")))?;
+        .map_err(|e| js_error(format!("invalid command signature: {e}")))?;
         if sig.name.trim().is_empty() {
-            return Err(JsValue::from_str("command name must not be empty"));
+            return Err(js_error("command name must not be empty"));
         }
         let name = sig.name.clone();
         let outcome = WasmAccess.with(|e| {
@@ -393,7 +404,7 @@ impl BtermCore {
                 Ok(())
             }
             Ok(_) => Ok(()),
-            Err(e) => Err(JsValue::from_str(&e.msg)),
+            Err(e) => Err(js_error(&e.msg)),
         }
     }
 
@@ -410,10 +421,10 @@ impl BtermCore {
     /// so it works under a strict Content-Security-Policy.
     pub fn register_fn(&self, name: &str, func: js_sys::Function) -> Result<(), JsValue> {
         if name.trim().is_empty() {
-            return Err(JsValue::from_str("function name must not be empty"));
+            return Err(js_error("function name must not be empty"));
         }
         if name.starts_with('@') {
-            return Err(JsValue::from_str(
+            return Err(js_error(
                 "register the bare name; `@` is only used at the call site",
             ));
         }
@@ -444,17 +455,17 @@ impl BtermCore {
         // `panic = "abort"` that kills the module rather than throwing
         // something a caller could catch.
         if !engine_alive() {
-            return Err(JsValue::from_str("browser-terminal: engine is disposed"));
+            return Err(js_error("browser-terminal: engine is disposed"));
         }
         // Both conversions are JS work and happen before the borrow opens.
         let target = var_target(&opts)?;
-        let converted = convert::js_to_value(&value).map_err(|e| JsValue::from_str(&e))?;
+        let converted = convert::js_to_value(&value).map_err(|e| js_error(&e))?;
         WasmAccess
             .with(|e| match target {
                 VarTarget::Host => e.set_host_var(name, converted),
                 VarTarget::Session(id) => e.set_session_var(id, name, converted),
             })
-            .map_err(|err| JsValue::from_str(&err.msg))
+            .map_err(|err| js_error(&err.msg))
     }
 
     /// Set several variables at once. Names not mentioned are left alone —
@@ -471,7 +482,7 @@ impl BtermCore {
     /// whole batch lands in one layer.
     pub fn set_variables(&self, values: JsValue, opts: JsValue) -> Result<(), JsValue> {
         if !engine_alive() {
-            return Err(JsValue::from_str("browser-terminal: engine is disposed"));
+            return Err(js_error("browser-terminal: engine is disposed"));
         }
         // Parsed before the borrow opens, like every other JS read here.
         let target = var_target(&opts)?;
@@ -479,13 +490,13 @@ impl BtermCore {
         // into legal variable names, so without this a host that meant to
         // pass a record would silently get `$0`, `$1`, … and no error.
         if js_sys::Array::is_array(&values) {
-            return Err(JsValue::from_str(
+            return Err(js_error(
                 "setVariables expects an object of name → value, not an array",
             ));
         }
         let obj: js_sys::Object = values
             .dyn_into()
-            .map_err(|_| JsValue::from_str("setVariables expects an object"))?;
+            .map_err(|_| js_error("setVariables expects an object"))?;
 
         // Convert and validate everything first — still outside any borrow.
         // Both halves have to happen up front: validating names but
@@ -497,14 +508,14 @@ impl BtermCore {
             let pair: js_sys::Array = entry.into();
             let name = pair.get(0).as_string().unwrap_or_default();
             if !bterm_core::lex::is_valid_var_name(&name) {
-                return Err(JsValue::from_str(&format!(
+                return Err(js_error(format!(
                     "`{name}` is not a valid variable name: use letters, digits and `_`"
                 )));
             }
             // Name the key: a batch can be large, and "cannot convert a JS
             // function" on its own leaves the host hunting for which one.
             let value = convert::js_to_value(&pair.get(1))
-                .map_err(|e| JsValue::from_str(&format!("`{name}`: {e}")))?;
+                .map_err(|e| js_error(format!("`{name}`: {e}")))?;
             pending.push((name, value));
         }
 
@@ -530,7 +541,7 @@ impl BtermCore {
             }
             Ok(())
         });
-        applied.map_err(|err| JsValue::from_str(&err.msg))
+        applied.map_err(|err| js_error(&err.msg))
     }
 
     /// Remove an injected variable from the layer `opts` names. Returns
@@ -575,7 +586,7 @@ impl BtermCore {
         // disposed engine panics, and `panic = "abort"` makes that fatal
         // rather than catchable.
         if !engine_alive() {
-            return Err(JsValue::from_str("browser-terminal: engine is disposed"));
+            return Err(js_error("browser-terminal: engine is disposed"));
         }
         // JS work, so before the borrow opens.
         let target = var_target(&opts)?;
@@ -584,7 +595,7 @@ impl BtermCore {
                 VarTarget::Host => Ok(e.host_var(name).cloned()),
                 VarTarget::Session(id) => e.session_var(id, name).map(|v| v.cloned()),
             })
-            .map_err(|err| JsValue::from_str(&err.msg))?;
+            .map_err(|err| js_error(&err.msg))?;
         // The conversion is a JS call, so it happens after the borrow closes.
         Ok(match found {
             Some(v) => convert::value_to_js(&v),
@@ -618,7 +629,7 @@ impl BtermCore {
     /// keeps the programmatic view as predictable as the shell one.
     pub fn variables(&self, opts: JsValue) -> Result<JsValue, JsValue> {
         if !engine_alive() {
-            return Err(JsValue::from_str("browser-terminal: engine is disposed"));
+            return Err(js_error("browser-terminal: engine is disposed"));
         }
         let target = var_target(&opts)?;
         // Pairs are collected out of the borrow first: building the object
@@ -641,7 +652,7 @@ impl BtermCore {
                         .collect::<Vec<_>>()
                 }),
             })
-            .map_err(|err| JsValue::from_str(&err.msg))?;
+            .map_err(|err| js_error(&err.msg))?;
         pairs.sort_by(|a, b| a.0.cmp(&b.0));
         let obj = js_sys::Object::new();
         for (name, value) in pairs {
@@ -668,7 +679,7 @@ impl BtermCore {
     /// same tick rejects it with `aborted`.
     pub fn run(&self, pane: u32, line: String) -> js_sys::Promise {
         if !engine_alive() {
-            return js_sys::Promise::reject(&JsValue::from_str(
+            return js_sys::Promise::reject(&js_error(
                 "browser-terminal: engine is disposed",
             ));
         }
