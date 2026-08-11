@@ -156,3 +156,16 @@ export interface RunError extends Error {
   /** Channel 2 entries written before the failure, shaped as in `RunResult`. */
   err: string[];
 }
+
+/**
+ * Which layer a variable call targets.
+ *
+ * Omitted means the host layer — engine-wide, visible in every session
+ * including ones created later. `{ scope: 'session', session }` targets one
+ * session's own layer, which shadows the host one for that session only.
+ *
+ * The id comes from `bt.snapshot.sessions`, never from "whichever session
+ * is active": an ambient target would land the value somewhere else if the
+ * user switched sessions between your read and your write.
+ */
+export type VarScope = { scope?: 'host' } | { scope: 'session'; session: number };

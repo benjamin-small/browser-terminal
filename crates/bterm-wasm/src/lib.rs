@@ -6,7 +6,11 @@
 //! can cross an await, and no `&mut self` exports exist. Events queue inside
 //! the borrow and flush to the JS callback only after it drops, so a JS
 //! handler that synchronously calls back into the engine cannot
-//! double-borrow. Every submitted pipeline runs inside an `Abortable` whose
+//! double-borrow. For the same reason, conversion to and from JS happens
+//! outside the borrow and never inside it: `js_to_value` walks property
+//! getters that can run host code, and that code calling back into the engine
+//! would find the `ENGINE` cell already borrowed — which `&self` exports do
+//! nothing to prevent. Every submitted pipeline runs inside an `Abortable` whose
 //! abort flag is checked before the body resumes — Ctrl-C and `dispose()`
 //! can always settle in-flight work without it touching the engine again.
 
@@ -100,6 +104,17 @@ fn to_js<T: Serialize>(value: &T) -> JsValue {
 /// ignore, or surface them without touching the terminal.
 fn string_array(lines: &[String]) -> js_sys::Array {
     lines.iter().map(|s| JsValue::from_str(s)).collect()
+}
+
+/// Every error this crate hands to JS goes through here.
+///
+/// `JsValue::from_str` throws a bare string: `catch (e) { e.message }` —
+/// the line every consumer writes — reads `undefined`, and the text is
+/// only reachable via `String(e)`. `run()` has always rejected with a real
+/// `Error`, so a string throw anywhere else means one library behaving two
+/// ways. Nothing caught it because asserting `is_err()` is true either way.
+fn js_error(msg: impl AsRef<str>) -> JsValue {
+    js_sys::Error::new(msg.as_ref()).into()
 }
 
 /// Build `run()`'s rejection: a real `Error` carrying whatever the pipeline
@@ -203,6 +218,47 @@ fn spawn_pipeline(pane: u32, line: String) {
     });
 }
 
+/// Which layer a variable call targets.
+enum VarTarget {
+    Host,
+    Session(u32),
+}
+
+/// Read the optional `{ scope, session }` argument.
+///
+/// Absent means host, so every call written before session scope existed
+/// keeps working. An unrecognised `scope` is an error rather than a
+/// fallback to host: a typo that silently wrote to the wrong layer would
+/// be found later, by someone reading a value that was never set where
+/// they looked.
+///
+/// Pure JS work — call it before opening an engine borrow.
+fn var_target(opts: &JsValue) -> Result<VarTarget, JsValue> {
+    if opts.is_undefined() || opts.is_null() {
+        return Ok(VarTarget::Host);
+    }
+    let scope = js_sys::Reflect::get(opts, &JsValue::from_str("scope"))
+        .ok()
+        .and_then(|v| v.as_string());
+    match scope.as_deref() {
+        None | Some("host") => Ok(VarTarget::Host),
+        Some("session") => {
+            let id = js_sys::Reflect::get(opts, &JsValue::from_str("session"))
+                .ok()
+                .and_then(|v| v.as_f64())
+                .ok_or_else(|| {
+                    js_error(
+                        "{ scope: 'session' } needs a `session` id from snapshot.sessions",
+                    )
+                })?;
+            Ok(VarTarget::Session(id as u32))
+        }
+        Some(other) => Err(js_error(format!(
+            "unknown scope `{other}`: expected 'host' or 'session'"
+        ))),
+    }
+}
+
 /// Handle to the engine held by the TypeScript wrapper.
 #[wasm_bindgen]
 pub struct BtermCore {}
@@ -214,7 +270,7 @@ impl BtermCore {
     #[wasm_bindgen(constructor)]
     pub fn new(on_event: js_sys::Function) -> Result<BtermCore, JsValue> {
         if engine_alive() {
-            return Err(JsValue::from_str(
+            return Err(js_error(
                 "browser-terminal: one instance per page in v1; call dispose() first.",
             ));
         }
@@ -248,11 +304,11 @@ impl BtermCore {
             return Ok(());
         }
         let json = js_sys::JSON::stringify(&msg)
-            .map_err(|_| JsValue::from_str("invalid HostMsg: not JSON-serializable"))?;
+            .map_err(|_| js_error("invalid HostMsg: not JSON-serializable"))?;
         let msg: bterm_core::protocol::HostMsg = serde_json::from_str(
-            &json.as_string().ok_or_else(|| JsValue::from_str("invalid HostMsg"))?,
+            &json.as_string().ok_or_else(|| js_error("invalid HostMsg"))?,
         )
-        .map_err(|e| JsValue::from_str(&format!("invalid HostMsg: {e}")))?;
+        .map_err(|e| js_error(format!("invalid HostMsg: {e}")))?;
 
         let result = WasmAccess.with(|e| e.handle_msg(msg));
         if !result.closed_panes.is_empty() {
@@ -318,22 +374,22 @@ impl BtermCore {
     /// console warning.
     pub fn register_command(&self, sig: JsValue, f: js_sys::Function) -> Result<(), JsValue> {
         if !engine_alive() {
-            return Err(JsValue::from_str("browser-terminal: engine is disposed"));
+            return Err(js_error("browser-terminal: engine is disposed"));
         }
         // Through JSON text, not serde_wasm_bindgen::from_value:
         // serde-wasm-bindgen reads struct fields by direct property lookup,
         // which silently ignores unknown fields — a TS author's typo
         // (`flag` vs `flags`) must error loudly instead.
         let sig_json = js_sys::JSON::stringify(&sig)
-            .map_err(|_| JsValue::from_str("invalid command signature: not JSON-serializable"))?;
+            .map_err(|_| js_error("invalid command signature: not JSON-serializable"))?;
         let sig: Signature = serde_json::from_str(
             &sig_json
                 .as_string()
-                .ok_or_else(|| JsValue::from_str("invalid command signature"))?,
+                .ok_or_else(|| js_error("invalid command signature"))?,
         )
-        .map_err(|e| JsValue::from_str(&format!("invalid command signature: {e}")))?;
+        .map_err(|e| js_error(format!("invalid command signature: {e}")))?;
         if sig.name.trim().is_empty() {
-            return Err(JsValue::from_str("command name must not be empty"));
+            return Err(js_error("command name must not be empty"));
         }
         let name = sig.name.clone();
         let outcome = WasmAccess.with(|e| {
@@ -348,7 +404,7 @@ impl BtermCore {
                 Ok(())
             }
             Ok(_) => Ok(()),
-            Err(e) => Err(JsValue::from_str(&e.msg)),
+            Err(e) => Err(js_error(&e.msg)),
         }
     }
 
@@ -365,10 +421,10 @@ impl BtermCore {
     /// so it works under a strict Content-Security-Policy.
     pub fn register_fn(&self, name: &str, func: js_sys::Function) -> Result<(), JsValue> {
         if name.trim().is_empty() {
-            return Err(JsValue::from_str("function name must not be empty"));
+            return Err(js_error("function name must not be empty"));
         }
         if name.starts_with('@') {
-            return Err(JsValue::from_str(
+            return Err(js_error(
                 "register the bare name; `@` is only used at the call site",
             ));
         }
@@ -378,6 +434,235 @@ impl BtermCore {
 
     pub fn unregister_fn(&self, name: &str) {
         js_fn::unregister(name);
+    }
+
+    /// Inject a value the shell resolves as `$name`, for every session and
+    /// every pane, including ones created later.
+    ///
+    /// The optional `opts` names the layer: omitted (or `{ scope: 'host' }`)
+    /// writes the engine-wide one, `{ scope: 'session', session: id }` writes
+    /// a single session's, which shadows it there.
+    ///
+    /// Throws on a name the shell could not reference. The value crosses as
+    /// a typed `Value` and is never parsed as shell source, so a string
+    /// containing `; rm -rf /` is that string and cannot become syntax.
+    ///
+    /// Takes effect from the next command line: a pipeline already running
+    /// keeps the values it started with.
+    pub fn set_variable(&self, name: &str, value: JsValue, opts: JsValue) -> Result<(), JsValue> {
+        // Guard first, like every other engine-touching export: reaching
+        // `WasmAccess::with` on a disposed engine panics, and with
+        // `panic = "abort"` that kills the module rather than throwing
+        // something a caller could catch.
+        if !engine_alive() {
+            return Err(js_error("browser-terminal: engine is disposed"));
+        }
+        // Both conversions are JS work and happen before the borrow opens.
+        let target = var_target(&opts)?;
+        let converted = convert::js_to_value(&value).map_err(|e| js_error(&e))?;
+        WasmAccess
+            .with(|e| match target {
+                VarTarget::Host => e.set_host_var(name, converted),
+                VarTarget::Session(id) => e.set_session_var(id, name, converted),
+            })
+            .map_err(|err| js_error(&err.msg))
+    }
+
+    /// Set several variables at once. Names not mentioned are left alone —
+    /// this merges into what is already injected rather than replacing it;
+    /// use `unsetVariable` to remove one.
+    ///
+    /// Every name is validated and every value converted before anything is
+    /// applied, so one bad entry leaves the previous state untouched. A
+    /// partial apply is the worst outcome for a host synchronising editor
+    /// state: some values land, one stays stale, and the next command runs
+    /// against a mix that looks plausible.
+    ///
+    /// `opts` names the layer, exactly as it does for `setVariable`; the
+    /// whole batch lands in one layer.
+    pub fn set_variables(&self, values: JsValue, opts: JsValue) -> Result<(), JsValue> {
+        if !engine_alive() {
+            return Err(js_error("browser-terminal: engine is disposed"));
+        }
+        // Parsed before the borrow opens, like every other JS read here.
+        let target = var_target(&opts)?;
+        // An array passes `dyn_into::<Object>()` and its indices stringify
+        // into legal variable names, so without this a host that meant to
+        // pass a record would silently get `$0`, `$1`, … and no error.
+        if js_sys::Array::is_array(&values) {
+            return Err(js_error(
+                "setVariables expects an object of name → value, not an array",
+            ));
+        }
+        let obj: js_sys::Object = values
+            .dyn_into()
+            .map_err(|_| js_error("setVariables expects an object"))?;
+
+        // Convert and validate everything first — still outside any borrow.
+        // Both halves have to happen up front: validating names but
+        // converting as you apply leaves an unconvertible value half-way
+        // through the batch, which is the same broken state by a different
+        // route (`set_variables_applies_all_or_nothing` covers both).
+        let mut pending: Vec<(String, bterm_core::value::Value)> = Vec::new();
+        for entry in js_sys::Object::entries(&obj).iter() {
+            let pair: js_sys::Array = entry.into();
+            let name = pair.get(0).as_string().unwrap_or_default();
+            if !bterm_core::lex::is_valid_var_name(&name) {
+                return Err(js_error(format!(
+                    "`{name}` is not a valid variable name: use letters, digits and `_`"
+                )));
+            }
+            // Name the key: a batch can be large, and "cannot convert a JS
+            // function" on its own leaves the host hunting for which one.
+            let value = convert::js_to_value(&pair.get(1))
+                .map_err(|e| js_error(format!("`{name}`: {e}")))?;
+            pending.push((name, value));
+        }
+
+        let applied: Result<(), bterm_core::error::ShellError> = WasmAccess.with(|e| {
+            // An unknown session id has to fail the batch whole, like a bad
+            // name does — so the target is checked before anything lands,
+            // not discovered part-way through the loop.
+            if let VarTarget::Session(id) = target {
+                e.session_vars(id)?;
+            }
+            for (name, value) in pending {
+                // Names are already validated above and the session id just
+                // above that; the engine re-checks and both errors are
+                // unreachable here, so drop them rather than unwrap.
+                match target {
+                    VarTarget::Host => {
+                        let _ = e.set_host_var(&name, value);
+                    }
+                    VarTarget::Session(id) => {
+                        let _ = e.set_session_var(id, &name, value);
+                    }
+                }
+            }
+            Ok(())
+        });
+        applied.map_err(|err| js_error(&err.msg))
+    }
+
+    /// Remove an injected variable from the layer `opts` names. Returns
+    /// whether it was set — and false on a disposed engine, where nothing is
+    /// set by definition.
+    pub fn unset_variable(&self, name: &str, opts: JsValue) -> bool {
+        if !engine_alive() {
+            return false;
+        }
+        // A malformed `opts` removes nothing: `-> bool` has nowhere to put an
+        // error, and reporting `true` for a target that was never touched
+        // would be worse than reporting `false`.
+        let Ok(target) = var_target(&opts) else {
+            return false;
+        };
+        WasmAccess.with(|e| match target {
+            VarTarget::Host => e.unset_host_var(name),
+            // The one place a bad session id is not an error: `-> bool` has
+            // nowhere to put one, and a name that is not set in a session
+            // that does not exist is, truthfully, not set. The inconsistency
+            // with the other four is deliberate — do not "fix" it by
+            // widening the return type.
+            VarTarget::Session(id) => e.unset_session_var(id, name).unwrap_or(false),
+        })
+    }
+
+    /// The value of an injected variable in the layer `opts` names, or
+    /// `undefined` if it is not set there.
+    ///
+    /// `undefined` means exactly that one thing. It used to also mean "the
+    /// session id names no session" and "the engine is disposed", and a host
+    /// could not tell the three apart; both of those now throw, like the
+    /// setters already did.
+    ///
+    /// One layer, never a merged view: a read that silently fell through to
+    /// the host value would answer a question the caller did not ask.
+    ///
+    /// `undefined` rather than null: a host can legitimately inject null,
+    /// and the two must stay distinguishable.
+    pub fn get_variable(&self, name: &str, opts: JsValue) -> Result<JsValue, JsValue> {
+        // Same guard as the setters: reaching `WasmAccess::with` on a
+        // disposed engine panics, and `panic = "abort"` makes that fatal
+        // rather than catchable.
+        if !engine_alive() {
+            return Err(js_error("browser-terminal: engine is disposed"));
+        }
+        // JS work, so before the borrow opens.
+        let target = var_target(&opts)?;
+        let found = WasmAccess
+            .with(|e| match target {
+                VarTarget::Host => Ok(e.host_var(name).cloned()),
+                VarTarget::Session(id) => e.session_var(id, name).map(|v| v.cloned()),
+            })
+            .map_err(|err| js_error(&err.msg))?;
+        // The conversion is a JS call, so it happens after the borrow closes.
+        Ok(match found {
+            Some(v) => convert::value_to_js(&v),
+            None => JsValue::UNDEFINED,
+        })
+    }
+
+    /// Everything injected into the layer `opts` names, as a plain object.
+    ///
+    /// Throws if the session id names no session, or the engine is disposed.
+    /// It used to answer `undefined` in both cases, which made the wrapper's
+    /// declared `Record<string, Value>` a lie in exactly the case a caller
+    /// was most likely to reach by accident — a stale id.
+    ///
+    /// One layer, never a merged view: with `opts` omitted this is the host
+    /// scope alone, and with `{ scope: 'session', session: id }` it is that
+    /// session's own, never the two folded together. The shell's `vars`
+    /// command shows the merged view instead, because it answers a different
+    /// question — what `$name` resolves to here.
+    ///
+    /// Every name passed to `setVariables` appears here, alongside anything
+    /// injected earlier and not unset. Values are what the shell holds, not
+    /// the objects handed in: they have been through the same conversion
+    /// command arguments take, so `undefined` reads back as `null`.
+    ///
+    /// Keys come back sorted. The underlying `Scope` is a `HashMap`, whose
+    /// iteration order varies run to run, so without this a host doing
+    /// `JSON.stringify(bt.variables())` would see the same state serialize
+    /// differently each time — enough to churn a snapshot test or a diff
+    /// for no reason. The `vars` builtin sorts for the same reason; this
+    /// keeps the programmatic view as predictable as the shell one.
+    pub fn variables(&self, opts: JsValue) -> Result<JsValue, JsValue> {
+        if !engine_alive() {
+            return Err(js_error("browser-terminal: engine is disposed"));
+        }
+        let target = var_target(&opts)?;
+        // Pairs are collected out of the borrow first: building the object
+        // needs `Reflect::set` and `value_to_js`, both JS calls, and a JS
+        // call inside an engine borrow risks a `RefCell` double-borrow that
+        // `panic = "abort"` turns into a dead module.
+        let mut pairs = WasmAccess
+            .with(|e| match target {
+                VarTarget::Host => Ok(e
+                    .host_vars()
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect::<Vec<_>>()),
+                // An id naming no session is an error, not an empty object:
+                // an empty object would claim the session exists and simply
+                // holds nothing.
+                VarTarget::Session(id) => e.session_vars(id).map(|s| {
+                    s.iter()
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .collect::<Vec<_>>()
+                }),
+            })
+            .map_err(|err| js_error(&err.msg))?;
+        pairs.sort_by(|a, b| a.0.cmp(&b.0));
+        let obj = js_sys::Object::new();
+        for (name, value) in pairs {
+            let _ = js_sys::Reflect::set(
+                &obj,
+                &JsValue::from_str(&name),
+                &convert::value_to_js(&value),
+            );
+        }
+        Ok(obj.into())
     }
 
     /// Programmatic execution: evaluate a line in a pane's context and
@@ -394,7 +679,7 @@ impl BtermCore {
     /// same tick rejects it with `aborted`.
     pub fn run(&self, pane: u32, line: String) -> js_sys::Promise {
         if !engine_alive() {
-            return js_sys::Promise::reject(&JsValue::from_str(
+            return js_sys::Promise::reject(&js_error(
                 "browser-terminal: engine is disposed",
             ));
         }

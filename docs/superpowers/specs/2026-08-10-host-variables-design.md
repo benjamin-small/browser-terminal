@@ -1,0 +1,408 @@
+# Host-injected shell variables — design
+
+**Status:** host scope implemented (`68710e2`…`6b9ed13`). Session scope
+approved, not yet implemented — see [Increment 2](#increment-2--session-scope).
+**Issue:** [#8 — Enhancement: inject host application values as shell `$variables`](https://github.com/benjamin-small/browser-terminal/issues/8)
+**Date:** 2026-08-10
+
+## Problem
+
+The shell already evaluates `$name` — `Expr::Var`, `InterpPart::Var`, and
+`Scope` all exist, and every mux session owns a `vars: Scope`. But sessions
+start empty (`mux/mod.rs:156`) and no public API populates them, so a host
+page can register commands and still cannot pass its own state to them:
+
+```sh
+rtce evaluate --game $game --build $build
+# error: unknown variable `$game`
+```
+
+Quoting `'$game'` passes the literal seven characters, not the document.
+
+The motivating consumer is
+[rpg-theorycraft-engine](https://github.com/benjamin-small/rpg-theorycraft-engine),
+whose browser tutorial has live JSON editors and no filesystem. Its native
+CLI takes paths; in the browser the same command shape should take variables
+holding the editor documents, so a lesson can swap `$scenario` between runs
+without rewriting the command text or inventing fake filenames.
+
+## What this is not
+
+Shell-level assignment (`$x = 1` typed at the prompt) stays deferred. This
+adds *host* injection only. The design leaves room for assignment without
+revisiting the merge — see Precedence.
+
+## Decisions
+
+| Question | Decision |
+| --- | --- |
+| Scope model | An engine-wide host scope (increment 1) and a per-session scope (increment 2). |
+| Precedence | Session values override host values. |
+| Freshness | Snapshot per command line. |
+| Read API | `getVariable` and `variables()` in addition to the setters. |
+| Shell visibility | A `vars` builtin, listing `name`, `scope` and `value`. |
+| Storage | Host: a field on `Engine`, beside `matcher` and `fn_compiler`. Session: the `vars: Scope` each `Session` already owns. |
+| Addressing a session | An explicit id from `snapshot.sessions`, never the implicit active one. |
+
+### Why engine-wide rather than per-session
+
+Splitting a pane or running `session new` must not make the host's `$game`
+disappear — the host injected it to describe application state, which has
+nothing to do with which pane you are looking at. A `{ scope: 'session' }`
+option can be added later without a breaking change precisely because the
+default is global; adding it now would mean designing collision rules for a
+feature (shell assignment) that does not exist.
+
+### Why snapshot rather than live
+
+`scope_for_pane` already clones, so a `setVariable` during a running pipeline
+is invisible to it and takes effect on the next line. That is the behaviour we
+want, not merely the one we inherited: under live lookup a single pipeline
+could bind `$game` to two different values in two stages, and "what did this
+command actually run against?" would have no answer after the fact. A long
+`rtce simulate` finishing against the document it started with is the
+defensible outcome.
+
+This is a documented guarantee with a test, not an implementation detail.
+
+## Architecture
+
+### The scope, and the one place it is built
+
+`Engine` gains one field, joining the host-supplied state already there:
+
+```rust
+pub struct Engine {
+    pub registry: CommandRegistry,
+    pub mux: Mux,
+    matcher: Rc<dyn PatternMatcher>,      // supplied by the host
+    fn_compiler: Rc<dyn FnCompiler>,      // supplied by the host
+    host_vars: Scope,                     // supplied by the host  <-- new
+    // …
+}
+```
+
+Accessed only through `set_host_var`, `unset_host_var`, `host_var`, and
+`host_vars` — the field itself stays private.
+
+`scope_for_pane` (`engine.rs:600`) is the single site where a `Scope` is ever
+constructed, and both execution paths already go through it: `execute_line`
+at `:773` for interactive panes and `eval_to_value` at `:826` for `run()`.
+Merging there therefore covers panes, `run()`, positional arguments, flag
+values, and `"…$name…"` interpolation in one change — interpolation reads the
+same map (`signature.rs:271-289`).
+
+```rust
+fn scope_for_pane<A: EngineAccess>(access: &A, pane: u32) -> Scope {
+    access.with(|e| {
+        let mut scope = e.host_vars.clone();
+        if let Some(s) = e.mux.session_of_pane(pane).and_then(|id| e.mux.sessions.get(&id)) {
+            scope.extend(s.vars.clone());
+        }
+        scope
+    })
+}
+```
+
+Host underneath, session on top. The session map is always empty today so the
+`extend` is a no-op — but writing the precedence now means shell assignment
+later shadows a host value without anyone rereading this function.
+
+The merge happens inside the borrow `scope_for_pane` already takes. No second
+borrow, no new opportunity to violate the engine invariant.
+
+### Name validation
+
+`lex.rs` gains:
+
+```rust
+pub fn is_valid_var_name(name: &str) -> bool {
+    !name.is_empty() && name.chars().all(is_var_char)
+}
+```
+
+reusing the existing private `is_var_char` (`c.is_alphanumeric() || c == '_'`).
+Every setter calls it.
+
+This must not be reimplemented at the TypeScript boundary. Rust's
+`is_alphanumeric` is Unicode-aware, so the lexer accepts names a naive
+`/^[A-Za-z_]\w*$/` rejects. Verified against the CLI:
+
+| input | lexer |
+| --- | --- |
+| `$café` | accepted (then "unknown variable", i.e. the *name* parsed) |
+| `$1` | accepted — digits are legal, including leading |
+| `$` | parse error, "expected a variable name after `$`" |
+
+A stricter guard at the boundary would let a host set a name it cannot
+reference. One rule, one definition.
+
+### Public API
+
+Five methods on `BtermCore` (all `&self`, per the no-`&mut`-exports
+invariant), mirrored on `BrowserTerminal`:
+
+```ts
+setVariable(name: string, value: Value): void;
+setVariables(values: Record<string, Value>): void;
+unsetVariable(name: string): boolean;      // was it set?
+getVariable(name: string): Value | undefined;
+variables(): Record<string, Value>;
+```
+
+> **Superseded by increment 2:** each gains an optional trailing `opts`
+> selecting the layer. Omitting it means host, so these signatures remain
+> valid calls.
+
+Values cross via the existing `js_to_value` / `value_to_js` — the same path
+command arguments take. Nothing is re-lexed as shell source, so a value
+containing `; rm -rf /` is a string containing those characters and cannot
+become syntax. That property comes from the value never re-entering the
+parser, not from escaping.
+
+**`getVariable` returns `undefined` for unset, never `null`.** `Value`
+includes `null`, and the issue's own example injects `simdef ?? null`. If
+absent and null-valued both returned `null`, a host could not tell them apart
+and `unsetVariable` would be unobservable through the getter. `undefined` is
+outside `Value`, so it is unambiguous.
+
+**`setVariables` validates every name before applying any.** A partial apply
+is the worst outcome: half the editors land, one stays stale, and the next
+command runs against a mix that looks plausible. One bad name means nothing
+changed.
+
+`unsetVariable` returns whether the name was set, so a host can tell a real
+removal from a no-op without a second call. Unsetting an absent name is not
+an error.
+
+**`variables()` returns the host scope, not the merged one.** It is a
+read-back of what the host itself injected — the counterpart to
+`setVariables`, so `setVariables(x)` followed by `variables()` round-trips.
+The shell's `vars` builtin is the one that shows the *merged* view, because
+its job is to answer "what would `$name` resolve to here?". The two are
+identical today, since session scopes are always empty; they diverge the
+moment shell assignment lands, and each is right for its own audience.
+
+All five follow the existing `assertLive()` pattern and throw after
+`dispose()`. The variables need no teardown of their own: they live in
+`Engine`, and `dispose_engine()` drops it. (Contrast `js_fn`, which lives in
+its own `thread_local` and must be cleared explicitly — a second teardown
+obligation this design deliberately avoids.)
+
+### The `vars` builtin
+
+Reached through `HostHooks`, not `ExecContext`. `ExecContext` carries `host`,
+`sink`, `width`, `pane`, and `run_id`; adding a scope there would hand every
+command the variables whether it needs them or not. `HostHooks` is already
+the seam for host services a command may touch (`history()`,
+`help_overview()`, `mux_action()`), and `EngineHost` already holds `pane`
+(`engine.rs:440-450`), so:
+
+```rust
+fn visible_vars(&self) -> Vec<(String, Value)> { Vec::new() }   // default
+```
+
+Named `visible_vars` rather than `host_vars` deliberately: `Engine::host_vars`
+is the accessor for the host layer alone, and two methods a keystroke apart
+returning different things is exactly the sort of near-collision that gets
+mis-wired. This one answers "what is visible from here", which is the merged
+question.
+
+The engine's implementation returns the *merged* scope for its pane, so
+`vars` shows what `$name` would actually resolve to rather than only the host
+layer. The native CLI inherits the empty default and prints an empty table,
+which is correct rather than special-cased.
+
+Output is a `List<Record>` of `{ name, value }`, sorted by name —
+deterministic for tests, predictable for a human. An empty scope yields `[]`,
+so `vars | length` answers 0 rather than erroring, consistent with the
+empty-stream rule in `stream::collect`.
+
+> **Superseded by increment 2:** the record gains a `scope` field. Sorting
+> and the empty-`[]` rule are unchanged.
+
+Full values are emitted; the table renderer truncates wide cells to the
+column width with `…`. Display truncates, the pipe preserves — so
+`vars | grep game | get value` returns the whole document. This is how every
+other table in the shell already behaves.
+
+## Error handling
+
+| Situation | Behaviour |
+| --- | --- |
+| `setVariable('a b', …)` | Throws synchronously, naming the offending identifier. |
+| `setVariables` with one bad name | Throws; no value applied. |
+| `$missing` in a command | Existing positioned `unknown variable` diagnostic, unchanged. |
+| `unsetVariable('never-set')` | Returns `false`. Not an error. |
+| Any method after `dispose()` | Throws, per `assertLive()`. |
+| `vars` with nothing injected | Empty table. |
+
+Unsetting restores the `unknown variable` diagnostic exactly as before — the
+error path is untouched by this work.
+
+## Testing
+
+**Native** (`cargo test`) — the merge and validation:
+
+- host-only resolution; session overriding host on a name collision
+- replacement and removal; `unset` of an absent name returns `false`
+- empty scope resolves nothing and leaves the diagnostic intact
+- `is_valid_var_name` accepts `café` and `1`, rejects `""`, `"a b"`, `"a-b"`
+- snapshot: the scope handed to a pipeline does not change under it
+
+**Boundary** (`just test-wasm`) — what native cannot reach:
+
+- a record, a list, a `null`, and an int survive the round trip with types
+- an invalid name throws across the boundary
+- `getVariable` distinguishes unset (`undefined`) from set-to-null
+
+**Browser** (Playwright) — the layer that settles it:
+
+- a registered command invoked as `probe --game $game` receives the value as
+  a real argument
+- `run()` sees the same variables as an interactive pane
+- `"prefix-$game"` interpolates
+- `vars | grep …` pipes
+- **the snapshot guarantee**: set a variable, start a slow command, change the
+  variable mid-flight, assert the command finishes with the original value
+
+That last test must be teeth-checked by making the lookup live and confirming
+it fails. A test that passes under both behaviours documents nothing, which
+is the failure mode this project has hit repeatedly — most recently a
+block-mode test whose writes contained no delimiter, and before that three
+tests that asserted a singleton-collapse bug as intended behaviour.
+
+## Increment 2 — session scope
+
+Increment 1 shipped the host layer and deferred `{ scope: 'session' }`,
+reasoning that adding it then would mean designing collision rules for a
+feature nobody had asked for. It has now been asked for.
+
+**The merge needs no change.** `scope_for_pane` was written for this:
+
+```rust
+let mut scope = e.host_vars.clone();
+scope.extend(session.vars.clone());   // session wins
+```
+
+The `extend` has been a no-op only because nothing could populate
+`Session.vars`. Shadowing, snapshot-per-line, interpolation, `run()`, and
+argument binding all come free and are already covered by increment 1's
+tests. What is missing is addressing, an options argument, and making
+shadowing visible.
+
+### Addressing: an explicit id, never the active session
+
+`{ scope: 'session', session: id }`, with ids from `snapshot.sessions`
+(`SessionInfo { id, name, active }`, already exposed).
+
+Not the implicit active session. Every other host-facing call in this
+library already names its target — `run(pane, line)`, `feed(pane, data)` —
+and an ambient "wherever the user happens to be looking" would be the only
+exception on the surface. The failure it enables is silent: a user presses
+`Ctrl-B )` between the host's read and its write, the value lands on the
+wrong session, and the next command reads a stale one with nothing
+indicating why.
+
+**An unknown id throws.** A stale or typo'd id is a bug, and a silent
+no-op would strand the value nowhere while every read looks plausible.
+
+**Killing a session drops its variables**, because `Session` owns the map.
+No extra teardown.
+
+### Reads mirror writes: a scope names a layer
+
+```ts
+type VarScope = { scope?: 'host' } | { scope: 'session'; session: number };
+
+setVariable(name: string, value: Value, opts?: VarScope): void;
+setVariables(values: Record<string, Value>, opts?: VarScope): void;
+unsetVariable(name: string, opts?: VarScope): boolean;
+getVariable(name: string, opts?: VarScope): Value | undefined;
+variables(opts?: VarScope): Record<string, Value>;
+```
+
+Omitting `opts` means host, so every existing call site keeps working and
+the default remains the scope that survives `session new`.
+
+A read returns **one layer, never a merged view**. `getVariable('x')` is
+the host value; `getVariable('x', { scope: 'session', session: 3 })` is
+session 3's own. Layers do not blur, so each read has exactly one meaning
+and `setVariables(x)` then `variables()` still round-trips per layer.
+
+The resolved question — "what would `$x` actually be here?" — is answered
+by the shell's `vars`, which already shows the merged view and pipes. A
+host needing it programmatically can `bt.run('vars')`. Adding a third
+`resolved: true` read form was considered and rejected: three ways to read
+one name, with a flag that silently changes which value comes back.
+
+### `vars` gains a `scope` column
+
+Output becomes `{ name, scope, value }` where `scope` is `"host"` or
+`"session"`.
+
+Without it, a session value shadowing a host one shows as a single
+indistinguishable row, and "why is `$game` not what I set?" becomes
+unanswerable from inside the shell — which is exactly where it gets asked.
+One field makes shadowing visible at the moment of confusion, and it pipes:
+`vars | filter {|v| $v.scope == 'session'}`.
+
+This changes `vars`'s output shape, so
+`vars_lists_injected_variables_sorted_by_name` is updated. That test
+asserts a shape, not a behavioural guarantee, so updating it is
+appropriate rather than a weakening — sorting by name and the empty-scope
+`[]` rule both stay pinned.
+
+`HostHooks::visible_vars` returns `Vec<(String, Value)>` today; it becomes
+`Vec<(String, VarOrigin, Value)>` (or equivalent) so the builtin can label
+each row without re-deriving the merge itself.
+
+### Testing
+
+Native: setting on one session is invisible to another; a session value
+shadows a host value of the same name **and the host value is still
+readable through its own layer**; an unknown session id errors; killing a
+session drops its variables; `vars` labels each row's origin.
+
+Boundary: the options argument crosses correctly, including that omitting
+it means host; an unknown id throws rather than aborting.
+
+Browser: two sessions with different values for one name, proving the
+right one resolves in each — the test that would catch an implicit-active
+implementation regressing back in.
+
+## Documentation
+
+- `packages/browser-terminal/README.md`: a host-state injection example in
+  the API section, and the snapshot rule stated in prose.
+- The vanilla demo injects a variable and uses it, so the feature is visible
+  rather than only described.
+- `vars` gets help text like every other builtin.
+
+## Acceptance criteria
+
+- [ ] Set, replace, and unset a shell variable from TypeScript.
+- [ ] Exported `Value` shapes preserved across wasm in both directions.
+- [ ] Injected variables work as positional and flag arguments to registered
+      commands, and inside string interpolation.
+- [ ] They work through `run()` as well as interactive panes.
+- [ ] Visible in every session and pane, including ones created afterwards.
+- [ ] Unknown and unset variables keep the current positioned diagnostic.
+- [ ] Snapshot-per-line documented and tested, teeth-checked.
+- [ ] `vars` lists merged variables sorted by name; empty scope gives `[]`.
+- [ ] README and demo carry a host-state example.
+- [ ] Native, boundary, and browser tests as above.
+
+## Files
+
+| Path | Change |
+| --- | --- |
+| `crates/bterm-core/src/engine.rs` | `host_vars` field, accessors, merge in `scope_for_pane`, `EngineHost::visible_vars` |
+| `crates/bterm-core/src/lex.rs` | `pub fn is_valid_var_name` |
+| `crates/bterm-core/src/registry.rs` | `HostHooks::visible_vars` with an empty default |
+| `crates/bterm-core/src/builtins/mod.rs` | the `vars` builtin |
+| `crates/bterm-wasm/src/lib.rs` | five `BtermCore` methods |
+| `packages/browser-terminal/src/index.ts` | five `BrowserTerminal` methods |
+| `packages/browser-terminal/README.md` | host-state example |
+| `packages/demo/src/main.ts` | demo injection |
+| `packages/demo/tests/smoke.spec.ts` | browser tests |

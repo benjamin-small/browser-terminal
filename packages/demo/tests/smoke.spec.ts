@@ -528,3 +528,166 @@ test('block mode holds delimiter-bearing writes until flush', async ({ page }) =
   // entries; byte mode would also give three. Only block coalesces.
   expect(log).toEqual(['one\ntwo\nthree\n']);
 });
+
+test('host variables reach commands, interpolation, and run()', async ({ page }) => {
+  await page.goto('/');
+  await waitForTerminal(page);
+
+  const result = await page.evaluate(async () => {
+    window.bt.setVariable('greeting', 'hello');
+    window.bt.setVariable('n', 3);
+
+    const described = await window.bt.run('describe $project');
+    const interpolated = await window.bt.run('echo "say-$greeting"');
+    const asArg = await window.bt.run('echo $n');
+    const listed = await window.bt.run('vars | grep greeting | get value');
+
+    return {
+      described: described.value,
+      interpolated: interpolated.value,
+      asArg: asArg.value,
+      listed: listed.value,
+      readBack: window.bt.getVariable('greeting'),
+      missing: window.bt.getVariable('nope'),
+      removed: window.bt.unsetVariable('greeting'),
+      afterRemoval: window.bt.getVariable('greeting'),
+    };
+  });
+
+  expect(result.described).toBe('browser-terminal — Rust + TypeScript');
+  expect(result.interpolated).toBe('say-hello');
+  expect(result.asArg).toBe(3);
+  expect(result.listed).toBe('hello');
+  expect(result.readBack).toBe('hello');
+  // undefined, not null — null is a value a host can inject on purpose.
+  expect(result.missing).toBeUndefined();
+  expect(result.removed).toBe(true);
+  expect(result.afterRemoval).toBeUndefined();
+});
+
+test('a session-scoped variable resolves per session', async ({ page }) => {
+  await page.goto('/');
+  await waitForTerminal(page);
+
+  const result = await page.evaluate(async () => {
+    const bt = window.bt;
+    bt.setVariable('which', 'host');
+
+    const firstId = bt.snapshot!.sessions[0].id;
+    bt.setVariable('which', 'first-session', { scope: 'session', session: firstId });
+    const inFirst = (await bt.run('echo $which')).value;
+
+    // A second session has no value of its own, so it falls through to host.
+    await bt.run('session new');
+    const secondId = bt.snapshot!.sessions.find((s) => s.id !== firstId)!.id;
+    const inSecond = (await bt.run('echo $which')).value;
+
+    bt.setVariable('which', 'second-session', { scope: 'session', session: secondId });
+    const inSecondAfter = (await bt.run('echo $which')).value;
+
+    return {
+      inFirst,
+      inSecond,
+      inSecondAfter,
+      hostStillReadable: bt.getVariable('which'),
+      firstStillItsOwn: bt.getVariable('which', { scope: 'session', session: firstId }),
+    };
+  });
+
+  expect(result.inFirst).toBe('first-session');
+  // The proof that scoping is real: the same name, the same instant, a
+  // different answer because a different session is active.
+  expect(result.inSecond).toBe('host');
+  expect(result.inSecondAfter).toBe('second-session');
+  // Shadowing hides, it does not overwrite.
+  expect(result.hostStillReadable).toBe('host');
+  expect(result.firstStillItsOwn).toBe('first-session');
+});
+
+test('vars labels which layer each value came from', async ({ page }) => {
+  await page.goto('/');
+  await waitForTerminal(page);
+
+  const rows = await page.evaluate(async () => {
+    const bt = window.bt;
+    bt.setVariable('only_host', 1);
+    bt.setVariable('shadowed', 'from-host');
+    const sid = bt.snapshot!.sessions[0].id;
+    bt.setVariable('shadowed', 'from-session', { scope: 'session', session: sid });
+
+    // `||`, not `or` — the grammar has the C-style operators (`lex.rs`
+    // Op::OrOr); `or` is a parse error. Verified against the CLI.
+    return (await bt.run("vars | filter {|r| $r.name == 'only_host' || $r.name == 'shadowed'}"))
+      .value as Array<{ name: string; scope: string; value: unknown }>;
+  });
+
+  const byName = Object.fromEntries(rows.map((r) => [r.name, r]));
+  expect(byName.only_host.scope).toBe('host');
+  // One row, labelled session — not two rows for the shadowed name.
+  expect(byName.shadowed.scope).toBe('session');
+  expect(byName.shadowed.value).toBe('from-session');
+  expect(rows.filter((r) => r.name === 'shadowed')).toHaveLength(1);
+});
+
+test('an unset variable keeps its positioned diagnostic', async ({ page }) => {
+  await page.goto('/');
+  await waitForTerminal(page);
+
+  const message = await page.evaluate(async () => {
+    try {
+      await window.bt.run('echo $definitely_not_set');
+      return 'should have rejected';
+    } catch (e) {
+      return (e as Error).message;
+    }
+  });
+
+  expect(message).toContain('unknown variable `$definitely_not_set`');
+});
+
+test('a running pipeline keeps the variable values its line started with', async ({ page }) => {
+  await page.goto('/');
+  await waitForTerminal(page);
+
+  const result = await page.evaluate(async () => {
+    window.bt.setVariable('doc', 'original');
+    window.bt.registerCommand(
+      { name: 'slow-echo', summary: 'echo after a delay', required: [{ name: 'text' }] },
+      async ({ positionals }) => {
+        await new Promise((r) => setTimeout(r, 300));
+        return positionals[0];
+      },
+    );
+
+    const inFlight = window.bt.run('slow-echo $doc');
+    // Watch for the run settling, so the assertions below can prove the
+    // write really did land mid-flight. If a slow machine let the 300ms
+    // command finish before the 50ms sleep below, this test would pass
+    // while exercising nothing — a snapshot test that never raced proves
+    // the snapshot rule no more than a live-lookup one would.
+    let settled = false;
+    const done = () => {
+      settled = true;
+    };
+    inFlight.then(done, done);
+
+    // Change it while the command is suspended. Under live lookup this
+    // would win; under the snapshot rule the running line keeps 'original'.
+    await new Promise((r) => setTimeout(r, 50));
+    window.bt.setVariable('doc', 'changed');
+    const wroteMidFlight = window.bt.getVariable('doc');
+    const settledBeforeWrite = settled;
+
+    const finished = await inFlight;
+    const next = await window.bt.run('slow-echo $doc');
+    return { finished: finished.value, next: next.value, wroteMidFlight, settledBeforeWrite };
+  });
+
+  // The ordering guard: the new value was written, and the first run had
+  // demonstrably not resolved yet when it was.
+  expect(result.wroteMidFlight).toBe('changed');
+  expect(result.settledBeforeWrite).toBe(false);
+
+  expect(result.finished).toBe('original');
+  expect(result.next).toBe('changed');
+});

@@ -163,6 +163,10 @@ pub fn register_all(registry: &mut CommandRegistry) {
         Signature::build("history", "This shell's command history"),
         history,
     ));
+    registry.register_builtin(cmd(
+        Signature::build("vars", "List variables the host injected"),
+        vars,
+    ));
     registry.register_builtin(cmd(Signature::build("clear", "Clear the screen"), clear));
 
     // Multiplexer commands — everything the prefix keymap does is one of
@@ -714,6 +718,25 @@ fn history(ctx: ExecContext, _call: BoundCall, _input: PipelineData) -> Result<P
     )))
 }
 
+fn vars(ctx: ExecContext, _call: BoundCall, _input: PipelineData) -> Result<PipelineData, ShellError> {
+    let mut rows = ctx.host.visible_vars();
+    // Sorted so the table is stable between runs: the underlying maps
+    // iterate in an arbitrary order, which would make the output shuffle
+    // and any test asserting on it flaky.
+    rows.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(PipelineData::Value(Value::List(
+        rows.into_iter()
+            .map(|row| {
+                Value::record([
+                    ("name".to_string(), Value::Str(row.name)),
+                    ("scope".to_string(), Value::Str(row.origin.as_str().to_string())),
+                    ("value".to_string(), row.value),
+                ])
+            })
+            .collect(),
+    )))
+}
+
 fn clear(ctx: ExecContext, _call: BoundCall, _input: PipelineData) -> Result<PipelineData, ShellError> {
     ctx.host.request_clear();
     Ok(PipelineData::Empty)
@@ -745,6 +768,23 @@ mod tests {
         }
         fn help_for(&self, name: &str) -> Option<String> {
             (name == "echo").then(|| "echo help text".to_string())
+        }
+        fn visible_vars(&self) -> Vec<crate::registry::VisibleVar> {
+            use crate::registry::{VarOrigin, VisibleVar};
+            // Deliberately out of order, so the sort in `vars` is doing real
+            // work, and deliberately mixed-origin so the label is too.
+            vec![
+                VisibleVar {
+                    name: "zebra".into(),
+                    origin: VarOrigin::Session,
+                    value: Value::Int(2),
+                },
+                VisibleVar {
+                    name: "alpha".into(),
+                    origin: VarOrigin::Host,
+                    value: Value::Str("first".into()),
+                },
+            ]
         }
     }
 
@@ -882,6 +922,65 @@ mod tests {
             v,
             Value::List(vec![Value::Str("echo 1".into()), Value::Str("help".into())])
         );
+    }
+
+    #[test]
+    fn vars_lists_injected_variables_sorted_by_name() {
+        let v = eval("vars").expect("eval");
+        assert_eq!(
+            v,
+            Value::List(vec![
+                Value::record([
+                    ("name".to_string(), Value::Str("alpha".into())),
+                    ("scope".to_string(), Value::Str("host".into())),
+                    ("value".to_string(), Value::Str("first".into())),
+                ]),
+                Value::record([
+                    ("name".to_string(), Value::Str("zebra".into())),
+                    ("scope".to_string(), Value::Str("session".into())),
+                    ("value".to_string(), Value::Int(2)),
+                ]),
+            ])
+        );
+    }
+
+    #[test]
+    fn vars_labels_where_each_value_came_from() {
+        // The column exists so a shadowed value is visible at the moment
+        // someone asks why `$x` is not what they set. Filtering on it is
+        // the point, so it has to pipe.
+        let v = eval("vars | filter {|r| $r.scope == 'session'} | get name").expect("eval");
+        assert_eq!(v, Value::Str("zebra".into()));
+    }
+
+    #[test]
+    fn vars_pipes_like_any_other_table() {
+        // The reason values are emitted whole rather than pre-truncated:
+        // display shrinks a wide cell, the pipe keeps everything.
+        let v = eval("vars | grep alpha | get value").expect("eval");
+        assert_eq!(v, Value::Str("first".into()));
+    }
+
+    #[test]
+    fn vars_with_nothing_injected_is_an_empty_table() {
+        // Empty list, not an error and not Null — so `vars | length` is 0.
+        // Same rule as an emptied stream in stream::collect.
+        struct Bare;
+        impl HostHooks for Bare {}
+        let mut registry = CommandRegistry::new();
+        register_all(&mut registry);
+        let ctx = ExecContext {
+            host: Rc::new(Bare),
+            sink: Rc::new(crate::sink::NullSink),
+            width: 80,
+            pane: 0,
+            run_id: 0,
+        };
+        let out = parse("vars | length");
+        assert!(out.errors.is_empty(), "{:?}", out.errors);
+        let (mut results, error) = block_on(eval_line(&out.line, &registry, &ctx, &Scope::new()));
+        assert!(error.is_none(), "{error:?}");
+        assert_eq!(results.pop().map(PipelineData::into_value), Some(Value::Int(0)));
     }
 
     #[test]

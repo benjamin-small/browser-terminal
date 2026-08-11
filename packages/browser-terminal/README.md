@@ -84,7 +84,9 @@ await BrowserTerminal.create({
 Other surface: `registerCommand` / `unregisterCommand`, `registerFn` /
 `unregisterFn` (a named function usable as `@name` in any selector position —
 the CSP-safe alternative to inline closures), `run`, `snapshot`,
-`setPanelMode`, `panelMode`, `show` / `hide` / `toggle`, `dispose`.
+`setPanelMode`, `panelMode`, `show` / `hide` / `toggle`, `dispose`, and the
+variable API below (`setVariable` / `setVariables`, `getVariable`,
+`unsetVariable`, `variables`).
 
 ## Writing commands
 
@@ -124,6 +126,68 @@ rather than two spellings of one. The first passes a *message* — the shell
 frames and sanitizes it. The second passes *terminal bytes* — you own the
 framing. Mixing both on one channel can interleave out of order, since the
 line call bypasses the buffer.
+
+## Host state as shell variables
+
+Inject application state and reference it as `$name`, instead of pasting it
+into the command text:
+
+```ts
+bt.setVariables({
+  game: gameDefinition,      // any Value: string, number, record, list, null
+  build: currentBuild,
+});
+
+await bt.run('simulate --game $game --build $build');
+```
+
+Variables are visible in every pane and session, including ones created
+afterwards, and inside interpolation (`"run-$game"`). Values cross as typed
+values and are never parsed as shell source, so a string containing `;` or
+`|` stays a string.
+
+A change takes effect from the next command line — a pipeline already
+running keeps the values it started with, so a long command cannot see one
+of its arguments change halfway through.
+
+```ts
+bt.getVariable('game');     // the value, or undefined if unset
+bt.variables();             // everything you injected
+bt.unsetVariable('game');   // true if it was set
+```
+
+`undefined` from `getVariable` means "not set"; `null` means you injected
+`null`. In the terminal, `vars` lists what is visible and pipes like any
+other table (`vars | grep game`).
+
+### Scoping a variable to one session
+
+By default a variable is engine-wide. To scope one to a single session,
+pass an id from `bt.snapshot.sessions`:
+
+```ts
+const [first] = bt.snapshot!.sessions;
+bt.setVariable('scratch', 'local', { scope: 'session', session: first.id });
+```
+
+A session value shadows a host value of the same name, in that session
+only. Reads name a layer rather than merging, so both remain readable:
+
+```ts
+bt.getVariable('scratch');                                          // the host value
+bt.getVariable('scratch', { scope: 'session', session: first.id }); // that session's
+```
+
+For "what would `$scratch` actually be here?", the shell's `vars` shows
+the resolved view with a `scope` column saying where each value came from:
+`vars | filter {|v| $v.scope == 'session'}`.
+
+Sessions are addressed by explicit id rather than "whichever is active",
+because a user can switch sessions between your read and your write. An
+unknown id throws from `setVariable`, `setVariables`, `getVariable` and
+`variables`. `unsetVariable` is the one exception, returning `false`,
+because its `boolean` has nowhere to put an error. So `undefined` from
+`getVariable` means one thing only: the name is not set in that layer.
 
 ## Limitations
 
