@@ -558,34 +558,46 @@ impl BtermCore {
     }
 
     /// The value of an injected variable in the layer `opts` names, or
-    /// `undefined` if it is not set there (or the engine is disposed, or the
-    /// session id names no session).
+    /// `undefined` if it is not set there.
+    ///
+    /// `undefined` means exactly that one thing. It used to also mean "the
+    /// session id names no session" and "the engine is disposed", and a host
+    /// could not tell the three apart; both of those now throw, like the
+    /// setters already did.
     ///
     /// One layer, never a merged view: a read that silently fell through to
     /// the host value would answer a question the caller did not ask.
     ///
     /// `undefined` rather than null: a host can legitimately inject null,
     /// and the two must stay distinguishable.
-    pub fn get_variable(&self, name: &str, opts: JsValue) -> JsValue {
+    pub fn get_variable(&self, name: &str, opts: JsValue) -> Result<JsValue, JsValue> {
+        // Same guard as the setters: reaching `WasmAccess::with` on a
+        // disposed engine panics, and `panic = "abort"` makes that fatal
+        // rather than catchable.
         if !engine_alive() {
-            return JsValue::UNDEFINED;
+            return Err(JsValue::from_str("browser-terminal: engine is disposed"));
         }
-        let Ok(target) = var_target(&opts) else {
-            return JsValue::UNDEFINED;
-        };
-        let found = WasmAccess.with(|e| match target {
-            VarTarget::Host => e.host_var(name).cloned(),
-            VarTarget::Session(id) => e.session_var(id, name).ok().flatten().cloned(),
-        });
-        match found {
+        // JS work, so before the borrow opens.
+        let target = var_target(&opts)?;
+        let found = WasmAccess
+            .with(|e| match target {
+                VarTarget::Host => Ok(e.host_var(name).cloned()),
+                VarTarget::Session(id) => e.session_var(id, name).map(|v| v.cloned()),
+            })
+            .map_err(|err| JsValue::from_str(&err.msg))?;
+        // The conversion is a JS call, so it happens after the borrow closes.
+        Ok(match found {
             Some(v) => convert::value_to_js(&v),
             None => JsValue::UNDEFINED,
-        }
+        })
     }
 
-    /// Everything injected into the layer `opts` names, as a plain object —
-    /// or `undefined` if the engine is disposed, or the session id names no
-    /// session.
+    /// Everything injected into the layer `opts` names, as a plain object.
+    ///
+    /// Throws if the session id names no session, or the engine is disposed.
+    /// It used to answer `undefined` in both cases, which made the wrapper's
+    /// declared `Record<string, Value>` a lie in exactly the case a caller
+    /// was most likely to reach by accident — a stale id.
     ///
     /// One layer, never a merged view: with `opts` omitted this is the host
     /// scope alone, and with `{ scope: 'session', session: id }` it is that
@@ -604,32 +616,32 @@ impl BtermCore {
     /// differently each time — enough to churn a snapshot test or a diff
     /// for no reason. The `vars` builtin sorts for the same reason; this
     /// keeps the programmatic view as predictable as the shell one.
-    pub fn variables(&self, opts: JsValue) -> JsValue {
+    pub fn variables(&self, opts: JsValue) -> Result<JsValue, JsValue> {
         if !engine_alive() {
-            return JsValue::UNDEFINED;
+            return Err(JsValue::from_str("browser-terminal: engine is disposed"));
         }
-        let Ok(target) = var_target(&opts) else {
-            return JsValue::UNDEFINED;
-        };
-        let pairs = WasmAccess.with(|e| match target {
-            VarTarget::Host => Some(
-                e.host_vars()
+        let target = var_target(&opts)?;
+        // Pairs are collected out of the borrow first: building the object
+        // needs `Reflect::set` and `value_to_js`, both JS calls, and a JS
+        // call inside an engine borrow risks a `RefCell` double-borrow that
+        // `panic = "abort"` turns into a dead module.
+        let mut pairs = WasmAccess
+            .with(|e| match target {
+                VarTarget::Host => Ok(e
+                    .host_vars()
                     .iter()
                     .map(|(k, v)| (k.clone(), v.clone()))
-                    .collect::<Vec<_>>(),
-            ),
-            VarTarget::Session(id) => e.session_vars(id).ok().map(|s| {
-                s.iter()
-                    .map(|(k, v)| (k.clone(), v.clone()))
-                    .collect::<Vec<_>>()
-            }),
-        });
-        // An id naming no session reads back `undefined`, the same answer
-        // `getVariable` gives it — an empty object would claim the session
-        // exists and simply holds nothing.
-        let Some(mut pairs) = pairs else {
-            return JsValue::UNDEFINED;
-        };
+                    .collect::<Vec<_>>()),
+                // An id naming no session is an error, not an empty object:
+                // an empty object would claim the session exists and simply
+                // holds nothing.
+                VarTarget::Session(id) => e.session_vars(id).map(|s| {
+                    s.iter()
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .collect::<Vec<_>>()
+                }),
+            })
+            .map_err(|err| JsValue::from_str(&err.msg))?;
         pairs.sort_by(|a, b| a.0.cmp(&b.0));
         let obj = js_sys::Object::new();
         for (name, value) in pairs {
@@ -639,7 +651,7 @@ impl BtermCore {
                 &convert::value_to_js(&value),
             );
         }
-        obj.into()
+        Ok(obj.into())
     }
 
     /// Programmatic execution: evaluate a line in a pane's context and

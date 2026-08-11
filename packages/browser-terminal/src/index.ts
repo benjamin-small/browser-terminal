@@ -263,9 +263,10 @@ export class BrowserTerminal {
    * Remove an injected variable from the layer `opts` names. Returns
    * whether it was set.
    *
-   * The one place an unknown session id is not an error: `boolean` has
-   * nowhere to put one, and a name that is not set in a session that does
-   * not exist is, truthfully, not set.
+   * The one place an unknown session id is not an error — the other four
+   * variable methods throw for one. `boolean` has nowhere to put an error,
+   * and a name that is not set in a session that does not exist is,
+   * truthfully, not set.
    */
   unsetVariable(name: string, opts?: VarScope): boolean {
     this.assertLive();
@@ -281,9 +282,12 @@ export class BrowserTerminal {
    * `$name` be here?", the shell's `vars` shows the resolved view.
    *
    * `undefined` rather than `null`, because `null` is itself a legal value
-   * to inject — the two have to stay distinguishable. Like `unsetVariable`,
-   * this has no error channel, so an id naming no session also reads back
-   * `undefined` rather than throwing.
+   * to inject — the two have to stay distinguishable.
+   *
+   * `undefined` means exactly one thing: the name is not set in that layer.
+   * Throws if the session id names no session, or this instance has been
+   * disposed — both used to read back `undefined` too, leaving a caller
+   * unable to tell an absent value from a stale id.
    */
   getVariable(name: string, opts?: VarScope): Value | undefined {
     this.assertLive();
@@ -299,8 +303,9 @@ export class BrowserTerminal {
    * different question — what `$name` resolves to in a given pane — and
    * shows the merged view.
    *
-   * Keys come back sorted. As with the other reads there is no error
-   * channel, so an id naming no session reads back `undefined`.
+   * Keys come back sorted. Throws if the session id names no session, or
+   * this instance has been disposed — so the declared return type is
+   * honest: when this returns, it returns a record.
    */
   variables(opts?: VarScope): Record<string, Value> {
     this.assertLive();

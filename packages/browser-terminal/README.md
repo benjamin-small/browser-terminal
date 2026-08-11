@@ -184,9 +184,10 @@ the resolved view with a `scope` column saying where each value came from:
 
 Sessions are addressed by explicit id rather than "whichever is active",
 because a user can switch sessions between your read and your write. An
-unknown id throws from `setVariable` and `setVariables`. The reads have
-nowhere to put an error, so `unsetVariable` returns `false` for one and
-`getVariable` / `variables` return `undefined`.
+unknown id throws from `setVariable`, `setVariables`, `getVariable` and
+`variables`. `unsetVariable` is the one exception, returning `false`,
+because its `boolean` has nowhere to put an error. So `undefined` from
+`getVariable` means one thing only: the name is not set in that layer.
 
 ## Limitations
 
