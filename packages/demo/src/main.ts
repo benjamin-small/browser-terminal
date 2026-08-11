@@ -201,6 +201,18 @@ async function main(): Promise<void> {
     greeting: 'hello',
   });
 
+  // A session-scoped value: same name, different answer depending on which
+  // session you are in. `session new` in the terminal gives you a second
+  // one where `$scope_demo` reads "host" instead.
+  const firstSession = bt.snapshot?.sessions[0];
+  if (firstSession) {
+    bt.setVariable('scope_demo', 'session', {
+      scope: 'session',
+      session: firstSession.id,
+    });
+  }
+  bt.setVariable('scope_demo', 'host');
+
   bt.registerCommand(
     {
       name: 'describe',

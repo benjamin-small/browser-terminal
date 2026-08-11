@@ -565,6 +565,70 @@ test('host variables reach commands, interpolation, and run()', async ({ page })
   expect(result.afterRemoval).toBeUndefined();
 });
 
+test('a session-scoped variable resolves per session', async ({ page }) => {
+  await page.goto('/');
+  await waitForTerminal(page);
+
+  const result = await page.evaluate(async () => {
+    const bt = window.bt;
+    bt.setVariable('which', 'host');
+
+    const firstId = bt.snapshot!.sessions[0].id;
+    bt.setVariable('which', 'first-session', { scope: 'session', session: firstId });
+    const inFirst = (await bt.run('echo $which')).value;
+
+    // A second session has no value of its own, so it falls through to host.
+    await bt.run('session new');
+    const secondId = bt.snapshot!.sessions.find((s) => s.id !== firstId)!.id;
+    const inSecond = (await bt.run('echo $which')).value;
+
+    bt.setVariable('which', 'second-session', { scope: 'session', session: secondId });
+    const inSecondAfter = (await bt.run('echo $which')).value;
+
+    return {
+      inFirst,
+      inSecond,
+      inSecondAfter,
+      hostStillReadable: bt.getVariable('which'),
+      firstStillItsOwn: bt.getVariable('which', { scope: 'session', session: firstId }),
+    };
+  });
+
+  expect(result.inFirst).toBe('first-session');
+  // The proof that scoping is real: the same name, the same instant, a
+  // different answer because a different session is active.
+  expect(result.inSecond).toBe('host');
+  expect(result.inSecondAfter).toBe('second-session');
+  // Shadowing hides, it does not overwrite.
+  expect(result.hostStillReadable).toBe('host');
+  expect(result.firstStillItsOwn).toBe('first-session');
+});
+
+test('vars labels which layer each value came from', async ({ page }) => {
+  await page.goto('/');
+  await waitForTerminal(page);
+
+  const rows = await page.evaluate(async () => {
+    const bt = window.bt;
+    bt.setVariable('only_host', 1);
+    bt.setVariable('shadowed', 'from-host');
+    const sid = bt.snapshot!.sessions[0].id;
+    bt.setVariable('shadowed', 'from-session', { scope: 'session', session: sid });
+
+    // `||`, not `or` — the grammar has the C-style operators (`lex.rs`
+    // Op::OrOr); `or` is a parse error. Verified against the CLI.
+    return (await bt.run("vars | filter {|r| $r.name == 'only_host' || $r.name == 'shadowed'}"))
+      .value as Array<{ name: string; scope: string; value: unknown }>;
+  });
+
+  const byName = Object.fromEntries(rows.map((r) => [r.name, r]));
+  expect(byName.only_host.scope).toBe('host');
+  // One row, labelled session — not two rows for the shadowed name.
+  expect(byName.shadowed.scope).toBe('session');
+  expect(byName.shadowed.value).toBe('from-session');
+  expect(rows.filter((r) => r.name === 'shadowed')).toHaveLength(1);
+});
+
 test('an unset variable keeps its positioned diagnostic', async ({ page }) => {
   await page.goto('/');
   await waitForTerminal(page);
