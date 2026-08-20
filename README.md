@@ -3,6 +3,8 @@
 A terminal/tmux experience for any web page, powered by a Rust core compiled to
 WebAssembly.
 
+[Try the live demos](https://benjamin-small.github.io/browser-terminal/)
+
 A floating terminal panel docks at the bottom of your page and runs a shell-like
 language with **structured-value pipes** (nushell/PowerShell style). Commands can
 be built into the Rust core or registered from TypeScript in a few lines — so a
@@ -336,8 +338,9 @@ that's the better integration point than component state in either framework.
 
 ## Development
 
-Requires: Rust (`wasm32-unknown-unknown` target), Node 20+, `just`,
-`wasm-bindgen-cli` (matching the pinned crate version), `binaryen`.
+Requires Rust stable with the `wasm32-unknown-unknown` target, Node.js 20.0 or
+newer, `just`, `wasm-bindgen-cli` matching the pinned crate version, and
+Binaryen 120 or newer (CI pins version 131).
 
 ```sh
 just test       # native Rust tests (fast, the bulk)
@@ -348,6 +351,9 @@ just typecheck  # tsc over the demo (its `vite build` never checks types)
 just test-e2e   # Playwright smoke suite (type-checks first)
 just pack       # npm pack dry-run
 ```
+
+See [testing and coverage](docs/testing.md) for the scope of each suite and
+[configuration](docs/configuration.md) for runtime and build-time options.
 
 The wasm binary is roughly half a megabyte raw, around 200 KB gzipped —
 the figure moves with the Rust toolchain, so the number that matters is
