@@ -4,7 +4,7 @@
  * prefix-key splits, session pills, and dispose.
  */
 import { expect, test } from '@playwright/test';
-import type { RunError } from '@benjamin-small/browser-terminal';
+import type { BrowserTerminal, RunError } from '@benjamin-small/browser-terminal';
 
 // `window.bt` is typed by the demo itself (src/main.ts declares the global
 // from the library's own `BrowserTerminal`), so this suite checks against the
@@ -176,6 +176,137 @@ test('--help is generated from the signature, and the page shows the real thing'
   // The ANSI must have been converted, not printed raw.
   await expect(panels.first()).not.toContainText('[1m');
 });
+
+for (const customMount of [false, true]) {
+  test(`terminal appearance follows theme and font options (${customMount ? 'custom mount' : 'panel'})`, async ({ page }) => {
+    await page.goto('/');
+    await waitForTerminal(page);
+    await expect(page.locator('[data-browser-terminal] .xterm-rows').first()).toHaveCSS('font-size', '13px');
+    await expect(page.locator('[data-browser-terminal] [data-active="true"]')).toHaveCSS('background-color', 'rgb(24, 24, 37)');
+
+    await page.evaluate(async (custom) => {
+      const Terminal = window.bt.constructor as typeof BrowserTerminal;
+      window.bt.dispose();
+      let mount: HTMLElement | undefined;
+      if (custom) {
+        mount = document.createElement('div');
+        mount.id = 'custom-terminal';
+        mount.style.cssText = 'position:fixed;inset:0;height:400px';
+        document.body.appendChild(mount);
+      }
+      const theme = { background: '#ffffff', foreground: '#123456', cursor: '#008800' };
+      window.bt = await Terminal.create({
+        mount,
+        terminal: { theme, fontFamily: 'monospace', fontSize: 18 },
+      });
+      // Caller mutations must not silently change the theme of future panes.
+      theme.background = '#ff0000';
+    }, customMount);
+
+    const root = page.locator(customMount ? '#custom-terminal' : '[data-browser-terminal]');
+    const assertAppearance = async (background: string, foreground: string) => {
+      const panes = root.locator('[data-active]');
+      for (let i = 0; i < await panes.count(); i++) {
+        const pane = panes.nth(i);
+        await expect(pane).toHaveCSS('background-color', background);
+        await expect(pane.locator('.xterm-rows')).toHaveCSS('color', foreground);
+        await expect(pane.locator('.xterm-rows')).toHaveCSS('font-family', 'monospace');
+        await expect(pane.locator('.xterm-rows')).toHaveCSS('font-size', '18px');
+      }
+    };
+
+    await expect(root.locator('.xterm')).toHaveCount(1);
+    await assertAppearance('rgb(255, 255, 255)', 'rgb(18, 52, 86)');
+    await page.evaluate(() => window.bt.run('mux split --right'));
+    await expect(root.locator('.xterm')).toHaveCount(2);
+    await assertAppearance('rgb(255, 255, 255)', 'rgb(18, 52, 86)');
+    await page.evaluate(() => window.bt.run('session new themed'));
+    await expect(root.locator('.xterm')).toHaveCount(3);
+
+    await page.evaluate(() => {
+      const theme = { background: '#202030', foreground: '#abcdef', cursor: '#ff8800' };
+      window.bt.setTheme(theme);
+      theme.background = '#ff0000';
+    });
+    // Includes panes hidden in the original session.
+    await assertAppearance('rgb(32, 32, 48)', 'rgb(171, 205, 239)');
+    await page.evaluate(() => window.bt.run('mux window new'));
+    await expect(root.locator('.xterm')).toHaveCount(4);
+    await assertAppearance('rgb(32, 32, 48)', 'rgb(171, 205, 239)');
+    await page.evaluate(() => window.bt.setTheme({}));
+    await assertAppearance('rgb(24, 24, 37)', 'rgb(255, 255, 255)');
+
+    const error = await page.evaluate(() => {
+      window.bt.dispose();
+      try {
+        window.bt.setTheme({});
+        return '';
+      } catch (error) {
+        return (error as Error).message;
+      }
+    });
+    expect(error).toBe('browser-terminal: instance is disposed');
+  });
+
+  test(`public focus and blur target the active pane (${customMount ? 'custom mount' : 'panel'})`, async ({ page }) => {
+    await page.goto('/');
+    await waitForTerminal(page);
+    await page.evaluate(async (custom) => {
+      if (custom) {
+        const Terminal = window.bt.constructor as typeof BrowserTerminal;
+        window.bt.dispose();
+        const mount = document.createElement('div');
+        mount.id = 'custom-terminal';
+        mount.style.cssText = 'position:fixed;inset:0;height:400px';
+        document.body.appendChild(mount);
+        window.bt = await Terminal.create({ mount });
+      }
+      const button = document.createElement('button');
+      button.id = 'host-focus-target';
+      button.textContent = 'Host control';
+      document.body.appendChild(button);
+    }, customMount);
+
+    const root = page.locator(customMount ? '#custom-terminal' : '[data-browser-terminal]');
+    const activeInput = root.locator('[data-active="true"] .xterm-helper-textarea');
+    await expect(activeInput).toBeFocused();
+    await page.evaluate(() => window.bt.blur());
+    await expect(activeInput).not.toBeFocused();
+
+    const hostButton = page.locator('#host-focus-target');
+    await hostButton.focus();
+    await page.evaluate(() => window.bt.blur());
+    await expect(hostButton).toBeFocused();
+    await page.evaluate(() => window.bt.focus());
+    await expect(activeInput).toBeFocused();
+
+    const originalPane = await page.evaluate(() => window.bt.snapshot!.active_pane);
+    await page.evaluate(() => window.bt.run('mux split --right'));
+    await expect(root.locator('.xterm-helper-textarea')).toHaveCount(2);
+    expect(await page.evaluate(() => window.bt.snapshot!.active_pane)).not.toBe(originalPane);
+    await expect(activeInput).toBeFocused();
+    await page.evaluate(() => window.bt.blur());
+    await expect(activeInput).not.toBeFocused();
+    await page.evaluate(() => window.bt.focus());
+    await expect(activeInput).toBeFocused();
+
+    const disposedErrors = await page.evaluate(() => {
+      window.bt.dispose();
+      return ['focus', 'blur'].map((method) => {
+        try {
+          window.bt[method as 'focus' | 'blur']();
+          return '';
+        } catch (error) {
+          return (error as Error).message;
+        }
+      });
+    });
+    expect(disposedErrors).toEqual([
+      'browser-terminal: instance is disposed',
+      'browser-terminal: instance is disposed',
+    ]);
+  });
+}
 
 test('prefix chord splits the pane', async ({ page }) => {
   await page.goto('/');

@@ -3,7 +3,7 @@
  * layout snapshots (Rust owns the tree and the math; this file owns pixels)
  * and funnels input through the sync hot path.
  */
-import { Terminal } from '@xterm/xterm';
+import { Terminal, type ITheme } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import type { DividerInfo, Effects, EngineEvent, LayoutSnapshot } from './events.js';
 
@@ -13,6 +13,13 @@ const CHUNK_SIZE = 64 * 1024;
 const ENABLE_BRACKETED_PASTE = '\x1b[?2004h';
 
 const THEME = { background: '#181825' };
+
+/** Display options shared by all panes, including panes created later. */
+export interface TerminalOptions {
+  theme?: ITheme;
+  fontFamily?: string;
+  fontSize?: number;
+}
 
 /** Write queue chained through term.write callbacks (backpressure). */
 export class PaneWriter {
@@ -69,11 +76,17 @@ export class PaneManager {
   private activePane = -1;
   private prefixArmed = false;
   private disposed = false;
+  private readonly terminalOptions: TerminalOptions;
 
   constructor(
     private readonly container: HTMLElement,
     private readonly hooks: PaneHooks,
+    options: TerminalOptions = {},
   ) {
+    this.terminalOptions = {
+      ...options,
+      theme: { ...options.theme, background: options.theme?.background ?? THEME.background },
+    };
     container.style.position = 'relative';
     container.style.overflow = 'hidden';
   }
@@ -179,6 +192,22 @@ export class PaneManager {
     }
   }
 
+  focus(): void {
+    this.panes.get(this.activePane)?.term.focus();
+  }
+
+  blur(): void {
+    this.panes.get(this.activePane)?.term.blur();
+  }
+
+  setTheme(theme: ITheme): void {
+    this.terminalOptions.theme = { ...theme, background: theme.background ?? THEME.background };
+    for (const handle of this.panes.values()) {
+      handle.term.options.theme = { ...this.terminalOptions.theme };
+      handle.el.style.backgroundColor = this.terminalOptions.theme.background ?? THEME.background;
+    }
+  }
+
   setPrefixArmed(active: boolean): void {
     this.prefixArmed = active;
     this.container.dataset.prefix = String(active);
@@ -253,14 +282,16 @@ export class PaneManager {
 
   private createPane(id: number): PaneHandle {
     const el = document.createElement('div');
-    el.style.cssText = 'position:absolute;box-sizing:border-box;padding:2px;background:#181825;';
+    el.style.cssText = 'position:absolute;box-sizing:border-box;padding:2px;';
+    el.style.backgroundColor = this.terminalOptions.theme?.background ?? THEME.background;
     this.container.appendChild(el);
 
     const term = new Terminal({
       cursorBlink: true,
       scrollback: 2000,
-      fontSize: 13,
-      theme: THEME,
+      ...this.terminalOptions,
+      fontSize: this.terminalOptions.fontSize ?? 13,
+      theme: { ...this.terminalOptions.theme },
     });
     const fit = new FitAddon();
     term.loadAddon(fit);

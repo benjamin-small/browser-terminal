@@ -55,6 +55,13 @@ Then, in the panel:
 A registered command is indistinguishable from a builtin: same `--help`, same
 piping, same did-you-mean on typos.
 
+Unquoted `key=value` operands are positional strings: a host-registered
+`dd if=/dev/hda count=1` receives `['if=/dev/hda', 'count=1']` in
+`args.positionals`. They do not set variables or bind flags; declared flags
+still use `--name=value`. Quote the entire operand for spaces or an empty
+value (`'label=hello world'`, `'label='`). The language is built around
+structured values; POSIX shell compatibility is not a goal.
+
 The terminal also works as a scripting engine for the host page:
 
 ```ts
@@ -126,6 +133,39 @@ rather than two spellings of one. The first passes a *message* — the shell
 frames and sanitizes it. The second passes *terminal bytes* — you own the
 framing. Mixing both on one channel can interleave out of order, since the
 line call bypasses the buffer.
+
+## Keyboard focus
+
+Call `bt.focus()` to focus the active pane's terminal input and `bt.blur()`
+to release its keyboard focus. Both work with the built-in panel and a custom
+`create({ mount })` container, including after switching or splitting panes.
+They do not change panel visibility; use `bt.show()` first when needed.
+Both methods throw after `bt.dispose()`.
+
+## Terminal appearance
+
+Set colors and fonts when creating the terminal. Settings apply to every pane,
+including new splits, windows, and sessions, with either the built-in panel or
+a custom mount:
+
+```ts
+const bt = await BrowserTerminal.create({
+  terminal: {
+    theme: { background: '#ffffff', foreground: '#222222', cursor: '#0066cc' },
+    fontFamily: 'Menlo, monospace',
+    fontSize: 14,
+  },
+});
+
+bt.setTheme({ background: '#181825', foreground: '#eeeeee', cursor: '#ffffff' });
+```
+
+`setTheme()` replaces the theme for all existing and future panes, leaving fonts
+unchanged. Omitted colors use xterm defaults, except the background defaults to
+`#181825`; `bt.setTheme({})` restores those defaults. The default font size is
+13px, with xterm's default font family. `ITheme` and `TerminalOptions` are exported
+types. `setTheme()` throws after disposal. These settings style the terminal
+panes; the surrounding panel chrome keeps its existing styling.
 
 ## Host state as shell variables
 

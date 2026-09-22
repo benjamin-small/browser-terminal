@@ -98,6 +98,27 @@ fn is_bareword_char(c: char) -> bool {
     !c.is_whitespace() && !matches!(c, '|' | ';' | '#' | '\'' | '"' | '$' | '(' | ')' | '{' | '}' | '>' | '<' | '&' | '=')
 }
 
+/// A single `=` between bareword characters belongs to the word, so
+/// `if=/dev/hda` is one operand. Keep standalone `=`, `==`, and `!=` as
+/// boundaries; flag names still use their own scanner.
+fn bareword(rest: &str) -> &str {
+    let mut chars = rest.char_indices().peekable();
+    let mut end = 0;
+    while let Some((idx, ch)) = chars.next() {
+        let embedded_eq = ch == '='
+            && end > 0
+            && !rest[..end].ends_with('!')
+            && chars
+                .peek()
+                .is_some_and(|(_, next)| is_bareword_char(*next));
+        if !is_bareword_char(ch) && !embedded_eq {
+            break;
+        }
+        end = idx + ch.len_utf8();
+    }
+    &rest[..end]
+}
+
 /// Flag names allow '-' (`--starts-with`); variable names do not, so `$a-b`
 /// reads as `$a` followed by bareword `-b`, matching interpolation.
 fn is_flag_char(c: char) -> bool {
@@ -214,7 +235,7 @@ pub fn lex(src: &str) -> Result<Vec<Token>, ShellError> {
                     // all-letters run is a flag cluster that `bind` expands
                     // against the signature; anything with a digit or dot
                     // (`-v2.1`) stays a bareword, since it isn't a flag name.
-                    let word: String = rest[1..].chars().take_while(|&ch| is_bareword_char(ch)).collect();
+                    let word = bareword(&rest[1..]).to_string();
                     if word.chars().all(|ch| ch.is_ascii_alphabetic()) {
                         tokens.push(Token {
                             kind: TokenKind::Flag { name: word.clone(), long: false, has_eq: false },
@@ -232,9 +253,9 @@ pub fn lex(src: &str) -> Result<Vec<Token>, ShellError> {
                 } else {
                     // Lone `-` or `-<punct>`: bareword, unless it stands
                     // alone, in which case it's subtraction.
-                    let word: String = rest.chars().take_while(|&ch| is_bareword_char(ch) || ch == '-').collect();
+                    let word = bareword(rest);
                     let len = word.len().max(1);
-                    let kind = match standalone_operator(&word) {
+                    let kind = match standalone_operator(word) {
                         Some(op) => TokenKind::Op(op),
                         None => TokenKind::Bareword(rest[..len].to_string()),
                     };
@@ -248,11 +269,11 @@ pub fn lex(src: &str) -> Result<Vec<Token>, ShellError> {
                 i += consumed;
             }
             _ => {
-                let word: String = rest.chars().take_while(|&ch| is_bareword_char(ch)).collect();
+                let word = bareword(rest);
                 debug_assert!(!word.is_empty(), "lexer made no progress at byte {i}");
-                let kind = match standalone_operator(&word) {
+                let kind = match standalone_operator(word) {
                     Some(op) => TokenKind::Op(op),
-                    None => TokenKind::Bareword(word.clone()),
+                    None => TokenKind::Bareword(word.to_string()),
                 };
                 tokens.push(Token { kind, span: Span::new(start, start + word.len() as u32) });
                 i += word.len();
@@ -327,12 +348,12 @@ fn lex_number(rest: &str, start: u32) -> Result<(Token, usize), ShellError> {
         }
     }
     debug_assert!(digits > 0);
-    // If the number runs straight into bareword chars, it's a bareword.
-    if rest[len..].chars().next().is_some_and(is_bareword_char) {
-        let word: String = rest.chars().take_while(|&ch| is_bareword_char(ch)).collect();
+    // A numeric prefix followed by bareword text (including `1=2`) is a word.
+    let word = bareword(rest);
+    if word.len() > len {
         let wlen = word.len();
         return Ok((
-            Token { kind: TokenKind::Bareword(word), span: Span::new(start, start + wlen as u32) },
+            Token { kind: TokenKind::Bareword(word.to_string()), span: Span::new(start, start + wlen as u32) },
             wlen,
         ));
     }
@@ -448,6 +469,92 @@ mod tests {
                 TokenKind::Pipe,
                 TokenKind::Bareword("head".into()),
                 TokenKind::Int(5),
+            ]
+        );
+    }
+
+    #[test]
+    fn embedded_equals_stays_in_barewords() {
+        for word in [
+            "if=/dev/hda",
+            "count=1",
+            "a=b=c",
+            "1=2",
+            "-1=2",
+            "-v=2",
+            "clé=été",
+        ] {
+            let tokens = lex(word).expect("lex ok");
+            assert_eq!(
+                tokens,
+                vec![Token {
+                    kind: TokenKind::Bareword(word.into()),
+                    span: Span::new(0, word.len() as u32),
+                }],
+                "{word}"
+            );
+        }
+        assert_eq!(
+            kinds("a=b|c=d;e=f#comment"),
+            vec![
+                TokenKind::Bareword("a=b".into()),
+                TokenKind::Pipe,
+                TokenKind::Bareword("c=d".into()),
+                TokenKind::Semi,
+                TokenKind::Bareword("e=f".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn equals_operators_and_long_flags_keep_their_meaning() {
+        for source in ["x = y", "x= y", "x =y"] {
+            assert_eq!(
+                kinds(source),
+                vec![
+                    TokenKind::Bareword("x".into()),
+                    TokenKind::Op(Op::Assign),
+                    TokenKind::Bareword("y".into()),
+                ]
+            );
+        }
+        assert_eq!(
+            kinds("1==2"),
+            vec![
+                TokenKind::Int(1),
+                TokenKind::Op(Op::EqEq),
+                TokenKind::Int(2),
+            ]
+        );
+        assert_eq!(
+            kinds("$x!=2"),
+            vec![
+                TokenKind::Var("x".into()),
+                TokenKind::Op(Op::Ne),
+                TokenKind::Int(2),
+            ]
+        );
+        for op in [Op::EqEq, Op::Ne, Op::Le, Op::Ge] {
+            assert_eq!(
+                kinds(&format!("1 {} 2", op.as_str())),
+                vec![TokenKind::Int(1), TokenKind::Op(op), TokenKind::Int(2),]
+            );
+        }
+        assert_eq!(
+            kinds("--if=/dev/hda --option=a=b"),
+            vec![
+                TokenKind::Flag {
+                    name: "if".into(),
+                    long: true,
+                    has_eq: true
+                },
+                TokenKind::Bareword("/dev/hda".into()),
+                TokenKind::Flag {
+                    name: "option".into(),
+                    long: true,
+                    has_eq: true
+                },
+                TokenKind::Bareword("a=b".into()),
             ]
         );
     }
