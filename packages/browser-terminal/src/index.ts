@@ -368,6 +368,17 @@ export class BrowserTerminal {
     this.paneManager.setTheme(theme);
   }
 
+  /**
+   * Set plain text before every pane's status prompt, including future panes.
+   * Include spacing, e.g. '/mnt '. Escape sequences and controls are stripped;
+   * line breaks and tabs become spaces. Pass '' to restore the default.
+   * Idle panes redraw immediately; busy panes update at their next prompt.
+   */
+  setPrompt(prefix: string): void {
+    this.assertLive();
+    this.core.set_prompt(prefix);
+  }
+
   /** Focus the active pane's terminal input. */
   focus(): void {
     this.assertLive();

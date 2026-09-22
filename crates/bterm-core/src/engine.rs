@@ -252,6 +252,11 @@ impl Engine {
         self.events.drain(..).collect()
     }
 
+    /// Set every pane's prefix, returning whether the visible text changed.
+    pub fn set_prompt_prefix(&mut self, prefix: &str) -> bool {
+        self.mux.set_prompt_prefix(prefix)
+    }
+
     /// Fresh prompt line for a pane (used after output settles).
     pub fn prompt_line(&self, pane: u32) -> String {
         self.mux
@@ -1080,6 +1085,53 @@ mod tests {
         assert!(out.contains("A"), "output: {out:?}");
         assert!(out.contains("\r\n"), "CRLF conversion applied");
         assert!(out.contains("❯"), "prompt reprinted after output");
+    }
+
+    #[test]
+    fn prompt_prefix_reaches_existing_and_new_panes() {
+        let mut e = Engine::new();
+        assert!(e.set_prompt_prefix("/mnt "));
+        assert!(!e.set_prompt_prefix("/mnt "));
+        let initial = e.mux.active_pane();
+        assert!(e.prompt_line(initial).starts_with("\r\x1b[K/mnt "));
+        for action in [
+            MuxAction::SplitRight,
+            MuxAction::WindowNew,
+            MuxAction::SessionNew {
+                name: Some("work".into()),
+            },
+        ] {
+            e.drain_events();
+            e.mux_apply(action).0.expect("mux action");
+            let pane = e.mux.active_pane();
+            assert!(e.prompt_line(pane).starts_with("\r\x1b[K/mnt "));
+            assert!(e.drain_events().iter().any(|event| matches!(
+                event, EngineEvent::PaneOutput { pane: id, data }
+                if *id == pane && data.contains("/mnt \x1b[32m❯")
+            )));
+        }
+        e.set_prompt_prefix("/home ");
+        for pane in e.mux.panes.keys() {
+            assert!(e.prompt_line(*pane).contains("/home \x1b[32m❯"));
+        }
+        e.set_prompt_prefix("");
+        for pane in e.mux.panes.keys() {
+            assert!(!e.prompt_line(*pane).contains("/home"));
+        }
+    }
+
+    #[test]
+    fn last_pane_replacement_inherits_prompt_prefix() {
+        let mut e = Engine::new();
+        e.set_prompt_prefix("/mnt ");
+        let old = e.mux.active_pane();
+        e.mux_apply(MuxAction::KillPane)
+            .0
+            .expect("replace last pane");
+        assert_ne!(e.mux.active_pane(), old);
+        assert!(e
+            .prompt_line(e.mux.active_pane())
+            .contains("/mnt \x1b[32m❯"));
     }
 
     #[test]

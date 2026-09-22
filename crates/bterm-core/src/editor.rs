@@ -6,8 +6,6 @@ use serde::Serialize;
 use unicode_width::UnicodeWidthChar;
 
 const MAX_HISTORY: usize = 200;
-/// Visible width of the prompt (`❯ `).
-const PROMPT_WIDTH: usize = 2;
 
 const PASTE_START: &str = "\x1b[200~";
 const PASTE_END: &str = "\x1b[201~";
@@ -37,6 +35,7 @@ pub struct LineEditor {
     in_paste: bool,
     paste_buf: String,
     last_ok: bool,
+    prompt_prefix: String,
 }
 
 impl Default for LineEditor {
@@ -57,6 +56,7 @@ impl LineEditor {
             in_paste: false,
             paste_buf: String::new(),
             last_ok: true,
+            prompt_prefix: String::new(),
         }
     }
 
@@ -69,12 +69,14 @@ impl LineEditor {
         &self.history
     }
 
+    /// Plain text before the status marker; spacing belongs to the caller.
+    pub fn set_prompt_prefix(&mut self, prefix: &str) {
+        self.prompt_prefix = crate::render::diagnostic_text(prefix);
+    }
+
     pub fn prompt(&self) -> String {
-        if self.last_ok {
-            "\x1b[32m❯\x1b[0m ".to_string()
-        } else {
-            "\x1b[31m❯\x1b[0m ".to_string()
-        }
+        let color = if self.last_ok { 32 } else { 31 };
+        format!("{}\x1b[{color}m❯\x1b[0m ", self.prompt_prefix)
     }
 
     /// Redraw the whole input line: CR, clear, prompt, buffer, cursor.
@@ -89,7 +91,7 @@ impl LineEditor {
         if tail_width > 0 {
             out.push_str(&format!("\x1b[{tail_width}D"));
         }
-        let _ = PROMPT_WIDTH; // prompt width is constant; kept for cursor math extensions
+        // Cursor restoration depends only on the input tail, not the prefix width.
         out
     }
 
@@ -590,5 +592,31 @@ mod tests {
         assert!(ed.prompt().contains("32m"));
         ed.set_last_status(false);
         assert!(ed.prompt().contains("31m"));
+    }
+
+    #[test]
+    fn prompt_prefix_preserves_status_input_and_cursor() {
+        let mut ed = LineEditor::new();
+        let default = ed.prompt();
+        assert_eq!(default, "\x1b[32m❯\x1b[0m ");
+        ed.feed("日本\x1b[D");
+        ed.set_prompt_prefix("/mnt ");
+        assert_eq!(ed.prompt(), "/mnt \x1b[32m❯\x1b[0m ");
+        assert_eq!(line(&ed), "/mnt ❯ 日本");
+        assert!(ed.prompt_line().ends_with("\x1b[2D"));
+        ed.set_last_status(false);
+        assert_eq!(ed.prompt(), "/mnt \x1b[31m❯\x1b[0m ");
+        ed.feed("X");
+        assert_eq!(ed.feed("\r").submitted, vec!["日X本"]);
+        ed.set_last_status(true);
+        ed.set_prompt_prefix("");
+        assert_eq!(ed.prompt(), default);
+    }
+
+    #[test]
+    fn prompt_prefix_strips_whole_escapes_and_flattens_controls() {
+        let mut ed = LineEditor::new();
+        ed.set_prompt_prefix("\x1b[31m/mnt\x1b[0m\x1b[2J\x1b]0;title\x07\n\t\r\x07 ");
+        assert_eq!(ed.prompt(), "/mnt    \x1b[32m❯\x1b[0m ");
     }
 }

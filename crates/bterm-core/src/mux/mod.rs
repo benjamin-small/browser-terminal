@@ -80,6 +80,7 @@ pub struct Mux {
     pub sessions: IndexMap<SessionId, Session>,
     pub active_session: SessionId,
     pub panes: IndexMap<PaneId, PaneShell>,
+    prompt_prefix: String,
     next_id: u32,
 }
 
@@ -115,6 +116,7 @@ impl Mux {
             sessions: IndexMap::new(),
             active_session: 0,
             panes: IndexMap::new(),
+            prompt_prefix: String::new(),
             next_id: 0,
         };
         let sid = mux.create_session("main".to_string());
@@ -130,8 +132,23 @@ impl Mux {
 
     fn create_pane(&mut self) -> PaneId {
         let id = self.next_id();
-        self.panes.insert(id, PaneShell::new());
+        let mut pane = PaneShell::new();
+        pane.editor.set_prompt_prefix(&self.prompt_prefix);
+        self.panes.insert(id, pane);
         id
+    }
+
+    /// Update existing and future panes. Return whether the visible prefix changed.
+    pub fn set_prompt_prefix(&mut self, prefix: &str) -> bool {
+        let prefix = crate::render::diagnostic_text(prefix);
+        if prefix == self.prompt_prefix {
+            return false;
+        }
+        self.prompt_prefix = prefix;
+        for pane in self.panes.values_mut() {
+            pane.editor.set_prompt_prefix(&self.prompt_prefix);
+        }
+        true
     }
 
     fn create_window(&mut self, name: String) -> Window {
