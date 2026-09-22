@@ -18,6 +18,7 @@ const terminal = await BrowserTerminal.create({
 The supported options are:
 
 - `mount`: render inside an existing element instead of using the panel chrome;
+- `terminal`: set `theme`, `fontFamily`, and `fontSize` for all current and future panes;
 - `wasmUrl`: load the WebAssembly module from a custom URL;
 - `wasmBinary`: initialize from preloaded WebAssembly bytes instead of a URL;
 - `globalToggle`: install the opt-in `Ctrl+\`` window shortcut;
@@ -28,6 +29,12 @@ The supported options are:
 `wasmBinary` takes precedence over `wasmUrl`. Without either option, the
 package loads its bundled WebAssembly module. Call `dispose()` before creating
 another instance on the same page.
+
+Use `setTheme(theme)` to replace colors at runtime and `focus()` / `blur()` to
+control the active pane's keyboard focus. See the package README's
+[appearance](../packages/browser-terminal/README.md#terminal-appearance) and
+[focus](../packages/browser-terminal/README.md#keyboard-focus) sections for defaults
+and examples.
 
 ## Development and demo settings
 

@@ -8,7 +8,8 @@
  * DOM: drag, resize, tabs, session pills).
  */
 import init, { BtermCore } from './wasm/bterm_wasm.js';
-import { PaneManager } from './panes.js';
+import { PaneManager, type TerminalOptions } from './panes.js';
+import type { ITheme } from '@xterm/xterm';
 import { PanelHost, type PanelMode } from './panels.js';
 import type { Effects, EngineEvent, HostMsg, LayoutSnapshot } from './events.js';
 import type {
@@ -32,6 +33,8 @@ export type {
   WindowInfo,
 } from './events.js';
 export type { PanelMode } from './panels.js';
+export type { TerminalOptions } from './panes.js';
+export type { ITheme } from '@xterm/xterm';
 export type {
   ChannelWriter,
   CommandArgs,
@@ -55,6 +58,8 @@ export interface CreateOptions {
    * bottom panel.
    */
   mount?: HTMLElement;
+  /** Theme and font settings applied to every terminal pane. */
+  terminal?: TerminalOptions;
   /** Override the URL of the .wasm binary (for CDN / non-bundler setups). */
   wasmUrl?: string | URL;
   /**
@@ -128,11 +133,15 @@ export class BrowserTerminal {
       mount = panel.contentEl;
     }
 
-    const paneManager = new PaneManager(mount, {
-      feed: (pane, data) => core.feed(pane, data) as Effects | null,
-      resize: (pane, cols, rows) => core.resize(pane, cols, rows),
-      dispatch: (msg) => core.dispatch(msg),
-    });
+    const paneManager = new PaneManager(
+      mount,
+      {
+        feed: (pane, data) => core.feed(pane, data) as Effects | null,
+        resize: (pane, cols, rows) => core.resize(pane, cols, rows),
+        dispatch: (msg) => core.dispatch(msg),
+      },
+      opts.terminal,
+    );
 
     core = new BtermCore((event: EngineEvent) => {
       switch (event.type) {
@@ -348,6 +357,27 @@ export class BrowserTerminal {
   /** The latest layout snapshot (sessions, windows, pane rects). */
   get snapshot(): LayoutSnapshot | null {
     return this.lastSnapshot;
+  }
+
+  /**
+   * Replace the theme for all existing and future panes. Omitted colors use
+   * terminal defaults; pass an empty object to restore the default theme.
+   */
+  setTheme(theme: ITheme): void {
+    this.assertLive();
+    this.paneManager.setTheme(theme);
+  }
+
+  /** Focus the active pane's terminal input. */
+  focus(): void {
+    this.assertLive();
+    this.paneManager.focus();
+  }
+
+  /** Remove keyboard focus from the active pane's terminal input. */
+  blur(): void {
+    this.assertLive();
+    this.paneManager.blur();
   }
 
   show(): void {

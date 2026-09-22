@@ -989,6 +989,26 @@ mod tests {
         assert_eq!(v, Value::List(vec![Value::Str("a".into()), Value::Str("b".into())]));
     }
 
+    #[test]
+    fn key_value_operands_flow_through_structured_pipes() {
+        assert_eq!(
+            eval("echo if=/dev/hda count=1 | to json").expect("operands are strings"),
+            Value::Str(r#"["if=/dev/hda","count=1"]"#.into()),
+        );
+        assert_eq!(
+            eval("echo if=/dev/hda count=1 | filter {|x| $x == count=1}").expect("comparison"),
+            Value::Str("count=1".into()),
+        );
+        assert_eq!(
+            eval("echo 1 2 | filter {|x| $x==1}").expect("compact comparison"),
+            Value::Int(1),
+        );
+        assert!(
+            eval_any("echo x = 1").is_err(),
+            "standalone assignment remains unsupported"
+        );
+    }
+
     // --- regression tests from the M2 adversarial review ---
 
     #[test]

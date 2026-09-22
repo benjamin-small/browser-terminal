@@ -255,6 +255,41 @@ async fn run_resolves_scalar_and_plain_objects() {
 }
 
 #[wasm_bindgen_test]
+async fn key_value_operands_reach_host_commands_as_positionals() {
+    let core = make_core();
+    let sig = js_sys::JSON::parse(
+        r#"{"name":"dd","rest":{"name":"operands"},"flags":[{"long":"count","shape":"int"}]}"#,
+    )
+    .expect("sig");
+    let handler = Function::new_with_args("args", "return args;");
+    core.register_command(sig, handler).expect("registered");
+
+    let value = run_value(&core, "dd if=/dev/hda count=1 --count=2")
+        .await
+        .expect("resolves");
+    let positionals = Reflect::get(&value, &"positionals".into()).expect("positionals");
+    let positionals = Array::from(&positionals);
+    assert_eq!(positionals.length(), 2);
+    assert_eq!(
+        positionals.get(0).as_string().as_deref(),
+        Some("if=/dev/hda")
+    );
+    assert_eq!(positionals.get(1).as_string().as_deref(), Some("count=1"));
+    let flags: js_sys::Object = Reflect::get(&value, &"flags".into())
+        .expect("flags")
+        .dyn_into()
+        .expect("flags object");
+    assert_eq!(js_sys::Object::keys(&flags).length(), 1);
+    assert_eq!(
+        Reflect::get(&flags, &"count".into())
+            .expect("count flag")
+            .as_f64(),
+        Some(2.0)
+    );
+    core.dispose();
+}
+
+#[wasm_bindgen_test]
 async fn ts_command_sync_return_and_int_conversion() {
     let core = make_core();
     let sig = js_sys::JSON::parse(r#"{"name":"answer","summary":"the answer"}"#).expect("sig");

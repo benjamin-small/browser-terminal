@@ -109,6 +109,7 @@ ship to the web.
 ```ts
 const bt = await BrowserTerminal.create({
   mount?: HTMLElement;        // bring your own container (skips panel chrome)
+  terminal?: { theme?: ITheme; fontFamily?: string; fontSize?: number };
   wasmUrl?: string | URL;     // custom .wasm location
   globalToggle?: boolean;     // opt-in Ctrl+` show/hide
   dock?: 'right' | 'left' | 'float';  // default 'right'
@@ -134,14 +135,27 @@ bt.run(line): Promise<{ value: Value; log: string[]; err: string[] }>;  // progr
 bt.snapshot;                   // sessions/windows/pane rects
 bt.setPanelMode('float');      // pop out; 'right'/'left' to dock again
 bt.panelMode;                  // current mode
+bt.setTheme({ background: '#ffffff', foreground: '#222222' }); // all current/future panes
+bt.focus(); bt.blur();          // keyboard focus for the active pane
 bt.show(); bt.hide(); bt.toggle(); bt.dispose();
 ```
 
 ## The shell language (v1)
 
+The language prioritizes structured values and host integration. POSIX shell
+compatibility is not a goal; familiar syntax is adopted where it fits that model.
+
 `;`-separated pipelines; multi-word commands (`str upcase`); flags
 (`--limit 5`, `--limit=5`, `-l 5`); `'raw'` and `"interpolated $var"` strings;
 `#` comments.
+
+An embedded single `=` is part of a bareword when it has bareword characters
+on both sides: `dd if=/dev/hda count=1` passes the strings `if=/dev/hda` and
+`count=1` as positional arguments to a host-registered `dd` command. These
+operands do not set variables or become flags. `--name=value` still binds a
+declared flag, and `==` still compares values inside closures. Standalone
+assignment (`x = 1`) remains unsupported. Quote the whole operand when it
+contains spaces or has an empty value: `'label=hello world'`, `'label='`.
 
 Two orthogonal filters, not a grab-bag: **`grep` searches text**, **`filter`
 tests a predicate.**

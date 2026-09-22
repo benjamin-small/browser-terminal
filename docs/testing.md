@@ -17,7 +17,8 @@ different layers.
   TypeScript demo against the generated declarations.
 - `just test-e2e` runs Playwright against the demo in Chromium. It exercises
   structured pipelines, selectors, diagnostics and escape handling, panel and
-  session behavior, streaming, cancellation, and host/session variables.
+  session behavior, streaming, cancellation, host/session variables, terminal
+  appearance, and keyboard focus with both panel and custom mounts.
 - `scripts/verify-site.mjs` boots the assembled GitHub Pages artifact, while
   `scripts/verify-tarball.mjs` installs and boots the packed npm artifact as an
   external consumer would.
