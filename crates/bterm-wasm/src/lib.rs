@@ -321,6 +321,33 @@ impl BtermCore {
         Ok(())
     }
 
+    /// Set a plain-text prompt prefix for every existing and future pane.
+    /// Idle panes redraw immediately; busy panes use it at their next prompt.
+    pub fn set_prompt(&self, prefix: &str) -> Result<(), JsValue> {
+        if !engine_alive() {
+            return Err(js_error("browser-terminal: engine is disposed"));
+        }
+        WasmAccess.with(|e| {
+            if !e.set_prompt_prefix(prefix) {
+                return;
+            }
+            // The task registry also covers programmatic runs and prefix-key
+            // commands. Never erase a line while a task may still write to it.
+            let redraws: Vec<_> = e
+                .mux
+                .panes
+                .iter()
+                .filter(|(id, _)| !tasks::pane_busy(**id))
+                .map(|(id, pane)| (*id, pane.editor.prompt_line()))
+                .collect();
+            for (pane, prompt) in redraws {
+                e.emit_output(pane, &prompt);
+            }
+        });
+        flush_events();
+        Ok(())
+    }
+
     /// Current layout snapshot (sessions, windows, pane rects).
     pub fn snapshot(&self) -> JsValue {
         if !engine_alive() {

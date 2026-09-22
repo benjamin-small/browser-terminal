@@ -137,8 +137,15 @@ bt.setPanelMode('float');      // pop out; 'right'/'left' to dock again
 bt.panelMode;                  // current mode
 bt.setTheme({ background: '#ffffff', foreground: '#222222' }); // all current/future panes
 bt.focus(); bt.blur();          // keyboard focus for the active pane
+bt.setPrompt('/mnt ');          // plain-text prefix before every pane's status marker
 bt.show(); bt.hide(); bt.toggle(); bt.dispose();
 ```
+
+Hosts can display a working directory or other context with `bt.setPrompt('/mnt ')`.
+Include any desired spacing; `bt.setPrompt('')` restores the default prompt.
+The prefix applies to existing and future panes. Idle panes redraw immediately
+without losing input; busy panes display it at their next prompt. Escape sequences
+and control characters are stripped, with line breaks and tabs converted to spaces.
 
 ## The shell language (v1)
 

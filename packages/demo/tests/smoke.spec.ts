@@ -308,6 +308,33 @@ for (const customMount of [false, true]) {
   });
 }
 
+test('host prompt prefix redraws input and follows new panes', async ({ page }) => {
+  await page.goto('/');
+  await waitForTerminal(page);
+  const root = page.locator('[data-browser-terminal]');
+  const input = root.locator('[data-active="true"] .xterm-helper-textarea');
+  await expect(input).toBeFocused();
+  await input.pressSequentially('echo hi');
+  await input.press('ArrowLeft');
+  await page.evaluate(() => window.bt.setPrompt('/mnt '));
+  await expect(root.locator('.xterm-rows')).toContainText('/mnt ❯ echo hi');
+  await input.pressSequentially('X');
+  await input.press('Enter');
+  await expect(root.locator('.xterm-rows')).toContainText('hXi');
+
+  await page.evaluate(() => window.bt.run('mux split --right'));
+  await expect(root.locator('.xterm')).toHaveCount(2);
+  await expect(root.locator('[data-active="true"] .xterm-rows')).toContainText('/mnt ❯');
+  await page.evaluate(() => window.bt.setPrompt('/home '));
+  for (const rows of await root.locator('.xterm-rows').all()) {
+    await expect(rows).toContainText('/home ❯');
+  }
+  await page.evaluate(() => window.bt.setPrompt(''));
+  for (const rows of await root.locator('.xterm-rows').all()) {
+    await expect(rows).not.toContainText('/home');
+  }
+});
+
 test('prefix chord splits the pane', async ({ page }) => {
   await page.goto('/');
   await waitForTerminal(page);

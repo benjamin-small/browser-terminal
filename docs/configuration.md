@@ -36,6 +36,10 @@ control the active pane's keyboard focus. See the package README's
 [focus](../packages/browser-terminal/README.md#keyboard-focus) sections for defaults
 and examples.
 
+Use `setPrompt('/mnt ')` to place plain text before every pane's status marker.
+Include any spacing; `setPrompt('')` clears it. Idle panes redraw immediately,
+and panes with running tasks update at their next prompt.
+
 ## Development and demo settings
 
 No `.env` file is required for development. The native `bterm` CLI optionally

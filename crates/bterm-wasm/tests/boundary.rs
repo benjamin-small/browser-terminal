@@ -120,6 +120,93 @@ fn command(core: &BtermCore, name: &str, body: &str) {
         .expect("registered");
 }
 
+fn prompt_outputs_since(start: u32) -> Vec<String> {
+    events()
+        .iter()
+        .skip(start as usize)
+        .filter_map(|event| {
+            let kind = Reflect::get(&event, &"type".into()).ok()?.as_string()?;
+            if kind != "paneOutput" {
+                return None;
+            }
+            Reflect::get(&event, &"data".into()).ok()?.as_string()
+        })
+        .collect()
+}
+
+#[wasm_bindgen_test]
+async fn prompt_prefix_redraws_idle_panes_and_preserves_input() {
+    let core = make_core();
+    core.feed(0, "echo hi\x1b[D");
+    let before = events().length();
+    core.set_prompt("/mnt ").expect("set prompt");
+    let output = prompt_outputs_since(before);
+    assert_eq!(output.len(), 1);
+    assert!(output[0].contains("/mnt \x1b[32m❯\x1b[0m echo hi\x1b[1D"));
+    let before = events().length();
+    core.set_prompt("/mnt ").expect("same prompt");
+    assert!(
+        prompt_outputs_since(before).is_empty(),
+        "same prefix avoids redundant callbacks"
+    );
+
+    run_value(&core, "mux split --right").await.expect("split");
+    let before = events().length();
+    core.set_prompt("/home ").expect("update both panes");
+    let output = prompt_outputs_since(before);
+    assert_eq!(output.len(), 2);
+    assert!(output.iter().all(|s| s.contains("/home \x1b[32m❯")));
+    let before = events().length();
+    run_value(&core, "session new work").await.expect("session");
+    assert!(prompt_outputs_since(before)
+        .iter()
+        .any(|s| s.contains("/home \x1b[32m❯")));
+
+    let before = events().length();
+    core.set_prompt("\x1b[31m/mnt\x1b[2J\n ").expect("sanitize");
+    let output = prompt_outputs_since(before);
+    assert_eq!(output.len(), 3, "background panes also redraw");
+    assert!(output
+        .iter()
+        .all(|s| s.contains("/mnt  \x1b[32m❯") && !s.contains("\x1b[2J")));
+    core.set_prompt("").expect("clear");
+    core.dispose();
+    assert!(core
+        .set_prompt("gone")
+        .expect_err("disposed")
+        .is_instance_of::<js_sys::Error>());
+}
+
+#[wasm_bindgen_test]
+async fn prompt_prefix_waits_for_a_running_command_to_finish() {
+    let core = make_core();
+    command(
+        &core,
+        "held",
+        "return new Promise(resolve => { globalThis.__releasePromptRun = resolve; });",
+    );
+    core.feed(0, "held\r");
+    let before = events().length();
+    core.set_prompt("/busy ")
+        .expect("set while task is registered");
+    assert!(
+        prompt_outputs_since(before).is_empty(),
+        "do not erase pending output"
+    );
+    tick().await;
+    let release: Function = Reflect::get(&js_sys::global(), &"__releasePromptRun".into())
+        .expect("release")
+        .dyn_into()
+        .expect("function");
+    release.call0(&JsValue::NULL).expect("finish command");
+    tick().await;
+    assert!(prompt_outputs_since(before)
+        .iter()
+        .any(|s| s.contains("/busy \x1b[32m❯")));
+    let _ = Reflect::delete_property(&js_sys::global(), &"__releasePromptRun".into());
+    core.dispose();
+}
+
 #[wasm_bindgen_test]
 async fn a_partial_write_survives_a_throw_in_the_default_line_mode() {
     // The headline case. `line` is the DEFAULT mode, so a write with no

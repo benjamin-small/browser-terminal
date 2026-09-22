@@ -169,6 +169,15 @@ panes; the surrounding panel chrome keeps its existing styling.
 
 ## Host state as shell variables
 
+For state that belongs in the prompt, call `bt.setPrompt('/mnt ')` to show
+`/mnt ❯`. Include any desired spacing, and pass `''` to clear the prefix.
+It applies to every existing and future pane. Idle panes redraw immediately
+while preserving typed input; panes with running tasks use it at their next
+prompt. This includes programmatic `run()` calls, which do not themselves
+print a prompt. The prefix is plain text: escape sequences and controls are
+removed, and newlines, tabs, and carriage returns become spaces. `setPrompt()`
+throws after disposal.
+
 Inject application state and reference it as `$name`, instead of pasting it
 into the command text:
 
