@@ -407,7 +407,7 @@ async fn yield_once() {
 /// Map a thrown/rejected JS value to a ShellError. `Error` instances and
 /// plain `{ message, help? }` objects keep their message and help; stacks go
 /// to the browser console.
-fn js_error_to_shell(e: &JsValue, span: Span, cmd: &str) -> ShellError {
+pub(crate) fn js_error_to_shell(e: &JsValue, span: Span, cmd: &str) -> ShellError {
     if e.is_object() {
         let get_str = |key: &str| {
             js_sys::Reflect::get(e, &JsValue::from_str(key))

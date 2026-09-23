@@ -341,6 +341,251 @@ async fn run_resolves_scalar_and_plain_objects() {
     core.dispose();
 }
 
+fn redirect_handler(core: &BtermCore, body: &str) -> JsValue {
+    let handler = Function::new_no_args(body)
+        .call0(&JsValue::NULL)
+        .expect("handler factory");
+    core.set_redirect_handler(handler.clone())
+        .expect("install handler");
+    handler
+}
+
+#[wasm_bindgen_test]
+async fn redirects_deliver_typed_values_append_and_origin_context() {
+    let core = make_core();
+    let ids = active_context_ids(&core);
+    let handler = redirect_handler(
+        &core,
+        r#"
+        return {
+            writes: [],
+            async read(target, ctx) {
+                if (target !== 'source' || !Object.isFrozen(ctx) || !(ctx.signal instanceof AbortSignal)) throw new Error('bad read context');
+                this.readCtx = ctx;
+                return new Uint8Array([0, 128, 255]);
+            },
+            async write(target, value, ctx) {
+                if (!Object.isFrozen(ctx) || ctx.signal !== this.readCtx.signal) throw new Error('bad write context');
+                this.writes.push({ target, value, ctx });
+            }
+        };
+    "#,
+    );
+    core.set_variable("destination", "/mnt/a b".into(), JsValue::UNDEFINED)
+        .expect("target variable");
+    let result = run_value(&core, "map {|x| $x} < source >> $destination")
+        .await
+        .expect("redirect");
+    assert!(result.is_null(), "write consumes the result");
+    let writes = Array::from(&Reflect::get(&handler, &"writes".into()).expect("writes"));
+    assert_eq!(writes.length(), 1);
+    let write = writes.get(0);
+    assert_eq!(
+        Reflect::get(&write, &"target".into())
+            .expect("target")
+            .as_string()
+            .as_deref(),
+        Some("/mnt/a b")
+    );
+    assert_bytes(
+        &Reflect::get(&write, &"value".into()).expect("value"),
+        &[0, 128, 255],
+    );
+    let ctx = Reflect::get(&write, &"ctx".into()).expect("context");
+    assert_context_ids(&ctx, ids);
+    assert_eq!(
+        Reflect::get(&ctx, &"append".into())
+            .expect("append")
+            .as_bool(),
+        Some(true)
+    );
+    assert_context_ids(
+        &Reflect::get(&handler, &"readCtx".into()).expect("context"),
+        ids,
+    );
+    core.dispose();
+}
+
+#[wasm_bindgen_test]
+async fn a_failed_stream_never_calls_the_redirect_writer_and_keeps_diagnostics() {
+    let core = make_core();
+    let handler = redirect_handler(
+        &core,
+        "return { writes: 0, read() { return null; }, write() { this.writes++; } };",
+    );
+    command(&core, "partial-fail", "ctx.log('progress'); ctx.err('warning'); return (async function*() { yield { id: 1 }; throw { message: 'producer failed' }; })();");
+    let error = run_line(&core, "partial-fail > target")
+        .await
+        .expect_err("failed producer");
+    assert!(err_message(&error).contains("producer failed"));
+    assert!(contains(&entries(&error, "log"), "progress"));
+    assert!(contains(&entries(&error, "err"), "warning"));
+    assert_eq!(
+        Reflect::get(&handler, &"writes".into())
+            .expect("count")
+            .as_f64(),
+        Some(0.0)
+    );
+    core.dispose();
+}
+
+#[wasm_bindgen_test]
+async fn redirect_errors_are_real_rejections_with_help_and_recover_cleanly() {
+    let core = make_core();
+    redirect_handler(&core, "return { read() { throw { message: 'missing target', help: 'choose a source' }; }, write() { return Promise.reject({ message: 'write denied', help: 'choose a destination' }); } };");
+    for (line, message, help) in [
+        ("length < absent", "missing target", "choose a source"),
+        ("echo hi > readonly", "write denied", "choose a destination"),
+    ] {
+        let error = run_line(&core, line).await.expect_err("hook failure");
+        assert!(error.is_instance_of::<js_sys::Error>());
+        assert!(err_message(&error).contains(message));
+        assert!(err_message(&error).contains(help));
+    }
+    assert_eq!(
+        run_value(&core, "echo alive")
+            .await
+            .expect("still alive")
+            .as_string()
+            .as_deref(),
+        Some("alive")
+    );
+    core.dispose();
+}
+
+#[wasm_bindgen_test]
+async fn cancelling_a_redirect_read_aborts_its_signal_and_prevents_late_writes() {
+    let core = make_core();
+    let handler = redirect_handler(
+        &core,
+        r#"
+        return {
+            writes: 0, aborted: false,
+            read(target, ctx) {
+                ctx.signal.addEventListener('abort', () => { this.aborted = true; });
+                return new Promise(resolve => { this.release = resolve; });
+            },
+            write() { this.writes++; }
+        };
+    "#,
+    );
+    let pending = core.run(0, "length < source > target".into());
+    tick().await;
+    core.feed(0, "\x03");
+    let error = within_a_second(pending)
+        .await
+        .expect("abort settles")
+        .expect_err("aborted");
+    assert!(err_message(&error).contains("aborted"));
+    assert_eq!(
+        Reflect::get(&handler, &"aborted".into())
+            .expect("aborted flag")
+            .as_bool(),
+        Some(true)
+    );
+    let release: Function = Reflect::get(&handler, &"release".into())
+        .expect("release")
+        .dyn_into()
+        .expect("function");
+    release
+        .call1(&JsValue::NULL, &"late data".into())
+        .expect("late resolve");
+    tick().await;
+    assert_eq!(
+        Reflect::get(&handler, &"writes".into())
+            .expect("writes")
+            .as_f64(),
+        Some(0.0)
+    );
+    core.dispose();
+}
+
+#[wasm_bindgen_test]
+async fn in_flight_redirects_keep_their_handler_and_session_after_replacement() {
+    let core = make_core();
+    let first = active_context_ids(&core);
+    let old = redirect_handler(&core, "return { read() { return new Promise(resolve => { this.release = resolve; }); }, write(target, value, ctx) { this.ctx = ctx; this.value = value; } };");
+    let pending = core.run(first.1, "length < source > target".into());
+    tick().await;
+    let new = redirect_handler(
+        &core,
+        "return { writes: 0, read() { return 'new'; }, write() { this.writes++; } };",
+    );
+    run_value(&core, "session new other")
+        .await
+        .expect("switch sessions");
+    let release: Function = Reflect::get(&old, &"release".into())
+        .expect("release")
+        .dyn_into()
+        .expect("function");
+    release
+        .call1(&JsValue::NULL, &"old".into())
+        .expect("resolve");
+    within_a_second(pending)
+        .await
+        .expect("settles")
+        .expect("succeeds");
+    assert_context_ids(&Reflect::get(&old, &"ctx".into()).expect("context"), first);
+    assert_eq!(
+        Reflect::get(&old, &"value".into()).expect("value").as_f64(),
+        Some(3.0)
+    );
+    assert_eq!(
+        Reflect::get(&new, &"writes".into())
+            .expect("writes")
+            .as_f64(),
+        Some(0.0)
+    );
+    core.dispose();
+}
+
+#[wasm_bindgen_test]
+async fn redirect_registration_is_atomic_and_dispose_aborts_pending_writes() {
+    let core = make_core();
+    let handler = redirect_handler(&core, "return { read() { return 'value'; }, write(target, value, ctx) { this.signal = ctx.signal; return new Promise(() => {}); } };");
+    let throwing =
+        Function::new_no_args("return { get read() { throw 'getter failed'; }, write() {} };")
+            .call0(&JsValue::NULL)
+            .expect("handler");
+    let error = core
+        .set_redirect_handler(throwing)
+        .expect_err("getter failure");
+    assert!(error.is_instance_of::<js_sys::Error>());
+    assert!(err_message(&error).contains("getter failed"));
+    assert!(core
+        .set_redirect_handler(js_sys::Object::new().into())
+        .expect_err("invalid handler")
+        .is_instance_of::<js_sys::Error>());
+    assert_eq!(
+        run_value(&core, "length < source")
+            .await
+            .expect("old handler retained")
+            .as_f64(),
+        Some(5.0)
+    );
+    core.set_redirect_handler(JsValue::NULL).expect("remove");
+    assert!(run_value(&core, "length < source").await.is_err());
+    core.set_redirect_handler(handler.clone()).expect("restore");
+    let pending = core.run(0, "echo hi > target".into());
+    tick().await;
+    core.dispose();
+    within_a_second(pending)
+        .await
+        .expect("dispose settles")
+        .expect_err("disposed run rejects");
+    let signal = Reflect::get(&handler, &"signal".into()).expect("signal");
+    assert_eq!(
+        Reflect::get(&signal, &"aborted".into())
+            .expect("aborted")
+            .as_bool(),
+        Some(true)
+    );
+    assert!(core
+        .set_redirect_handler(JsValue::NULL)
+        .expect_err("disposed setter")
+        .is_instance_of::<js_sys::Error>());
+}
+
 fn assert_bytes(value: &JsValue, expected: &[u8]) {
     let bytes = value.dyn_ref::<js_sys::Uint8Array>().expect("Uint8Array");
     assert_eq!(bytes.to_vec(), expected);

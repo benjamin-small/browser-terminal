@@ -12,7 +12,7 @@ use crate::editor::Effects;
 use crate::error::ShellError;
 use crate::eval::{eval_line, eval_line_with, CommandSource};
 use crate::mux::{keys, layout_window, Dir, FocusDir, Mux, PaneShell, Rect};
-use crate::parse::parse;
+use crate::parse::parse_with_redirects;
 use crate::protocol::{EngineEvent, HostMsg, LayoutSnapshot, PaneInfo, SessionInfo, WindowInfo};
 use crate::callable::{FnCompiler, NoFnCompiler};
 use crate::matcher::{PatternMatcher, SubstringMatcher};
@@ -38,6 +38,7 @@ pub struct Engine {
     /// session. Sessions keep their own `vars`, which win on collision —
     /// see `scope_for_pane`.
     host_vars: Scope,
+    redirect_handler: Option<Rc<dyn crate::redirect::RedirectHandler>>,
     prefix_armed: bool,
     events: VecDeque<EngineEvent>,
     /// The in-flight progressive renderer for a pane, tagged with the run
@@ -80,10 +81,19 @@ impl Engine {
             matcher: Rc::new(SubstringMatcher),
             fn_compiler: Rc::new(NoFnCompiler),
             host_vars: Scope::new(),
+            redirect_handler: None,
             prefix_armed: false,
             events: VecDeque::new(),
             pending_render: HashMap::new(),
         }
+    }
+
+    /// Enable structured redirects, or remove support for future lines.
+    pub fn set_redirect_handler(
+        &mut self,
+        handler: Option<Rc<dyn crate::redirect::RedirectHandler>>,
+    ) {
+        self.redirect_handler = handler;
     }
 
     /// Install the host's pattern engine (the browser passes a JS
@@ -546,9 +556,13 @@ impl<A: EngineAccess> CommandSource for EngineCommands<A> {
 struct EngineHost<A: EngineAccess> {
     access: A,
     pane: u32,
+    redirect_handler: Option<Rc<dyn crate::redirect::RedirectHandler>>,
 }
 
 impl<A: EngineAccess> HostHooks for EngineHost<A> {
+    fn redirect_handler(&self) -> Option<Rc<dyn crate::redirect::RedirectHandler>> {
+        self.redirect_handler.clone()
+    }
     fn history(&self) -> Vec<String> {
         self.access
             .with(|e| e.pane(self.pane).map(|p| p.editor.history().to_vec()))
@@ -735,6 +749,7 @@ fn make_ctx<A: EngineAccess>(
         host: Rc::new(EngineHost {
             access: access.clone(),
             pane,
+            redirect_handler: access.with(|e| e.redirect_handler.clone()),
         }),
         sink,
         width: cols,
@@ -921,7 +936,7 @@ impl<A: EngineAccess> crate::eval::FinalConsumer for ProgressiveConsumer<A> {
 /// Evaluate one submitted line in a pane: parse → eval → render → prompt.
 /// The single shared execution path for native tests and the browser.
 pub async fn execute_line<A: EngineAccess>(access: A, pane: u32, line: String, run_id: u64) {
-    let parsed = parse(&line);
+    let parsed = parse_with_redirects(&line, access.with(|e| e.redirect_handler.is_some()));
     if !parsed.errors.is_empty() {
         access.with(|e| {
             for err in &parsed.errors {
@@ -989,7 +1004,7 @@ pub async fn eval_to_value<A: EngineAccess>(
     run_id: u64,
     sink: Rc<dyn crate::sink::Sink>,
 ) -> Result<Value, ShellError> {
-    let parsed = parse(&line);
+    let parsed = parse_with_redirects(&line, access.with(|e| e.redirect_handler.is_some()));
     if let Some(err) = parsed.errors.into_iter().next() {
         return Err(err);
     }

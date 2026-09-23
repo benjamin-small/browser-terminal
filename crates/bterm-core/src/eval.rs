@@ -181,13 +181,52 @@ pub async fn eval_pipeline(
     scope: &Scope,
     consumer: &mut dyn FinalConsumer,
 ) -> Result<(), ShellError> {
+    // Resolve both targets before invoking host code or starting commands.
+    let read_target = pipeline
+        .input
+        .as_ref()
+        .map(|r| redirect_target(r, scope))
+        .transpose()?;
+    let write_target = pipeline
+        .output
+        .as_ref()
+        .map(|r| redirect_target(r, scope))
+        .transpose()?;
+    let handler = ctx.host.redirect_handler();
+    if let Some(redirect) = pipeline.input.as_ref().or(pipeline.output.as_ref()) {
+        if handler.is_none() {
+            return Err(
+                ShellError::runtime("redirection requires a host handler").with_span(redirect.span)
+            );
+        }
+    }
+    let initial = if let Some(target) = read_target {
+        let redirect = pipeline.input.as_ref().expect("read target");
+        Some(
+            handler
+                .as_ref()
+                .expect("checked handler")
+                .read(target, ctx.clone())
+                .await
+                .map_err(|err| err.with_span(redirect.span))?,
+        )
+    } else {
+        None
+    };
     let failure: Rc<RefCell<Option<ShellError>>> = Rc::new(RefCell::new(None));
 
-    // The first stage's input is an already-closed empty stream.
+    // A read value follows the same flattening rules as a host command's result.
     let (empty_tx, empty_rx) = crate::chan::channel(1);
-    drop(empty_tx);
 
+    let mut redirected = None;
     let mut stages: Vec<crate::pipeline::BoxedStage<'_>> = Vec::new();
+    if let Some(value) = initial {
+        stages.push(Box::pin(async move {
+            let _ = crate::stream::flatten(PipelineData::Value(value), &empty_tx).await;
+        }));
+    } else {
+        drop(empty_tx);
+    }
     let mut upstream = empty_rx;
 
     for call in pipeline.calls.iter() {
@@ -212,21 +251,54 @@ pub async fn eval_pipeline(
     // paints each item as it arrives instead. Either way this stays a stage
     // so consumption interleaves with upstream production rather than
     // waiting for it to finish.
-    stages.push(Box::pin(async move {
-        while let Some(item) = upstream.recv().await {
-            consumer.item(item);
-            if consumer.needs_backpressure() {
-                consumer.ready().await;
+    if write_target.is_some() {
+        let collected = &mut redirected;
+        stages.push(Box::pin(async move {
+            *collected = Some(crate::stream::collect(&mut upstream).await.into_value());
+        }));
+    } else {
+        stages.push(Box::pin(async move {
+            while let Some(item) = upstream.recv().await {
+                consumer.item(item);
+                if consumer.needs_backpressure() {
+                    consumer.ready().await;
+                }
             }
-        }
-    }));
+        }));
+    }
 
     crate::pipeline::drive(stages).await;
 
     if let Some(err) = failure.borrow_mut().take() {
         return Err(err);
     }
+    // A failed producer must never commit a partial write. Successful redirects
+    // consume the result; diagnostics still use the command's normal sink.
+    if let Some(target) = write_target {
+        let redirect = pipeline.output.as_ref().expect("write target");
+        handler
+            .expect("checked handler")
+            .write(
+                target,
+                redirected.expect("collector completed"),
+                redirect.append,
+                ctx.clone(),
+            )
+            .await
+            .map_err(|err| err.with_span(redirect.span))?;
+    }
     Ok(())
+}
+
+fn redirect_target(redirect: &crate::ast::Redirect, scope: &Scope) -> Result<String, ShellError> {
+    match crate::expr::eval_expr(&redirect.target, scope)? {
+        Value::Str(target) => Ok(target),
+        value => Err(ShellError::runtime(format!(
+            "redirect target must be a string, got {}",
+            value.type_name()
+        ))
+        .with_span(redirect.target.span())),
+    }
 }
 
 /// Items a stage may buffer before its producer is made to wait. The bound

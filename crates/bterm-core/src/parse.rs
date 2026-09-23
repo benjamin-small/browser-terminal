@@ -2,7 +2,7 @@
 //! and syncs to the next `|` or `;`, so one line can produce multiple
 //! diagnostics. Evaluation only proceeds when there are no diagnostics.
 
-use crate::ast::{Arg, BinOp, Call, Closure, Expr, Line, Pipeline, Spanned, UnOp};
+use crate::ast::{Arg, BinOp, Call, Closure, Expr, Line, Pipeline, Redirect, Spanned, UnOp};
 use crate::error::{ShellError, Span};
 use crate::lex::{lex, Op, Token, TokenKind};
 use crate::value::Value;
@@ -13,6 +13,11 @@ pub struct ParseOutcome {
 }
 
 pub fn parse(src: &str) -> ParseOutcome {
+    parse_with_redirects(src, false)
+}
+
+/// Redirect grammar is opt-in: hosts without a handler keep existing diagnostics.
+pub fn parse_with_redirects(src: &str, redirects: bool) -> ParseOutcome {
     let tokens = match lex(src) {
         Ok(t) => t,
         Err(e) => {
@@ -22,13 +27,20 @@ pub fn parse(src: &str) -> ParseOutcome {
             }
         }
     };
-    Parser { tokens, pos: 0, errors: Vec::new() }.parse_line(src)
+    Parser {
+        tokens,
+        pos: 0,
+        errors: Vec::new(),
+        redirects,
+    }
+    .parse_line(src)
 }
 
 struct Parser {
     tokens: Vec<Token>,
     pos: usize,
     errors: Vec<ShellError>,
+    redirects: bool,
 }
 
 impl Parser {
@@ -65,6 +77,8 @@ impl Parser {
     /// Returns None if every call in the pipeline failed to parse.
     fn parse_pipeline(&mut self) -> Option<Pipeline> {
         let mut calls = Vec::new();
+        let mut input = None;
+        let mut output = None;
         loop {
             match self.parse_call() {
                 Ok(call) => calls.push(call),
@@ -73,19 +87,102 @@ impl Parser {
                     self.sync();
                 }
             }
+            if self.redirects {
+                if let Err(err) = self.parse_redirects(&mut input, &mut output, calls.len()) {
+                    self.errors.push(err);
+                    self.sync();
+                }
+            }
             match self.peek().map(|t| t.kind.clone()) {
                 Some(TokenKind::Pipe) => {
+                    if output.is_some() {
+                        self.errors.push(ShellError::parse(
+                            "output redirection must follow the final command in a pipeline",
+                            self.peek().expect("pipe").span,
+                        ));
+                    }
                     self.next();
                 }
                 Some(TokenKind::Semi) | None => break,
                 Some(_) => break, // parse_call stopped at something it couldn't eat; sync happened
             }
         }
-        let span = match (calls.first(), calls.last()) {
+        let mut span = match (calls.first(), calls.last()) {
             (Some(a), Some(b)) => a.span.merge(b.span),
             _ => return None,
         };
-        Some(Pipeline { calls, span })
+        for redirect in input.iter().chain(output.iter()) {
+            span = span.merge(redirect.span);
+        }
+        Some(Pipeline {
+            calls,
+            input,
+            output,
+            span,
+        })
+    }
+
+    fn parse_redirects(
+        &mut self,
+        input: &mut Option<Redirect>,
+        output: &mut Option<Redirect>,
+        call_count: usize,
+    ) -> Result<(), ShellError> {
+        while let Some(tok) = self.peek().cloned() {
+            let write = match tok.kind {
+                TokenKind::Op(Op::Gt) => true,
+                TokenKind::Op(Op::Lt) => false,
+                TokenKind::Pipe | TokenKind::Semi => break,
+                _ => {
+                    return Err(ShellError::parse(
+                        "redirections must follow command arguments",
+                        tok.span,
+                    ))
+                }
+            };
+            self.next();
+            let append = write
+                && self.peek().is_some_and(|next| {
+                    next.kind == TokenKind::Op(Op::Gt) && next.span.start == tok.span.end
+                });
+            if append {
+                self.next();
+            }
+            if !write && call_count != 1 {
+                return Err(ShellError::parse(
+                    "input redirection belongs on the first command",
+                    tok.span,
+                ));
+            }
+            let slot = if write { &mut *output } else { &mut *input };
+            if slot.is_some() {
+                return Err(ShellError::parse(
+                    "only one redirect per direction is allowed",
+                    tok.span,
+                ));
+            }
+            if !matches!(
+                self.peek().map(|t| &t.kind),
+                Some(
+                    TokenKind::Bareword(_)
+                        | TokenKind::StrRaw(_)
+                        | TokenKind::StrInterp(_)
+                        | TokenKind::Var(_)
+                        | TokenKind::Int(_)
+                        | TokenKind::Float(_)
+                )
+            ) {
+                return Err(ShellError::parse("redirection needs a target", tok.span));
+            }
+            let target = self.parse_expr()?;
+            let span = tok.span.merge(target.span());
+            *slot = Some(Redirect {
+                target,
+                append,
+                span,
+            });
+        }
+        Ok(())
     }
 
     fn parse_call(&mut self) -> Result<Call, ShellError> {
@@ -118,6 +215,7 @@ impl Parser {
         while let Some(tok) = self.peek().cloned() {
             match tok.kind {
                 TokenKind::Pipe | TokenKind::Semi => break,
+                TokenKind::Op(Op::Gt | Op::Lt) if self.redirects => break,
                 TokenKind::Reserved(r) => {
                     return Err(ShellError::parse(format!("`{r}` is not supported yet"), tok.span)
                         .with_help("this syntax is reserved for a future version"));
@@ -449,6 +547,73 @@ mod tests {
         assert_eq!(out.errors.len(), 1);
         assert!(out.errors[0].msg.contains("only be used inside a closure"), "{}", out.errors[0].msg);
         assert!(out.errors[0].help.as_deref().unwrap_or("").contains("{|x|"));
+    }
+
+    #[test]
+    fn redirects_are_opt_in_and_do_not_change_closure_operators() {
+        for source in ["echo hi > out", "echo hi >> out", "length < in"] {
+            assert!(!parse(source).errors.is_empty(), "{source}");
+            assert!(
+                parse_with_redirects(source, true).errors.is_empty(),
+                "{source}"
+            );
+        }
+        let out = parse_with_redirects(
+            "filter {|x| $x.n > 2 && $x.n < 9} < '$in' | length >>\"out $name\"",
+            true,
+        );
+        assert!(out.errors.is_empty(), "{:?}", out.errors);
+        let pipeline = &out.line.pipelines[0];
+        assert_eq!(pipeline.calls.len(), 2);
+        assert!(pipeline.input.is_some());
+        assert!(pipeline.output.as_ref().expect("output").append);
+        assert!(matches!(
+            pipeline.output.as_ref().expect("output").target,
+            Expr::StrInterp(..)
+        ));
+        assert!(parse_with_redirects("echo '>' '<' '>>'", true)
+            .errors
+            .is_empty());
+    }
+
+    #[test]
+    fn malformed_redirects_are_rejected_with_spans() {
+        for source in [
+            "echo >",
+            "echo <",
+            "echo >>",
+            "echo >>> out",
+            "echo > > out",
+            "echo > a > b",
+            "echo < a < b",
+            "echo > a trailing",
+            "echo > out | length",
+            "echo hi | length < in",
+            "< in echo",
+            "echo > {|x| $x}",
+            "echo > ; echo ok",
+        ] {
+            let out = parse_with_redirects(source, true);
+            assert!(!out.errors.is_empty(), "accepted {source}");
+            assert!(out.errors.iter().all(|e| e.span.is_some()), "{source}");
+        }
+        let out = parse_with_redirects("echo>out; echo>>other", true);
+        assert!(out.errors.is_empty(), "{:?}", out.errors);
+        assert_eq!(out.line.pipelines.len(), 2);
+        assert!(
+            !out.line.pipelines[0]
+                .output
+                .as_ref()
+                .expect("output")
+                .append
+        );
+        assert!(
+            out.line.pipelines[1]
+                .output
+                .as_ref()
+                .expect("output")
+                .append
+        );
     }
 
     #[test]

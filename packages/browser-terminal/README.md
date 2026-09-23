@@ -188,6 +188,67 @@ frames and sanitizes it. The second passes *terminal bytes* — you own the
 framing. Mixing both on one channel can interleave out of order, since the
 line call bypasses the buffer.
 
+## Structured redirection
+
+Install both `read` and `write` hooks to enable `<`, `>`, and `>>`. The host
+decides what target names mean and how values are stored. There is no built-in
+filesystem or automatic conversion to text or bytes. Hooks may return promises.
+
+```ts
+const values = new Map<string, Value>(); // import type { Value } from the package
+bt.setRedirectHandler({
+  read(target) {
+    if (!values.has(target)) throw new Error(`Unknown target: ${target}`);
+    return values.get(target)!;
+  },
+  write(target, value, { append }) {
+    if (append && values.has(target)) {
+      const previous = values.get(target);
+      if (typeof previous !== 'string' || typeof value !== 'string') {
+        throw new Error('This store only appends strings');
+      }
+      value = previous + value;
+    }
+    values.set(target, value);
+  },
+});
+await bt.run('echo hello > greeting; echo world >> greeting');
+await bt.run('str upcase < greeting'); // HELLOWORLD
+bt.setRedirectHandler(null); // future lines no longer accept redirect syntax
+```
+
+Input redirection follows the first command's arguments:
+`filter {|row| $row.active} < source | length`. Output redirection follows
+the final command: `links | head 2 > target`. A pipeline may have one of
+each, including `map {|x| $x} < source > target`. Duplicate redirects,
+missing targets, or command arguments after a redirect are errors. Targets
+can be barewords, quoted strings, `$variables`, or interpolated strings;
+they must resolve to strings. Quote names containing spaces or operators.
+Comparison operators inside closures retain their meaning.
+
+A read follows the same pipeline rules as a command result: lists supply
+items, and records, strings, and byte buffers are individual values. A write
+collects the entire output in memory using the same rules as a consuming host
+command: list shape is preserved even for one item, an unbatched scalar stays
+scalar, and an empty stream becomes `[]`. Bytes stay `Uint8Array`. Successful
+writes consume the value, so `run()` returns `value: null` and the terminal
+does not print it. `ctx.log` and `ctx.err` still reach their usual destinations.
+A failed pipeline never calls its writer, including after partial output.
+
+Both hooks receive a context with read-only `session`, `pane`, and `signal`;
+the writer also receives read-only `append`. IDs identify the originating
+pane and session. The handler and IDs are captured for a submitted line,
+so replacing/removing the handler or switching sessions does not retarget
+work already running. Invalid registrations leave the previous handler intact.
+Thrown errors and rejected promises reject the run; `{ message, help }`
+errors retain their help text.
+
+Ctrl-C, pane closure, and disposal abort `signal` and settle the run. Pass
+the signal to host I/O that supports cancellation. A read that resolves
+after cancellation cannot start commands or writes. The host remains
+responsible for cancelling its own work; completed external writes are not
+rolled back. Without a handler, redirection retains its existing parse errors.
+
 ## Keyboard focus
 
 Call `bt.focus()` to focus the active pane's terminal input and `bt.blur()`

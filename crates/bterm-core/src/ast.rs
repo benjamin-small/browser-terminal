@@ -20,6 +20,17 @@ pub struct Line {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Pipeline {
     pub calls: Vec<Call>,
+    pub input: Option<Redirect>,
+    pub output: Option<Redirect>,
+    pub span: Span,
+}
+
+/// A host-resolved target, not an operating-system file descriptor.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Redirect {
+    pub target: Expr,
+    /// Only output redirection may append.
+    pub append: bool,
     pub span: Span,
 }
 

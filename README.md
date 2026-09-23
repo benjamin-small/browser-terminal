@@ -127,6 +127,9 @@ bt.registerCommand(spec, (args, input, ctx) => value | Promise<value>);
 //        emit is a retained alias for log.
 //  throw { message, help? } for rich diagnostics
 bt.unregisterCommand(name);
+bt.setRedirectHandler({ read(target, ctx) { /* return a Value */ },
+                        write(target, value, { append, signal }) { /* store it */ } });
+bt.setRedirectHandler(null);    // disable redirects for future lines
 bt.registerFn(name, (item) => value);  // usable as @name in any selector
 bt.unregisterFn(name);
 bt.run(line): Promise<{ value: Value; log: string[]; err: string[] }>;  // programmatic execution
@@ -149,10 +152,12 @@ The prefix applies to existing and future panes. Idle panes redraw immediately
 without losing input; busy panes display it at their next prompt. Escape sequences
 and control characters are stripped, with line breaks and tabs converted to spaces.
 
-## The shell language (v1)
+## The shell language
 
 The language prioritizes structured values and host integration. POSIX shell
 compatibility is not a goal; familiar syntax is adopted where it fits that model.
+The [language direction](docs/language-direction.md) defines the rules for
+future features and supersedes compatibility assumptions in historical designs.
 
 `;`-separated pipelines; multi-word commands (`str upcase`); flags
 (`--limit 5`, `--limit=5`, `-l 5`); `'raw'` and `"interpolated $var"` strings;
@@ -297,11 +302,18 @@ Two rules make ragged data safe rather than explosive:
 - **Ordering comparisons against `null` are `false`**, so a row lacking the
   field simply doesn't match instead of killing the pipeline.
 
-`.length` is the one pseudo-field, on strings, lists, and records — a real
+`.length` is the one pseudo-field, on strings, lists, records, and bytes — a real
 field of that name shadows it.
 
-Still reserved for later: `>`/`<` redirection, `&` background jobs, and list
-indexing (`$x.0`).
+With a host redirect handler installed, `cmd < source` feeds a structured
+value into the first command; `cmd | next > target` sends the collected
+result to the host, and `>> target` also sets `append: true`. Targets are
+strings interpreted by the host, with no built-in filesystem or text encoding.
+See the [redirect API and semantics](packages/browser-terminal/README.md#structured-redirection).
+Without a handler, redirect syntax keeps its existing parse errors.
+
+Unsupported syntax includes `&` background jobs and list indexing (`$x.0`).
+Their absence is not a promise to implement POSIX behavior.
 
 Run `help` in the panel for the full command list; `help <command>` /
 `<command> --help` for usage.

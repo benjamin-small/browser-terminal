@@ -94,6 +94,10 @@ pub struct VisibleVar {
 /// Host services a command may touch. Implemented by the CLI (stdout,
 /// readline history) and by the wasm engine (pane output, pane history).
 pub trait HostHooks {
+    /// Handler captured for this submitted line; absent in hosts without redirects.
+    fn redirect_handler(&self) -> Option<Rc<dyn crate::redirect::RedirectHandler>> {
+        None
+    }
     /// The current shell's history, newest last.
     fn history(&self) -> Vec<String> {
         Vec::new()
