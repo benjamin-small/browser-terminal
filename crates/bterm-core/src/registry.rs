@@ -161,6 +161,8 @@ pub struct ExecContext {
     pub width: u16,
     /// Pane the pipeline is running in (0 for the CLI).
     pub pane: u32,
+    /// Session owning the pane when the pipeline starts (0 for the CLI).
+    pub session: u32,
     /// Unique id of this pipeline run; the wasm layer keys AbortControllers
     /// by it so TS commands receive the right AbortSignal.
     pub run_id: u64,

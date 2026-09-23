@@ -114,6 +114,28 @@ channels are separate by construction: **nothing written to `ctx.log` or
 `ctx.err` can enter the pipe**, so a downstream `| length` is unaffected by
 anything a command logs.
 
+`ctx.session` and `ctx.pane` are read-only numeric IDs matching
+`bt.snapshot.sessions[].id` and `bt.snapshot.panes[].pane`. They identify the
+pane and session that started the pipeline and remain stable even if the
+user switches sessions while a command awaits input. Use them to keep host
+state scoped to a session or pane:
+
+```ts
+const directories = new Map<number, string>();
+bt.registerCommand({ name: 'cwd' }, (_args, _input, ctx) =>
+  directories.get(ctx.session) ?? '/',
+);
+bt.registerCommand(
+  { name: 'chdir', required: [{ name: 'path' }] },
+  ({ positionals }, _input, ctx) => {
+    directories.set(ctx.session, String(positionals[0]));
+  },
+);
+```
+
+Split panes in one session share its ID; a new session gets a different ID.
+The host owns this state, including initialization and cleanup.
+
 For partial output — progress bars, in-place redraws — `ctx.log` and `ctx.err`
 are also writer objects:
 

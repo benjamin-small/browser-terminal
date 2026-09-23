@@ -796,6 +796,7 @@ mod tests {
             sink: Rc::new(crate::sink::NullSink),
             width: 80,
             pane: 0,
+            session: 0,
             run_id: 0,
         };
         let out = parse(src);
@@ -817,6 +818,7 @@ mod tests {
             sink: Rc::new(crate::sink::NullSink),
             width: 80,
             pane: 0,
+            session: 0,
             run_id: 0,
         };
         let out = parse(src);
@@ -974,6 +976,7 @@ mod tests {
             sink: Rc::new(crate::sink::NullSink),
             width: 80,
             pane: 0,
+            session: 0,
             run_id: 0,
         };
         let out = parse("vars | length");
@@ -1072,6 +1075,7 @@ mod tests {
             sink: Rc::new(crate::sink::NullSink),
             width: 80,
             pane: 0,
+            session: 0,
             run_id: 0,
         };
         let err = to_json(ctx, call, PipelineData::Value(Value::Float(f64::NAN)))
@@ -1114,6 +1118,7 @@ mod tests {
             sink: sink.clone(),
             width: 80,
             pane: 0,
+            session: 0,
             run_id: 0,
         };
         let out = parse("noisy");
@@ -1532,6 +1537,7 @@ mod tests {
             sink: Rc::new(crate::sink::NullSink),
             width: 80,
             pane: 0,
+            session: 0,
             run_id: 0,
         };
         let out = parse("counter | head 3");
@@ -1562,6 +1568,7 @@ mod tests {
             sink: Rc::new(crate::sink::NullSink),
             width: 80,
             pane: 0,
+            session: 0,
             run_id: 0,
         };
         // Keep evens, take 3 -> 2,4,6. If filter collected, this hangs.

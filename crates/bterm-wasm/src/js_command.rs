@@ -1,6 +1,6 @@
 //! TS-registered commands: a `Signature` plus a JS function, invoked as
 //! `fn(args, input, ctx)` where `args = { positionals, flags }`, `input` is
-//! the piped value, and `ctx = { signal: AbortSignal, log, err, emit }`.
+//! the piped value, and `ctx = { session, pane, signal: AbortSignal, log, err, emit }`.
 //! `log` and `err` are callable writer objects, but the call and the writer
 //! methods are different APIs: `ctx.log('line')` is a cooked, unbuffered
 //! message -- the shell strip-everything sanitizes it, same as before this
@@ -61,6 +61,14 @@ impl Command for JsCommand {
             let input_js = value_to_js(&collected.into_value());
 
             let ctx_obj = js_sys::Object::new();
+            // Pipeline identity is captured before any stage awaits input.
+            // Descriptors default to non-writable and non-configurable.
+            for (key, id) in [("session", ctx.session), ("pane", ctx.pane)] {
+                let descriptor = js_sys::Object::new();
+                let _ = js_sys::Reflect::set(&descriptor, &"value".into(), &id.into());
+                let _ = js_sys::Reflect::set(&descriptor, &"enumerable".into(), &true.into());
+                js_sys::Object::define_property(&ctx_obj, &key.into(), &descriptor);
+            }
             if let Some(signal) = crate::tasks::signal_for(ctx.run_id) {
                 let _ = js_sys::Reflect::set(&ctx_obj, &JsValue::from_str("signal"), &signal);
             }

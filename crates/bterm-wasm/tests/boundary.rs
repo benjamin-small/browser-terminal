@@ -341,6 +341,131 @@ async fn run_resolves_scalar_and_plain_objects() {
     core.dispose();
 }
 
+fn active_context_ids(core: &BtermCore) -> (u32, u32) {
+    let snapshot = core.snapshot();
+    let pane = Reflect::get(&snapshot, &"active_pane".into())
+        .expect("pane")
+        .as_f64()
+        .expect("number") as u32;
+    let sessions = Array::from(&Reflect::get(&snapshot, &"sessions".into()).expect("sessions"));
+    let session = sessions
+        .iter()
+        .find(|s| {
+            Reflect::get(s, &"active".into())
+                .ok()
+                .and_then(|v| v.as_bool())
+                == Some(true)
+        })
+        .expect("active session");
+    let session = Reflect::get(&session, &"id".into())
+        .expect("id")
+        .as_f64()
+        .expect("number") as u32;
+    (session, pane)
+}
+
+fn assert_context_ids(value: &JsValue, expected: (u32, u32)) {
+    assert_eq!(
+        Reflect::get(value, &"session".into())
+            .expect("session")
+            .as_f64(),
+        Some(expected.0 as f64)
+    );
+    assert_eq!(
+        Reflect::get(value, &"pane".into()).expect("pane").as_f64(),
+        Some(expected.1 as f64)
+    );
+}
+
+#[wasm_bindgen_test]
+async fn command_context_ids_are_read_only_and_match_the_originating_pane() {
+    let core = make_core();
+    command(
+        &core,
+        "identity",
+        r#"
+        for (const name of ['session', 'pane']) {
+            const d = Object.getOwnPropertyDescriptor(ctx, name);
+            if (!d || d.writable || d.configurable || !d.enumerable ||
+                Reflect.set(ctx, name, -1) || Reflect.deleteProperty(ctx, name)) {
+                throw new Error(name + ' must be read-only');
+            }
+        }
+        return { session: ctx.session, pane: ctx.pane };
+    "#,
+    );
+    let first = active_context_ids(&core);
+    for action in ["echo ready", "mux split --right", "session new work"] {
+        let before = active_context_ids(&core);
+        JsFuture::from(core.run(before.1, action.into()))
+            .await
+            .expect("action");
+        let expected = active_context_ids(&core);
+        let out = JsFuture::from(core.run(expected.1, "identity".into()))
+            .await
+            .expect("identity");
+        assert_context_ids(
+            &Reflect::get(&out, &"value".into()).expect("value"),
+            expected,
+        );
+        if action == "mux split --right" {
+            assert_eq!(expected.0, first.0);
+            assert_ne!(expected.1, first.1);
+        }
+        if action == "session new work" {
+            assert_ne!(expected.0, first.0);
+        }
+    }
+    // A programmatic run can target a background pane while another session is active.
+    let out = JsFuture::from(core.run(first.1, "identity".into()))
+        .await
+        .expect("background");
+    assert_context_ids(&Reflect::get(&out, &"value".into()).expect("value"), first);
+    let err = JsFuture::from(core.run(u32::MAX, "identity".into()))
+        .await
+        .expect_err("unknown pane");
+    let message = Reflect::get(&err, &"message".into())
+        .expect("message")
+        .as_string()
+        .expect("text");
+    assert!(message.contains("unknown pane id"));
+    core.dispose();
+}
+
+#[wasm_bindgen_test]
+async fn command_context_ids_survive_session_changes_while_waiting_for_input() {
+    let core = make_core();
+    command(
+        &core,
+        "pause",
+        "return new Promise(resolve => { globalThis.__releaseContext = resolve; });",
+    );
+    command(
+        &core,
+        "identity",
+        "return { session: ctx.session, pane: ctx.pane };",
+    );
+    let first = active_context_ids(&core);
+    let pending = core.run(first.1, "pause | identity".into());
+    tick().await;
+    JsFuture::from(core.run(first.1, "session new other".into()))
+        .await
+        .expect("switch session");
+    assert_ne!(active_context_ids(&core).0, first.0);
+    let release: Function = Reflect::get(&js_sys::global(), &"__releaseContext".into())
+        .expect("release")
+        .dyn_into()
+        .expect("function");
+    release.call0(&JsValue::NULL).expect("release input");
+    let out = within_a_second(pending)
+        .await
+        .expect("pipeline settles")
+        .expect("pipeline succeeds");
+    assert_context_ids(&Reflect::get(&out, &"value".into()).expect("value"), first);
+    let _ = Reflect::delete_property(&js_sys::global(), &"__releaseContext".into());
+    core.dispose();
+}
+
 #[wasm_bindgen_test]
 async fn key_value_operands_reach_host_commands_as_positionals() {
     let core = make_core();
