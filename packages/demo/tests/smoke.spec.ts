@@ -413,6 +413,46 @@ test('dispose removes the panel and rejects further runs', async ({ page }) => {
   expect(rejected).toBe(true);
 });
 
+test('host commands share state within a session and isolate new sessions', async ({ page }) => {
+  await page.goto('/');
+  await waitForTerminal(page);
+  const result = await page.evaluate(async () => {
+    const bt = window.bt;
+    const directories = new Map<number, string>();
+    bt.registerCommand({ name: 'chdir', required: [{ name: 'path' }] }, ({ positionals }, _input, ctx) => {
+      directories.set(ctx.session, String(positionals[0]));
+    });
+    bt.registerCommand({ name: 'cwd' }, (_args, _input, ctx) => ({
+      directory: directories.get(ctx.session) ?? '/', session: ctx.session, pane: ctx.pane,
+    }));
+    const firstSession = bt.snapshot!.sessions.find((s) => s.active)!.id;
+    const firstPane = bt.snapshot!.active_pane;
+    await bt.run('chdir /work');
+    const first = (await bt.run('cwd')).value;
+    await bt.run('mux split --right');
+    const splitPane = bt.snapshot!.active_pane;
+    const split = (await bt.run('cwd')).value;
+    await bt.run('session new other');
+    const secondSession = bt.snapshot!.sessions.find((s) => s.active)!.id;
+    const secondPane = bt.snapshot!.active_pane;
+    const second = (await bt.run('cwd')).value;
+    return { firstSession, firstPane, first, splitPane, split, secondSession, secondPane, second };
+  });
+  expect(result.first).toEqual({ directory: '/work', session: result.firstSession, pane: result.firstPane });
+  expect(result.splitPane).not.toBe(result.firstPane);
+  expect(result.split).toEqual({ directory: '/work', session: result.firstSession, pane: result.splitPane });
+  expect(result.secondSession).not.toBe(result.firstSession);
+  expect(result.second).toEqual({ directory: '/', session: result.secondSession, pane: result.secondPane });
+
+  // Keyboard submission uses the same context as programmatic runs.
+  const input = page.locator('[data-browser-terminal] [data-active="true"] .xterm-helper-textarea:visible');
+  await input.pressSequentially('chdir /interactive');
+  await input.press('Enter');
+  await expect.poll(() => page.evaluate(async () => (await window.bt.run('cwd')).value)).toEqual({
+    directory: '/interactive', session: result.secondSession, pane: result.secondPane,
+  });
+});
+
 test('SECURITY: diagnostics stay out of the pipe and cannot inject escapes', async ({ page }) => {
   await page.goto('/');
   await waitForTerminal(page);

@@ -120,7 +120,8 @@ const bt = await BrowserTerminal.create({
 bt.registerCommand(spec, (args, input, ctx) => value | Promise<value>);
 //  spec: { name, summary?, required?, optional?, rest?, flags? }
 //  args: { positionals: Value[], flags: Record<string, Value> }
-//  ctx:  { signal: AbortSignal, log(line), err(line), emit(line) }
+//  ctx:  { readonly session: number, readonly pane: number,
+//          signal: AbortSignal, log(line), err(line), emit(line) }
 //        log = progress (plain), err = warning (red); neither enters the pipe.
 //        emit is a retained alias for log.
 //  throw { message, help? } for rich diagnostics

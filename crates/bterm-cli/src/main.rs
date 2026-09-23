@@ -122,6 +122,7 @@ fn main() {
         sink: Rc::new(CliSink),
         width: terminal_width(),
         pane: 0,
+        session: 0,
         run_id: 0,
     };
     let scope = Scope::new();

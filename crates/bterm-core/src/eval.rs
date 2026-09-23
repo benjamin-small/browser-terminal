@@ -344,6 +344,7 @@ mod tests {
             sink: Rc::new(crate::sink::NullSink),
             width: 80,
             pane: 0,
+            session: 0,
             run_id: 0,
         }
     }
@@ -512,6 +513,7 @@ mod tests {
             sink: Rc::new(crate::sink::NullSink),
             width: 80,
             pane: 0,
+            session: 0,
             run_id: 0,
         };
         // `sort-by --help` has a `--reverse` line; grep keeps only it.
@@ -550,6 +552,7 @@ mod tests {
             sink: Rc::new(crate::sink::NullSink),
             width: 80,
             pane: 0,
+            session: 0,
             run_id: 0,
         };
         let out = crate::parse::parse("sort-by --help");

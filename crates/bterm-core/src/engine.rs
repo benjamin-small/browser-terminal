@@ -723,15 +723,25 @@ fn make_ctx<A: EngineAccess>(
     pane: u32,
     run_id: u64,
     sink: Rc<dyn crate::sink::Sink>,
-) -> ExecContext {
-    let cols = access.with(|e| e.pane(pane).map(|p| p.cols).unwrap_or(80));
-    ExecContext {
-        host: Rc::new(EngineHost { access: access.clone(), pane }),
+) -> Result<ExecContext, ShellError> {
+    let (cols, session) = access
+        .with(|e| {
+            e.pane(pane)
+                .zip(e.mux.session_of_pane(pane))
+                .map(|(p, session)| (p.cols, session))
+        })
+        .ok_or_else(|| ShellError::runtime(format!("unknown pane id {pane}")))?;
+    Ok(ExecContext {
+        host: Rc::new(EngineHost {
+            access: access.clone(),
+            pane,
+        }),
         sink,
         width: cols,
         pane,
+        session,
         run_id,
-    }
+    })
 }
 
 /// The variables a pipeline in `pane` can see.
@@ -926,7 +936,10 @@ pub async fn execute_line<A: EngineAccess>(access: A, pane: u32, line: String, r
     let sink: Rc<dyn crate::sink::Sink> =
         Rc::new(PaneSink { access: access.clone(), pane });
     let sink_for_consumer = sink.clone();
-    let ctx = make_ctx(&access, pane, run_id, sink);
+    let Ok(ctx) = make_ctx(&access, pane, run_id, sink) else {
+        // A pane closed before its queued task starts has nowhere to render.
+        return;
+    };
     let cols = ctx.width;
     let scope = scope_for_pane(&access, pane);
     let source = EngineCommands(access.clone());
@@ -980,7 +993,7 @@ pub async fn eval_to_value<A: EngineAccess>(
     if let Some(err) = parsed.errors.into_iter().next() {
         return Err(err);
     }
-    let ctx = make_ctx(&access, pane, run_id, sink);
+    let ctx = make_ctx(&access, pane, run_id, sink)?;
     let scope = scope_for_pane(&access, pane);
     let source = EngineCommands(access.clone());
     let (results, error) = eval_line(&parsed.line, &source, &ctx, &scope).await;

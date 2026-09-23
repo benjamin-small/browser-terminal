@@ -84,6 +84,10 @@ export interface ChannelWriter {
 }
 
 export interface CommandCtx {
+  /** Originating session ID, matching snapshot.sessions[].id. Stable for the pipeline. */
+  readonly session: number;
+  /** Originating pane ID, matching snapshot.panes[].pane. Stable for the pipeline. */
+  readonly pane: number;
   /** Fires when the pipeline is aborted (Ctrl-C / dispose). Pass to fetch(). */
   signal: AbortSignal;
   /**
