@@ -120,6 +120,7 @@ const bt = await BrowserTerminal.create({
 bt.registerCommand(spec, (args, input, ctx) => value | Promise<value>);
 //  spec: { name, summary?, required?, optional?, rest?, flags? }
 //  args: { positionals: Value[], flags: Record<string, Value> }
+//  Value includes Uint8Array for binary data, including nested records/lists.
 //  ctx:  { readonly session: number, readonly pane: number,
 //          signal: AbortSignal, log(line), err(line), emit(line) }
 //        log = progress (plain), err = warning (red); neither enters the pipe.

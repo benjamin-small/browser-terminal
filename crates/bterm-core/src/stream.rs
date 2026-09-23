@@ -116,6 +116,21 @@ mod tests {
     }
 
     #[test]
+    fn binary_values_stay_whole_even_when_empty() {
+        for bytes in [vec![], vec![255], (0..=255).collect()] {
+            let (tx, mut rx) = channel(1);
+            block_on(async {
+                let value = Value::Bytes(bytes);
+                flatten(PipelineData::Value(value.clone()), &tx)
+                    .await
+                    .expect("flatten");
+                drop(tx);
+                assert_eq!(collect(&mut rx).await.into_value(), value);
+            });
+        }
+    }
+
+    #[test]
     fn batching_survives_a_streaming_stage_that_keeps_one_item() {
         // A streaming stage forwards items without ever seeing the list
         // around them. Sharing the flag is what stops `grep pat | length`

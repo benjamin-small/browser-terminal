@@ -136,6 +136,38 @@ bt.registerCommand(
 Split panes in one session share its ID; a new session gets a different ID.
 The host owns this state, including initialization and cleanup.
 
+### Binary values
+
+Return a `Uint8Array` to pass binary data through the pipeline. Commands,
+registered functions, variables, and `run().value` preserve the type, also
+inside records and lists. A byte buffer is one value; it is never split
+into individual numbers. Sliced views preserve their selected bytes, and
+crossing the host boundary copies the data so later mutations cannot change
+stored shell values.
+
+```ts
+bt.registerCommand({ name: 'read-bytes' }, () => new Uint8Array([0, 128, 255]));
+bt.registerCommand({ name: 'consume-bytes' }, (_args, input) => {
+  if (!(input instanceof Uint8Array)) throw new Error('Expected bytes');
+  return input; // process bytes without text decoding
+});
+const result = await bt.run('read-bytes | consume-bytes'); // Uint8Array in result.value
+await bt.run('read-bytes | length');  // 3
+await bt.run('read-bytes | to json'); // JSON string: "0080ff"
+```
+
+At the terminal boundary bytes display as `<3 bytes>` (including in table
+cells), without interpreting their contents as text or terminal escapes.
+`length` counts bytes; closures can also read `$value.length`. `to json`
+encodes byte values as lowercase hex strings, including nested values.
+JSON has no binary type: `from json` keeps these as strings, and ordinary
+arrays of numbers remain lists. Convert an `ArrayBuffer` with
+`new Uint8Array(buffer)`. For another typed-array view, use
+`new Uint8Array(view.buffer, view.byteOffset, view.byteLength)` to preserve
+its raw bytes.
+
+### Partial output
+
 For partial output — progress bars, in-place redraws — `ctx.log` and `ctx.err`
 are also writer objects:
 

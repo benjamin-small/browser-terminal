@@ -129,7 +129,7 @@ impl Selector {
 /// Truthiness for callables used as predicates (`--match`, `where`-style
 /// filtering). Mirrors JavaScript closely enough to be unsurprising, since
 /// that is where these functions are authored: `false`, `null`, `0`, and
-/// `""` are falsy; empty lists/records are **truthy**, matching JS objects.
+/// `""` are falsy; lists, records, and bytes are **truthy**, even when empty.
 pub fn is_truthy(value: &Value) -> bool {
     match value {
         Value::Null => false,
@@ -137,7 +137,7 @@ pub fn is_truthy(value: &Value) -> bool {
         Value::Int(n) => *n != 0,
         Value::Float(f) => *f != 0.0 && !f.is_nan(),
         Value::Str(s) => !s.is_empty(),
-        Value::List(_) | Value::Record(_) => true,
+        Value::List(_) | Value::Record(_) | Value::Bytes(_) => true,
     }
 }
 
@@ -266,5 +266,6 @@ mod tests {
         assert!(is_truthy(&Value::Str("x".into())));
         // Empty collections are truthy, as in JS.
         assert!(is_truthy(&Value::List(vec![])));
+        assert!(is_truthy(&Value::Bytes(vec![])));
     }
 }

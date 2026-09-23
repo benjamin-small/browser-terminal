@@ -413,6 +413,39 @@ test('dispose removes the panel and rejects further runs', async ({ page }) => {
   expect(rejected).toBe(true);
 });
 
+test('binary values survive host commands and render safely in the terminal', async ({ page }) => {
+  await page.goto('/');
+  await waitForTerminal(page);
+  const result = await page.evaluate(async () => {
+    const bt = window.bt;
+    const bytes = new Uint8Array([27, 91, 50, 74, 0, 255]); // clear-screen escape + binary
+    bt.registerCommand({ name: 'binary-data' }, () => bytes);
+    bt.registerCommand({ name: 'binary-arg', required: [{ name: 'data' }] }, ({ positionals }) => {
+      if (!(positionals[0] instanceof Uint8Array)) throw new Error('Expected byte argument');
+      return positionals[0];
+    });
+    bt.setVariable('blob', bytes);
+    const output = (await bt.run('binary-arg $blob')).value;
+    if (!(output instanceof Uint8Array)) throw new Error('Expected byte result');
+    return {
+      bytes: [...output],
+      count: (await bt.run('binary-data | length')).value,
+      json: (await bt.run('binary-data | to json')).value,
+    };
+  });
+  expect(result).toEqual({ bytes: [27, 91, 50, 74, 0, 255], count: 6, json: '"1b5b324a00ff"' });
+
+  const root = page.locator('[data-browser-terminal]');
+  const input = root.locator('.xterm-helper-textarea');
+  await input.pressSequentially('echo retained-marker');
+  await input.press('Enter');
+  await expect(root.locator('.xterm-rows')).toContainText('retained-marker');
+  await input.pressSequentially('binary-data');
+  await input.press('Enter');
+  await expect(root.locator('.xterm-rows')).toContainText('<6 bytes>');
+  await expect(root.locator('.xterm-rows')).toContainText('retained-marker');
+});
+
 test('host commands share state within a session and isolate new sessions', async ({ page }) => {
   await page.goto('/');
   await waitForTerminal(page);

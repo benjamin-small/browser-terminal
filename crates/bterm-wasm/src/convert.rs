@@ -1,7 +1,7 @@
 //! Value ↔ JsValue conversion.
 //!
-//! Rust → JS goes through serde's json-compatible serializer (records become
-//! plain objects, never `Map`). JS → Rust is a hand-written walk so that
+//! Rust → JS preserves bytes as Uint8Array, including inside lists and records
+//! (plain objects, never Map). JS → Rust is a hand-written walk so that
 //! integral JS numbers become `Int` (serde's untagged path would make every
 //! number a `Float`).
 
@@ -14,8 +14,31 @@ use wasm_bindgen::{JsCast, JsValue};
 const MAX_SAFE: f64 = 9_007_199_254_740_992.0;
 
 pub fn value_to_js(value: &Value) -> JsValue {
-    let ser = serde_wasm_bindgen::Serializer::json_compatible();
-    value.serialize(&ser).unwrap_or(JsValue::NULL)
+    match value {
+        // Copy into JS-owned memory; callers must not alias the WASM heap.
+        Value::Bytes(bytes) => js_sys::Uint8Array::from(bytes.as_slice()).into(),
+        Value::List(items) => items
+            .iter()
+            .map(value_to_js)
+            .collect::<js_sys::Array>()
+            .into(),
+        Value::Record(fields) => {
+            let entries = js_sys::Array::new();
+            for (key, value) in fields {
+                let pair = js_sys::Array::new();
+                pair.push(&key.into());
+                pair.push(&value_to_js(value));
+                entries.push(&pair);
+            }
+            // fromEntries preserves keys such as __proto__ as own data properties.
+            js_sys::Object::from_entries(&entries)
+                .map(JsValue::from)
+                .unwrap_or(JsValue::NULL)
+        }
+        _ => value
+            .serialize(&serde_wasm_bindgen::Serializer::json_compatible())
+            .unwrap_or(JsValue::NULL),
+    }
 }
 
 pub fn js_to_value(v: &JsValue) -> Result<Value, String> {
@@ -33,6 +56,10 @@ pub fn js_to_value(v: &JsValue) -> Result<Value, String> {
     }
     if let Some(s) = v.as_string() {
         return Ok(Value::Str(s));
+    }
+    if let Some(bytes) = v.dyn_ref::<js_sys::Uint8Array>() {
+        // to_vec respects subarray offsets and copies the bytes into Rust.
+        return Ok(Value::Bytes(bytes.to_vec()));
     }
     if js_sys::Array::is_array(v) {
         let arr: &js_sys::Array = v.unchecked_ref();

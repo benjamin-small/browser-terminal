@@ -121,7 +121,7 @@ pub fn register_all(registry: &mut CommandRegistry) {
         tail,
     ));
     registry.register_builtin(cmd(
-        Signature::build("length", "Count items in a list (or characters in a string)"),
+        Signature::build("length", "Count list items, string characters, or bytes"),
         length,
     ));
     registry.register_builtin(cmd(
@@ -550,7 +550,8 @@ fn length(_ctx: ExecContext, _call: BoundCall, input: PipelineData) -> Result<Pi
     match input.into_value() {
         Value::List(items) => Ok(PipelineData::Value(Value::Int(items.len() as i64))),
         Value::Str(s) => Ok(PipelineData::Value(Value::Int(s.chars().count() as i64))),
-        other => Err(type_err("length", "a list or string", &other)),
+        Value::Bytes(bytes) => Ok(PipelineData::Value(Value::Int(bytes.len() as i64))),
+        other => Err(type_err("length", "a list, string, or bytes", &other)),
     }
 }
 
