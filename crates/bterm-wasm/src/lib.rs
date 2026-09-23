@@ -18,6 +18,7 @@ mod convert;
 mod js_command;
 mod js_fn;
 mod js_regex;
+mod js_redirect;
 mod tasks;
 
 use bterm_core::abort::Abortable;
@@ -318,6 +319,24 @@ impl BtermCore {
             spawn_pipeline(pane, cmd);
         }
         flush_events();
+        Ok(())
+    }
+
+    /// Install structured redirection callbacks. Null removes them for future lines.
+    pub fn set_redirect_handler(&self, handler: JsValue) -> Result<(), JsValue> {
+        if !engine_alive() {
+            return Err(js_error("browser-terminal: engine is disposed"));
+        }
+        let handler: Option<Rc<dyn bterm_core::redirect::RedirectHandler>> = if handler.is_null() {
+            None
+        } else {
+            Some(Rc::new(js_redirect::JsRedirectHandler::new(handler)?))
+        };
+        // Property getters above can reenter or dispose the engine.
+        if !engine_alive() {
+            return Err(js_error("browser-terminal: engine is disposed"));
+        }
+        WasmAccess.with(|e| e.set_redirect_handler(handler));
         Ok(())
     }
 

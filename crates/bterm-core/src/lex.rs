@@ -1,7 +1,7 @@
 //! Handwritten lexer. Small token set, shell-quirky rules:
 //! `-2` is a number, `-f` is a short flag, `--name` / `--name=value` are long
-//! flags, barewords are anything else unquoted. `( ) { } > & &&  || <` lex as
-//! reserved tokens the parser rejects with "not yet supported".
+//! flags, barewords are anything else unquoted. Operators serve closure
+//! expressions; `<` and `>` also serve opt-in host redirection. `&` is reserved.
 
 use crate::error::{ShellError, Span};
 use crate::value::MAX_SAFE_INT;
@@ -22,11 +22,9 @@ pub enum TokenKind {
     Flag { name: String, long: bool, has_eq: bool },
     Pipe,
     Semi,
-    /// Operators and grouping. These only mean anything inside a closure
-    /// body; at pipeline level the parser rejects them with a spanned
-    /// "not supported here", preserving the pre-closure error behavior.
+    /// Operators and grouping for closures, plus `<`/`>` for host redirects.
     Op(Op),
-    /// Syntax still fenced off for later: `&`, redirection, etc.
+    /// Unsupported syntax such as `&` background jobs.
     Reserved(String),
 }
 

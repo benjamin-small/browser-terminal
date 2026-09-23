@@ -15,6 +15,7 @@ import type { Effects, EngineEvent, HostMsg, LayoutSnapshot } from './events.js'
 import type {
   CommandFn,
   CommandSpec,
+  RedirectHandler,
   RunResult,
   SelectorFn,
   Value,
@@ -43,6 +44,8 @@ export type {
   CommandSpec,
   FlagSpec,
   PosArg,
+  RedirectContext,
+  RedirectHandler,
   RunError,
   RunResult,
   SelectorFn,
@@ -202,6 +205,24 @@ export class BrowserTerminal {
   unregisterCommand(name: string): void {
     this.assertLive();
     this.core.unregister_command(name);
+  }
+
+  /** Enable structured `<`, `>`, and `>>` redirects; null disables future lines. */
+  setRedirectHandler(handler: RedirectHandler | null): void {
+    this.assertLive();
+    if (handler === null) {
+      this.core.set_redirect_handler(null);
+      return;
+    }
+    // Getters may reenter or dispose the terminal. Read them before entering
+    // WASM, where disposal would also try to free the borrowed core wrapper.
+    const read = handler.read;
+    const write = handler.write;
+    this.assertLive();
+    if (typeof read !== 'function' || typeof write !== 'function') {
+      throw new Error('redirect handler needs read and write functions');
+    }
+    this.core.set_redirect_handler({ read: read.bind(handler), write: write.bind(handler) });
   }
 
   /**

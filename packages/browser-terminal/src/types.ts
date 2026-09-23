@@ -15,6 +15,18 @@ export type Value =
 
 export type Shape = 'any' | 'str' | 'int' | 'float' | 'bool';
 
+export interface RedirectContext {
+  readonly signal: AbortSignal;
+  readonly session: number;
+  readonly pane: number;
+}
+
+/** The host decides what targets mean and how values are stored or appended. */
+export interface RedirectHandler {
+  read(target: string, ctx: RedirectContext): Value | Promise<Value>;
+  write(target: string, value: Value, ctx: RedirectContext & { readonly append: boolean }): void | Promise<void>;
+}
+
 export interface PosArg {
   name: string;
   /** Defaults to 'any'. */

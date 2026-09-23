@@ -413,6 +413,75 @@ test('dispose removes the panel and rejects further runs', async ({ page }) => {
   expect(rejected).toBe(true);
 });
 
+test('host redirects preserve values, append intent, and visible diagnostics', async ({ page }) => {
+  await page.goto('/');
+  await waitForTerminal(page);
+  const result = await page.evaluate(async () => {
+    const bt = window.bt;
+    const disabled = await bt.run('echo hi > out').then(() => false, () => true);
+    const store = new Map<string, import('@benjamin-small/browser-terminal').Value>([
+      ['/in', [{ n: 1 }, { n: 2 }]],
+    ]);
+    bt.setRedirectHandler({
+      async read(target, ctx) {
+        // Reenter the engine while the hook runs: no Rust borrow may be held.
+        if (ctx.pane !== bt.snapshot!.active_pane) throw new Error('Wrong pane');
+        if (!store.has(target)) throw new Error('Missing target');
+        return store.get(target)!;
+      },
+      async write(target, value, ctx) {
+        const previous = store.get(target);
+        store.set(target, ctx.append && typeof previous === 'string' && typeof value === 'string'
+          ? previous + value : value);
+        bt.setVariable('lastWrite', { target, value, append: ctx.append });
+      },
+    });
+    const written = await bt.run("head 1 < /in > '/one row'");
+    await bt.run('echo one > /text; echo two >> /text');
+    const count = await bt.run('length < /text');
+    bt.registerCommand({ name: 'private-output' }, (_args, _input, ctx) => {
+      ctx.log('redirect-progress');
+      return 'PAYLOAD-MUST-NOT-RENDER';
+    });
+    return { disabled, written: written.value, rows: store.get('/one row'), text: store.get('/text'), count: count.value };
+  });
+  expect(result).toEqual({ disabled: true, written: null, rows: [{ n: 1 }], text: 'onetwo', count: 6 });
+
+  const root = page.locator('[data-browser-terminal]');
+  const input = root.locator('.xterm-helper-textarea');
+  await input.pressSequentially('private-output > /hidden');
+  await input.press('Enter');
+  await expect.poll(() => page.evaluate(() => window.bt.getVariable('lastWrite'))).toEqual({
+    target: '/hidden', value: 'PAYLOAD-MUST-NOT-RENDER', append: false,
+  });
+  await expect(root.locator('.xterm-rows')).toContainText('redirect-progress');
+  await expect(root.locator('.xterm-rows')).not.toContainText('PAYLOAD-MUST-NOT-RENDER');
+  const removed = await page.evaluate(async () => {
+    window.bt.setRedirectHandler(null);
+    return window.bt.run('echo blocked > /hidden').then(() => false, () => true);
+  });
+  expect(removed).toBe(true);
+});
+
+test('a redirect handler getter can dispose the terminal without trapping', async ({ page }) => {
+  await page.goto('/');
+  await waitForTerminal(page);
+  const errors = await page.evaluate(() => {
+    const bt = window.bt;
+    const handler = { read: () => null, write: () => {} };
+    Object.defineProperty(handler, 'read', {
+      get() { bt.dispose(); return () => null; },
+    });
+    const messages: string[] = [];
+    for (const action of [() => bt.setRedirectHandler(handler), () => bt.setRedirectHandler(null)]) {
+      try { action(); } catch (error) { messages.push((error as Error).message); }
+    }
+    return messages;
+  });
+  expect(errors).toHaveLength(2);
+  expect(errors.every((message) => message.includes('disposed'))).toBe(true);
+});
+
 test('binary values survive host commands and render safely in the terminal', async ({ page }) => {
   await page.goto('/');
   await waitForTerminal(page);

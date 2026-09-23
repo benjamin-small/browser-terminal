@@ -21,6 +21,7 @@ pub mod parse;
 pub mod pipeline;
 pub mod protocol;
 pub mod registry;
+pub mod redirect;
 pub mod render;
 pub mod signature;
 pub mod sink;
