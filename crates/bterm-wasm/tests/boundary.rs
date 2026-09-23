@@ -341,6 +341,164 @@ async fn run_resolves_scalar_and_plain_objects() {
     core.dispose();
 }
 
+fn assert_bytes(value: &JsValue, expected: &[u8]) {
+    let bytes = value.dyn_ref::<js_sys::Uint8Array>().expect("Uint8Array");
+    assert_eq!(bytes.to_vec(), expected);
+}
+
+#[wasm_bindgen_test]
+async fn bytes_cross_commands_and_streaming_stages_without_flattening() {
+    let core = make_core();
+    command(
+        &core,
+        "binary",
+        "return Uint8Array.from({ length: 258 }, (_, i) => i - 1).subarray(1, 257);",
+    );
+    command(&core, "empty-bytes", "return new Uint8Array();");
+    command(
+        &core,
+        "byte-chunks",
+        "return (async function*() { yield new Uint8Array(); yield new Uint8Array([255]); })();",
+    );
+    command(&core, "accept-bytes", "if (!(input instanceof Uint8Array)) throw new Error('expected bytes'); return Promise.resolve(input);");
+    core.register_fn(
+        "same-bytes",
+        Function::new_with_args(
+            "v",
+            "if (!(v instanceof Uint8Array)) throw new Error('expected bytes'); return v;",
+        ),
+    )
+    .expect("function");
+    let expected: Vec<u8> = (0..=255).collect();
+    for line in [
+        "binary",
+        "binary | accept-bytes",
+        "binary | head 1 | accept-bytes",
+        "binary | map @same-bytes | accept-bytes",
+    ] {
+        assert_bytes(&run_value(&core, line).await.expect(line), &expected);
+    }
+    assert_bytes(
+        &run_value(&core, "empty-bytes | accept-bytes")
+            .await
+            .expect("empty"),
+        &[],
+    );
+    let chunks = Array::from(&run_value(&core, "byte-chunks").await.expect("chunks"));
+    assert_eq!(chunks.length(), 2);
+    assert_bytes(&chunks.get(0), &[]);
+    assert_bytes(&chunks.get(1), &[255]);
+    assert_eq!(
+        run_value(&core, "binary | length")
+            .await
+            .expect("binary operation succeeds")
+            .as_f64(),
+        Some(256.0)
+    );
+    assert_eq!(
+        run_value(&core, "empty-bytes | length")
+            .await
+            .expect("binary operation succeeds")
+            .as_f64(),
+        Some(0.0)
+    );
+    core.dispose();
+}
+
+#[wasm_bindgen_test]
+async fn nested_bytes_survive_records_lists_and_json_encoding() {
+    let core = make_core();
+    command(&core, "nested-bytes", "return Object.fromEntries([['__proto__', new Uint8Array([255])], ['payloads', [new Uint8Array([0, 27, 128, 255]), new Uint8Array()]], ['numbers', [0, 255]], ['text', '00ff']]);");
+    command(
+        &core,
+        "check-nested",
+        r#"
+        if (Object.getPrototypeOf(input) !== Object.prototype ||
+            !Object.hasOwn(input, '__proto__') || !(input.__proto__ instanceof Uint8Array) ||
+            !input.payloads.every(v => v instanceof Uint8Array) ||
+            !Array.isArray(input.numbers) || input.text !== '00ff') throw new Error('wrong shape');
+        return input;
+    "#,
+    );
+    let result = run_value(&core, "nested-bytes | check-nested")
+        .await
+        .expect("nested");
+    assert_bytes(
+        &Reflect::get(&result, &"__proto__".into()).expect("binary operation succeeds"),
+        &[255],
+    );
+    let payloads =
+        Array::from(&Reflect::get(&result, &"payloads".into()).expect("binary operation succeeds"));
+    assert_bytes(&payloads.get(0), &[0, 27, 128, 255]);
+    assert_bytes(&payloads.get(1), &[]);
+    let json = run_value(&core, "nested-bytes | to json")
+        .await
+        .expect("binary operation succeeds")
+        .as_string()
+        .expect("binary operation succeeds");
+    assert_eq!(
+        json,
+        r#"{"__proto__":"ff","payloads":["001b80ff",""],"numbers":[0,255],"text":"00ff"}"#
+    );
+    let pretty = run_value(&core, "nested-bytes | to json --pretty")
+        .await
+        .expect("binary operation succeeds")
+        .as_string()
+        .expect("binary operation succeeds");
+    assert!(pretty.contains("\n"));
+    assert!(pretty.contains("\"001b80ff\""));
+    core.dispose();
+}
+
+#[wasm_bindgen_test]
+async fn byte_variables_are_copied_on_both_sides_of_the_boundary() {
+    let core = make_core();
+    let original = js_sys::Uint8Array::from(&[99, 0, 128, 255, 99][..]);
+    core.set_variable("blob", original.subarray(1, 4).into(), JsValue::UNDEFINED)
+        .expect("store bytes");
+    original.fill(7, 0, original.length());
+    let first = core
+        .get_variable("blob", JsValue::UNDEFINED)
+        .expect("binary operation succeeds");
+    assert_bytes(&first, &[0, 128, 255]);
+    first.unchecked_ref::<js_sys::Uint8Array>().set_index(0, 42);
+    assert_bytes(
+        &core
+            .get_variable("blob", JsValue::UNDEFINED)
+            .expect("binary operation succeeds"),
+        &[0, 128, 255],
+    );
+    assert_bytes(
+        &run_value(&core, "echo $blob")
+            .await
+            .expect("binary operation succeeds"),
+        &[0, 128, 255],
+    );
+    let all = core
+        .variables(JsValue::UNDEFINED)
+        .expect("binary operation succeeds");
+    assert_bytes(
+        &Reflect::get(&all, &"blob".into()).expect("binary operation succeeds"),
+        &[0, 128, 255],
+    );
+    assert_eq!(
+        run_value(&core, "echo $blob | map {|b| $b.length}")
+            .await
+            .expect("binary operation succeeds")
+            .as_f64(),
+        Some(3.0)
+    );
+    assert_eq!(
+        run_value(&core, "echo $blob | to json | from json")
+            .await
+            .expect("binary operation succeeds")
+            .as_string()
+            .as_deref(),
+        Some("0080ff")
+    );
+    core.dispose();
+}
+
 fn active_context_ids(core: &BtermCore) -> (u32, u32) {
     let snapshot = core.snapshot();
     let pane = Reflect::get(&snapshot, &"active_pane".into())

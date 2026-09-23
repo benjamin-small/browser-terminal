@@ -10,7 +10,8 @@ use std::cmp::Ordering;
 pub const MAX_SAFE_INT: i64 = 9_007_199_254_740_992;
 
 /// Structured value. Tables are `List` of `Record`s. Serializes to natural
-/// JSON (records as objects), matching how values cross to JavaScript.
+/// JSON (records as objects, bytes as lowercase hex strings). JSON decoding
+/// keeps strings as strings; the WASM boundary preserves bytes as Uint8Array.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum Value {
@@ -21,6 +22,18 @@ pub enum Value {
     Str(String),
     List(Vec<Value>),
     Record(IndexMap<String, Value>),
+    /// Opaque binary data, kept whole by the streaming transport.
+    #[serde(serialize_with = "serialize_hex", skip_deserializing)]
+    Bytes(Vec<u8>),
+}
+
+fn serialize_hex<S: serde::Serializer>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error> {
+    use std::fmt::Write;
+    let mut hex = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        write!(hex, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    serializer.serialize_str(&hex)
 }
 
 impl Value {
@@ -37,6 +50,7 @@ impl Value {
             Value::Str(_) => "string",
             Value::List(_) => "list",
             Value::Record(_) => "record",
+            Value::Bytes(_) => "bytes",
         }
     }
 
@@ -81,7 +95,7 @@ impl Value {
     }
 
     /// Total order for sorting: values group by type rank (numbers, then
-    /// strings, bools, null, lists, records) and compare within the rank;
+    /// strings, bools, null, lists, records, bytes) and compare within the rank;
     /// numbers cross-compare Int/Float and NaN sorts after every other
     /// number. Unlike `partial_cmp_values`, this never violates
     /// `slice::sort_by`'s total-order contract on mixed-type columns.
@@ -94,6 +108,7 @@ impl Value {
                 Value::Null => 3,
                 Value::List(_) => 4,
                 Value::Record(_) => 5,
+                Value::Bytes(_) => 6,
             }
         }
         use Value::*;
@@ -107,6 +122,7 @@ impl Value {
                 (Bool(a), Bool(b)) => a.cmp(b),
                 (List(a), List(b)) => a.len().cmp(&b.len()),
                 (Record(a), Record(b)) => a.len().cmp(&b.len()),
+                (Bytes(a), Bytes(b)) => a.cmp(b),
                 _ => Ordering::Equal,
             },
             other_rank => other_rank,
@@ -173,5 +189,44 @@ mod tests {
         assert!(Value::List(vec![Value::record([("a".into(), Value::Int(1))])]).is_table());
         assert!(!Value::List(vec![Value::Int(1)]).is_table());
         assert!(!Value::Int(1).is_table());
+    }
+
+    #[test]
+    fn bytes_serialize_as_hex_without_changing_json_decoding() {
+        let v = Value::record([(
+            "data".into(),
+            Value::List(vec![
+                Value::Bytes(vec![0, 27, 128, 255]),
+                Value::Bytes(vec![]),
+            ]),
+        )]);
+        let json = serde_json::to_string(&v).expect("serialize");
+        assert_eq!(json, r#"{"data":["001b80ff",""]}"#);
+        assert_eq!(
+            serde_json::from_str::<Value>(r#""001b80ff""#).expect("valid JSON"),
+            Value::Str("001b80ff".into())
+        );
+        assert_eq!(
+            serde_json::from_str::<Value>("[0,255]").expect("valid JSON"),
+            Value::List(vec![Value::Int(0), Value::Int(255)])
+        );
+        assert_eq!(
+            serde_json::from_str::<Value>("[]").expect("valid JSON"),
+            Value::List(vec![])
+        );
+    }
+
+    #[test]
+    fn bytes_sort_lexicographically_and_compare_by_contents() {
+        let low = Value::Bytes(vec![0, 255]);
+        let high = Value::Bytes(vec![1]);
+        assert_eq!(low.total_cmp_values(&high), Ordering::Less);
+        assert!(low.loose_eq(&low.clone()));
+        assert!(!low.loose_eq(&high));
+        assert_eq!(Value::Bytes(vec![]).total_cmp_values(&low), Ordering::Less);
+        assert_eq!(
+            Value::Record(IndexMap::new()).total_cmp_values(&low),
+            Ordering::Less
+        );
     }
 }

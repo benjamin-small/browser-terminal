@@ -1,6 +1,6 @@
 /**
  * Public types for command authors. These mirror the Rust `Signature` /
- * `Value` shapes; the serde layer accepts exactly this structure.
+ * `Value` shapes as represented at the JavaScript boundary.
  */
 
 /** A structured shell value as it appears in JavaScript. */
@@ -9,6 +9,7 @@ export type Value =
   | boolean
   | number
   | string
+  | Uint8Array
   | Value[]
   | { [key: string]: Value };
 

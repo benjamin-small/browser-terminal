@@ -41,6 +41,7 @@ pub fn plain(value: &Value) -> String {
         Value::Str(s) => s.clone(),
         Value::List(items) => format!("[{} items]", items.len()),
         Value::Record(map) => format!("{{{} fields}}", map.len()),
+        Value::Bytes(bytes) => format!("<{} bytes>", bytes.len()),
     }
 }
 
@@ -479,6 +480,17 @@ mod tests {
         let out = strip_ansi(&render(&v, 80));
         assert!(out.contains("name   bterm"));
         assert!(out.contains("panes  2"));
+    }
+
+    #[test]
+    fn binary_data_renders_only_its_size_in_scalars_and_tables() {
+        let bytes = Value::Bytes(b"\x1b[2J\x00\xff".to_vec());
+        assert_eq!(render(&bytes, 80), "<6 bytes>\n");
+        assert_eq!(render(&Value::Bytes(vec![]), 80), "<0 bytes>\n");
+        let table = Value::List(vec![Value::record([("data".into(), bytes)])]);
+        let text = strip_ansi(&render(&table, 80));
+        assert!(text.contains("<6 bytes>"));
+        assert!(!text.contains("[2J"));
     }
 
     #[test]

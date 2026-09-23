@@ -109,7 +109,7 @@ pub fn eval_expr(expr: &Expr, scope: &Scope) -> Result<Value, ShellError> {
 }
 
 /// `.length` is the one pseudo-field, because it is what everyone reaches
-/// for on a string or list and its absence is a silent `null` otherwise.
+/// for on a string, list, or bytes and its absence is a silent `null` otherwise.
 /// Real record fields shadow it.
 fn field_fallback(value: &Value, key: &str) -> Value {
     if key != "length" {
@@ -119,6 +119,7 @@ fn field_fallback(value: &Value, key: &str) -> Value {
         Value::Str(s) => Value::Int(s.chars().count() as i64),
         Value::List(items) => Value::Int(items.len() as i64),
         Value::Record(map) => Value::Int(map.len() as i64),
+        Value::Bytes(bytes) => Value::Int(bytes.len() as i64),
         _ => Value::Null,
     }
 }
@@ -346,9 +347,11 @@ mod tests {
         let item = record(vec![
             ("s", Value::Str("hello".into())),
             ("l", Value::List(vec![Value::Int(1), Value::Int(2)])),
+            ("b", Value::Bytes(vec![0, 128, 255])),
         ]);
         assert_eq!(apply("f {|x| $x.s.length}", item.clone()), Ok(Value::Int(5)));
         assert_eq!(apply("f {|x| $x.l.length}", item.clone()), Ok(Value::Int(2)));
+        assert_eq!(apply("f {|x| $x.b.length}", item.clone()), Ok(Value::Int(3)));
         assert_eq!(apply("f {|x| $x.s.length > 4}", item), Ok(Value::Bool(true)));
     }
 
