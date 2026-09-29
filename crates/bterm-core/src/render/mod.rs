@@ -1,5 +1,5 @@
 //! Render a `Value` to ANSI text. Called exactly once per pipeline —
-//! commands never format their own output (`table` / `to json` exist to
+//! commands never format their own output (`table` / `to-json` exist to
 //! force a string mid-pipe).
 //!
 //! Lines end with `\n`; the pane layer converts to `\r\n` for xterm.
@@ -31,7 +31,7 @@ pub fn render(value: &Value, width: u16) -> String {
 }
 
 /// Plain, uncolored, single-line display of a value (cell contents,
-/// interpolation, `to json`-lite for nested).
+/// interpolation, `to-json`-lite for nested).
 pub fn plain(value: &Value) -> String {
     match value {
         Value::Null => String::new(),

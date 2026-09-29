@@ -156,10 +156,35 @@ test('Tab completes cat and registered commands, including pipelines', async ({ 
   await input.press('Tab');
   await input.press('Enter');
   await expect(rows).toContainText('custom-completion-result');
-  await input.pressSequentially('echo mixed | str up');
+  await input.pressSequentially('echo mixed | str-up');
   await input.press('Tab');
   await input.press('Enter');
   await expect(rows).toContainText('MIXED');
+});
+
+test('hyphenated builtins are discoverable and legacy spellings remain callable', async ({ page }) => {
+  const names = await page.evaluate(async () => (await window.bt.run('help')).value);
+  const helpText = JSON.stringify(names);
+  for (const name of ['to-json', 'from-json', 'str-upcase', 'str-downcase']) expect(helpText).toContain(name);
+  for (const name of ['to json', 'from json', 'str upcase', 'str downcase']) expect(helpText).not.toContain(name);
+  expect(await page.evaluate(async () => (await window.bt.run("echo '[1,2]' | from-json | to-json")).value)).toBe('[1,2]');
+  expect(await page.evaluate(async () => (await window.bt.run('echo HELLO | str-downcase')).value)).toBe('hello');
+  expect(await page.evaluate(async () => (await window.bt.run('echo hello | str upcase')).value)).toBe('HELLO');
+  expect(await page.evaluate(async () => (await window.bt.run('to-json --help')).value)).toContain('to-json');
+  const root = page.locator('[data-browser-terminal]');
+  const input = root.locator('[data-active="true"] .xterm-helper-textarea:visible');
+  const rows = root.locator('[data-active="true"] .xterm-rows:visible');
+  for (const [prefix, name] of [['to-j', 'to-json'], ['from-j', 'from-json'], ['str-up', 'str-upcase'], ['str-down', 'str-downcase']]) {
+    await input.pressSequentially(prefix!); await input.press('Tab');
+    await expect(rows).toHaveText(new RegExp(`${name}\\s*$`));
+    await input.press('Control+u');
+  }
+  // Legacy flags still complete when the old name is typed explicitly.
+  for (const name of ['to-json', 'to json']) {
+    await input.pressSequentially(`${name} --pr`); await input.press('Tab');
+    await expect(rows).toHaveText(/--pretty\s*$/);
+    await input.press('Control+u');
+  }
 });
 
 test('directory prompt follows cd, split panes, sessions and unmount', async ({ page }) => {
@@ -295,6 +320,80 @@ test('local-folder connections use /mnt with folder names and collision suffixes
   expect(await page.evaluate(async () => (await window.bt.run('ls /mnt | length')).value)).toBe(2);
   await page.getByRole('button', { name: 'Browser files', exact: true }).click();
   await expect(rows).toHaveText(/\/scratch ❯\s*$/);
+});
+
+test('folder write controls grant access for redirects, new files and editor saves only on the chosen mount', async ({ page }) => {
+  // OPFS supplies real I/O; permission methods model native consent separately.
+  await page.addInitScript(() => {
+    let selections = 0;
+    Object.defineProperty(window, 'showDirectoryPicker', { configurable: true, value: async () => {
+      const root = await navigator.storage.getDirectory();
+      const folder = await root.getDirectoryHandle(selections++ ? 'other' : 'projects', { create: true });
+      await folder.getDirectoryHandle('nested', { create: true });
+      const file = await folder.getFileHandle('existing.txt', { create: true });
+      const writer = await file.createWritable();
+      await writer.write('original'); await writer.close();
+      let state: PermissionState = 'prompt';
+      Object.defineProperty(folder, 'queryPermission', { value: async () => state });
+      Object.defineProperty(folder, 'requestPermission', { value: async ({ mode }: { mode: string }) => {
+        if (mode !== 'readwrite' || !navigator.userActivation.isActive) throw new Error('Write access requires a direct user action');
+        const data = document.documentElement.dataset;
+        data.writeRequests = String(Number(data.writeRequests ?? 0) + 1);
+        if (data.writeResponse === 'error') throw new DOMException('Permission prompt unavailable', 'NotAllowedError');
+        state = data.writeResponse === 'granted' ? 'granted' : 'denied';
+        return state;
+      } });
+      return folder;
+    } });
+  });
+  await page.reload(); await page.waitForFunction(() => !!window.bt);
+  const section = page.getByRole('region', { name: 'Browser filesystem' });
+  const status = section.getByRole('status');
+  await section.getByRole('button', { name: 'Connect local folder', exact: true }).click();
+  await expect(status).toContainText('Choose Enable writes: /mnt/projects');
+  const enable = section.getByRole('button', { name: 'Enable writes: /mnt/projects', exact: true });
+  await expect(enable).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.dataset.writeRequests)).toBeUndefined();
+  const attemptWrite = () => page.evaluate(async () => {
+    try { await window.bt.run('echo replacement > /mnt/projects/existing.txt'); return 'unexpected success'; }
+    catch (error) { return String(error); }
+  });
+  expect(await attemptWrite()).toContain('Write permission required');
+  await enable.click();
+  await expect(status).toContainText('Write access was not granted for /mnt/projects');
+  await expect(enable).toBeEnabled();
+  expect(await attemptWrite()).toContain('Write permission required');
+  expect(await page.evaluate(async () => (await window.bt.run('cat /mnt/projects/existing.txt')).value)).toBe('original');
+  await page.evaluate(() => { document.documentElement.dataset.writeResponse = 'error'; });
+  await enable.click();
+  await expect(status).toContainText('Permission prompt unavailable');
+  await expect(enable).toBeEnabled();
+  await section.getByRole('button', { name: 'Connect local folder', exact: true }).click();
+  await expect(status).toContainText('Connected other at /mnt/other');
+  await page.evaluate(() => { document.documentElement.dataset.writeResponse = 'granted'; });
+  await enable.click();
+  await expect(status).toContainText('Writes enabled for /mnt/projects');
+  expect(await attemptWrite()).toBe('unexpected success');
+  expect(await page.evaluate(async () => {
+    try { await window.bt.run('echo blocked > /mnt/other/new.txt'); return 'unexpected success'; }
+    catch (error) { return String(error); }
+  })).toContain('Write permission required');
+  expect(await page.evaluate(async () => {
+    await window.bt.run('cd /mnt/projects; echo created > nested/new.txt');
+    return (await window.bt.run('cat nested/new.txt')).value;
+  })).toBe('created');
+  await page.evaluate(() => window.bt.run('edit existing.txt'));
+  const editor = page.getByRole('dialog', { name: 'Edit /mnt/projects/existing.txt', exact: true });
+  await expect(editor.getByRole('button', { name: 'Enable writes', exact: true })).toBeHidden();
+  await editor.getByRole('textbox').fill('saved from editor');
+  await editor.getByRole('button', { name: 'Save', exact: true }).click();
+  await expect(editor.getByRole('status')).toHaveText('Saved');
+  expect(await page.evaluate(async () => (await window.bt.run('cat existing.txt')).value)).toBe('saved from editor');
+  expect(await page.evaluate(() => document.documentElement.dataset.writeRequests)).toBe('3');
+  await editor.getByRole('button', { name: 'Close', exact: true }).click();
+  await page.evaluate(() => window.bt.dispose());
+  await expect(enable).toBeDisabled();
+  await expect(section.getByRole('button', { name: 'Enable writes: /mnt/other', exact: true })).toBeDisabled();
 });
 
 test('folder connection shows pending and cancellation states without changing mounts', async ({ page }) => {

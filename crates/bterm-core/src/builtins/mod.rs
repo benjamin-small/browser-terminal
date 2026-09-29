@@ -163,7 +163,7 @@ pub fn register_all(registry: &mut CommandRegistry) {
         sort_by,
     ));
     registry.register_builtin(cmd(
-        Signature::build("str upcase", "Uppercase the input (or given) strings").rest_arg(
+        Signature::build("str-upcase", "Uppercase the input (or given) strings").rest_arg(
             "values",
             Shape::Str,
             "strings to transform",
@@ -171,7 +171,7 @@ pub fn register_all(registry: &mut CommandRegistry) {
         str_upcase,
     ));
     registry.register_builtin(cmd(
-        Signature::build("str downcase", "Lowercase the input (or given) strings").rest_arg(
+        Signature::build("str-downcase", "Lowercase the input (or given) strings").rest_arg(
             "values",
             Shape::Str,
             "strings to transform",
@@ -179,7 +179,7 @@ pub fn register_all(registry: &mut CommandRegistry) {
         str_downcase,
     ));
     registry.register_builtin(cmd(
-        Signature::build("to json", "Serialize the input to a JSON string").flag(
+        Signature::build("to-json", "Serialize the input to a JSON string").flag(
             "pretty",
             Some('p'),
             None,
@@ -188,9 +188,17 @@ pub fn register_all(registry: &mut CommandRegistry) {
         to_json,
     ));
     registry.register_builtin(cmd(
-        Signature::build("from json", "Parse a JSON string into a value"),
+        Signature::build("from-json", "Parse a JSON string into a value"),
         from_json,
     ));
+    for (alias, target) in [
+        ("to json", "to-json"),
+        ("from json", "from-json"),
+        ("str upcase", "str-upcase"),
+        ("str downcase", "str-downcase"),
+    ] {
+        registry.register_builtin_alias(alias, target);
+    }
     registry.register_builtin(cmd(
         Signature::build(
             "table",
@@ -754,7 +762,7 @@ fn str_upcase(
     call: BoundCall,
     input: PipelineData,
 ) -> Result<PipelineData, ShellError> {
-    map_strings("str upcase", call, input, |s| s.to_uppercase())
+    map_strings("str-upcase", call, input, |s| s.to_uppercase())
 }
 
 fn str_downcase(
@@ -762,7 +770,7 @@ fn str_downcase(
     call: BoundCall,
     input: PipelineData,
 ) -> Result<PipelineData, ShellError> {
-    map_strings("str downcase", call, input, |s| s.to_lowercase())
+    map_strings("str-downcase", call, input, |s| s.to_lowercase())
 }
 
 fn to_json(
@@ -799,7 +807,7 @@ fn from_json(
             })?;
             Ok(PipelineData::Value(v))
         }
-        other => Err(type_err("from json", "a JSON string", &other)),
+        other => Err(type_err("from-json", "a JSON string", &other)),
     }
 }
 
@@ -1001,7 +1009,7 @@ mod tests {
     fn flagship_pipeline_works() {
         // `where` retired: the flagship filter is now a closure predicate.
         let v = eval(&format!(
-            "echo {} | from json | filter {{|o| $o.text != ''}} | head 5",
+            "echo {} | from-json | filter {{|o| $o.text != ''}} | head 5",
             table_json()
         ))
         .expect("eval");
@@ -1016,13 +1024,13 @@ mod tests {
     #[test]
     fn where_is_gone() {
         // Retired in favor of `filter` / `grep`; make sure it stays gone.
-        let err = eval(r#"echo '[]' | from json | where n gt 4"#).expect_err("removed");
+        let err = eval(r#"echo '[]' | from-json | where n gt 4"#).expect_err("removed");
         assert!(err.msg.contains("unknown command `where`"), "{}", err.msg);
     }
 
     #[test]
     fn get_extracts_column() {
-        let v = eval(&format!("echo {} | from json | get text", table_json())).expect("eval");
+        let v = eval(&format!("echo {} | from-json | get text", table_json())).expect("eval");
         assert_eq!(
             v,
             Value::List(vec![
@@ -1035,14 +1043,14 @@ mod tests {
 
     #[test]
     fn get_missing_column_lists_available() {
-        let err = eval(r#"echo '{"a":1}' | from json | get b"#).expect_err("missing");
+        let err = eval(r#"echo '{"a":1}' | from-json | get b"#).expect_err("missing");
         assert!(err.help.expect("help").contains("a"));
     }
 
     #[test]
     fn sort_by_orders_and_reverses() {
         let v =
-            eval(r#"echo '[{"n":5},{"n":1},{"n":10}]' | from json | sort-by n --reverse | get n"#)
+            eval(r#"echo '[{"n":5},{"n":1},{"n":10}]' | from-json | sort-by n --reverse | get n"#)
                 .expect("eval");
         assert_eq!(
             v,
@@ -1052,28 +1060,65 @@ mod tests {
 
     #[test]
     fn head_tail_without_n_return_single() {
-        let v = eval(r#"echo '[1,2,3]' | from json | head"#).expect("eval");
+        let v = eval(r#"echo '[1,2,3]' | from-json | head"#).expect("eval");
         assert_eq!(v, Value::Int(1));
-        let v = eval(r#"echo '[1,2,3]' | from json | tail"#).expect("eval");
+        let v = eval(r#"echo '[1,2,3]' | from-json | tail"#).expect("eval");
         assert_eq!(v, Value::Int(3));
     }
 
     #[test]
     fn str_case_on_input_and_args() {
         assert_eq!(
-            eval("echo abc | str upcase").expect("eval"),
+            eval("echo abc | str-upcase").expect("eval"),
             Value::Str("ABC".into())
         );
         assert_eq!(
-            eval("str downcase HI").expect("eval"),
+            eval("str-downcase HI").expect("eval"),
             Value::Str("hi".into())
         );
     }
 
     #[test]
     fn json_round_trip() {
-        let v = eval(r#"echo '{"a":1}' | from json | to json"#).expect("eval");
+        let v = eval(r#"echo '{"a":1}' | from-json | to-json"#).expect("eval");
         assert_eq!(v, Value::Str(r#"{"a":1}"#.into()));
+    }
+
+    #[test]
+    fn legacy_spellings_share_canonical_commands_without_listing_duplicates() {
+        let mut registry = CommandRegistry::new();
+        register_all(&mut registry);
+        for (alias, canonical, input) in [
+            ("to json", "to-json", "echo 42 | "),
+            ("from json", "from-json", "echo '[1,2]' | "),
+            ("str upcase", "str-upcase", "echo mixed | "),
+            ("str downcase", "str-downcase", "echo MIXED | "),
+        ] {
+            assert_eq!(
+                eval(&format!("{input}{alias}")).expect("legacy command"),
+                eval(&format!("{input}{canonical}")).expect("canonical command")
+            );
+            assert!(registry.names().contains(&canonical.to_owned()));
+            assert!(!registry.names().contains(&alias.to_owned()));
+            let command = registry.get(alias).expect("legacy command");
+            assert_eq!(command.signature().name, canonical);
+            assert!(registry
+                .register_external(cmd(Signature::build(alias, "collision"), echo))
+                .is_err());
+            assert!(!registry.unregister_external(alias));
+        }
+        let specs = registry.signatures();
+        for name in ["to-json", "to json"] {
+            let spec = specs
+                .iter()
+                .find(|spec| spec.name == name)
+                .expect("completion signature");
+            assert!(spec.flags.iter().any(|flag| flag.long == "pretty"));
+        }
+        assert_eq!(
+            eval("echo 42 | to-json --pretty").expect("canonical flags"),
+            eval("echo 42 | to json --pretty").expect("legacy flags")
+        );
     }
 
     #[test]
@@ -1172,7 +1217,7 @@ mod tests {
     #[test]
     fn key_value_operands_flow_through_structured_pipes() {
         assert_eq!(
-            eval("echo if=/dev/hda count=1 | to json").expect("operands are strings"),
+            eval("echo if=/dev/hda count=1 | to-json").expect("operands are strings"),
             Value::Str(r#"["if=/dev/hda","count=1"]"#.into()),
         );
         assert_eq!(
@@ -1205,7 +1250,7 @@ mod tests {
             }
         }
         let json = format!("[{}]", rows.join(","));
-        let v = eval(&format!("echo '{json}' | from json | sort-by n | get n")).expect("no panic");
+        let v = eval(&format!("echo '{json}' | from-json | sort-by n | get n")).expect("no panic");
         // Deterministic: all numbers first (sorted), then all strings.
         match v {
             Value::List(items) => {
@@ -1228,7 +1273,7 @@ mod tests {
     fn sort_by_reverse_keeps_missing_last_and_is_stable() {
         let json = r#"[{"n":1,"tag":"a"},{"tag":"missing"},{"n":3,"tag":"b"},{"n":3,"tag":"c"}]"#;
         let v = eval(&format!(
-            "echo '{json}' | from json | sort-by n --reverse | get tag"
+            "echo '{json}' | from-json | sort-by n --reverse | get tag"
         ))
         .expect("eval");
         assert_eq!(
@@ -1245,7 +1290,7 @@ mod tests {
     #[test]
     fn head_with_huge_n_returns_everything() {
         // 2^32: on wasm32 an `as usize` cast truncated this to 0.
-        let v = eval("echo '[1,2,3]' | from json | head 4294967296 | length").expect("eval");
+        let v = eval("echo '[1,2,3]' | from-json | head 4294967296 | length").expect("eval");
         assert_eq!(v, Value::Int(3));
     }
 
@@ -1363,7 +1408,7 @@ mod tests {
         // rather than erroring on a bare record. This is the case the note
         // above describes.
         let v = eval(&format!(
-            "echo {} | from json | grep Rust | length",
+            "echo {} | from-json | grep Rust | length",
             table_json()
         ))
         .expect("a one-row table is still a table");
@@ -1371,7 +1416,7 @@ mod tests {
 
         // `get` on a one-row table still returns the field as a scalar —
         // that is column extraction, not the collapse, and is unchanged.
-        let v = eval(r#"echo '[{"t":"a","href":"x.org"},{"t":"b","href":"y.com"}]' | from json | grep .org | get t"#)
+        let v = eval(r#"echo '[{"t":"a","href":"x.org"},{"t":"b","href":"y.com"}]' | from-json | grep .org | get t"#)
             .expect("eval");
         assert_eq!(v, Value::Str("a".into()));
     }
@@ -1380,12 +1425,12 @@ mod tests {
     fn grep_ignore_case_and_invert() {
         let json = r#"'[{"n":"Rust"},{"n":"wasm"}]'"#;
         // `grep rust -i` leaves one row, and counting it gives 1.
-        let v = eval(&format!("echo {json} | from json | grep rust -i | length"))
+        let v = eval(&format!("echo {json} | from-json | grep rust -i | length"))
             .expect("a one-row table is still a table");
         assert_eq!(v, Value::Int(1));
 
         // One row survives `-v`; `get n` extracts its column as a scalar.
-        let v = eval(&format!("echo {json} | from json | grep Rust -v | get n")).expect("eval");
+        let v = eval(&format!("echo {json} | from-json | grep Rust -v | get n")).expect("eval");
         assert_eq!(v, Value::Str("wasm".into()));
     }
 
@@ -1395,11 +1440,11 @@ mod tests {
         // Unrestricted matches both rows; --on t matches only the first —
         // and the surviving row keeps every column, which is the whole point
         // of --on over piping through `get`.
-        let v = eval(&format!("echo {json} | from json | grep rust | length")).expect("eval");
+        let v = eval(&format!("echo {json} | from-json | grep rust | length")).expect("eval");
         assert_eq!(v, Value::Int(2));
         // --on t leaves exactly one row; `get href` reads its column.
         let v = eval(&format!(
-            "echo {json} | from json | grep rust --on t | get href"
+            "echo {json} | from-json | grep rust --on t | get href"
         ))
         .expect("eval");
         assert_eq!(v, Value::Str("a".into()));
@@ -1422,7 +1467,7 @@ mod tests {
         // on that same "missing means null/falsy, not an error" semantics.
         // So `nope` now projects to `Null` per row, which never matches,
         // both rows are filtered, and the pipeline ends with no value.
-        let v = eval(r#"echo '[{"a":1},{"b":2}]' | from json | grep x --on nope"#)
+        let v = eval(r#"echo '[{"a":1},{"b":2}]' | from-json | grep x --on nope"#)
             .expect("no longer errors");
         assert_eq!(v, Value::Null);
     }
@@ -1431,7 +1476,7 @@ mod tests {
     fn on_is_rejected_by_commands_that_do_not_declare_it() {
         // The point of declaring `--on` per command rather than injecting it
         // everywhere: a meaningless use is an error, not a silent no-op.
-        let err = eval("echo '[1,2]' | from json | length --on foo").expect_err("unknown flag");
+        let err = eval("echo '[1,2]' | from-json | length --on foo").expect_err("unknown flag");
         assert!(err.msg.contains("unknown flag"), "{}", err.msg);
     }
 
@@ -1442,7 +1487,7 @@ mod tests {
         // pass if the dotted path resolved to the wrong row, which is the
         // confusion this test exists to rule out.
         let v = eval(&format!(
-            "echo {json} | from json | grep ada --on u.name | map {{|o| $o.u.name}}"
+            "echo {json} | from-json | grep ada --on u.name | map {{|o| $o.u.name}}"
         ))
         .expect("eval");
         assert_eq!(v, Value::Str("ada".into()));
@@ -1450,7 +1495,7 @@ mod tests {
         // And the path really is being walked: a value that appears nowhere
         // under u.name matches nothing rather than everything.
         let v = eval(&format!(
-            "echo {json} | from json | grep zzz --on u.name | length"
+            "echo {json} | from-json | grep zzz --on u.name | length"
         ))
         .expect("eval");
         assert_eq!(v, Value::Int(0));
@@ -1460,8 +1505,8 @@ mod tests {
     fn sort_by_on_is_shorthand_compatible() {
         let json = r#"'[{"n":3},{"n":1},{"n":2}]'"#;
         // Positional and --on forms agree.
-        let a = eval(&format!("echo {json} | from json | sort-by n | get n")).expect("eval");
-        let b = eval(&format!("echo {json} | from json | sort-by --on n | get n")).expect("eval");
+        let a = eval(&format!("echo {json} | from-json | sort-by n | get n")).expect("eval");
+        let b = eval(&format!("echo {json} | from-json | sort-by --on n | get n")).expect("eval");
         assert_eq!(a, b);
         assert_eq!(
             a,
@@ -1471,7 +1516,7 @@ mod tests {
 
     #[test]
     fn sort_by_without_column_or_on_explains_itself() {
-        let err = eval(r#"echo '[{"n":1}]' | from json | sort-by"#).expect_err("needs a key");
+        let err = eval(r#"echo '[{"n":1}]' | from-json | sort-by"#).expect_err("needs a key");
         assert!(err.msg.contains("needs a column or `--on`"), "{}", err.msg);
         assert!(err.help.expect("help").contains("--on"));
     }
@@ -1479,12 +1524,12 @@ mod tests {
     #[test]
     fn map_projects_a_field_and_a_dotted_path() {
         let json = r#"'[{"u":{"name":"ada"},"id":1},{"u":{"name":"bob"},"id":2}]'"#;
-        let v = eval(&format!("echo {json} | from json | map u.name")).expect("eval");
+        let v = eval(&format!("echo {json} | from-json | map u.name")).expect("eval");
         assert_eq!(
             v,
             Value::List(vec![Value::Str("ada".into()), Value::Str("bob".into())])
         );
-        let v = eval(&format!("echo {json} | from json | map id")).expect("eval");
+        let v = eval(&format!("echo {json} | from-json | map id")).expect("eval");
         assert_eq!(v, Value::List(vec![Value::Int(1), Value::Int(2)]));
     }
 
@@ -1506,7 +1551,7 @@ mod tests {
         // `null`s instead of erroring — a real, reported trade-off of
         // streaming, not a bug to patch by making `project` throw.
         let v =
-            eval(r#"echo '[{"a":1},{"a":2}]' | from json | map nope"#).expect("no longer errors");
+            eval(r#"echo '[{"a":1},{"a":2}]' | from-json | map nope"#).expect("no longer errors");
         assert_eq!(v, Value::List(vec![Value::Null, Value::Null]));
     }
 
@@ -1515,7 +1560,7 @@ mod tests {
         // The native test host has no scripting engine; the error must say
         // so rather than mangling the source into a field name.
         let err =
-            eval(r#"echo '[{"a":1}]' | from json | map '(o) => o.a'"#).expect_err("no js host");
+            eval(r#"echo '[{"a":1}]' | from-json | map '(o) => o.a'"#).expect_err("no js host");
         assert!(err.msg.contains("JavaScript host"), "{}", err.msg);
     }
 
@@ -1545,7 +1590,7 @@ mod tests {
         // zero items as "no value" — so `length` sees `[]` and correctly
         // returns 0, exactly as before the streaming-commands change.
         let v =
-            eval(r#"echo '[{"a":"x"},{"a":"y"}]' | from json | grep zzz | length"#).expect("eval");
+            eval(r#"echo '[{"a":"x"},{"a":"y"}]' | from-json | grep zzz | length"#).expect("eval");
         assert_eq!(v, Value::Int(0));
     }
 
@@ -1554,7 +1599,7 @@ mod tests {
         // Batch-model change: only "two" matches, so it is the pipeline's
         // terminal value directly, not a one-element list — see the note
         // above.
-        let v = eval(r#"echo '["one","two"]' | from json | grep tw"#).expect("eval");
+        let v = eval(r#"echo '["one","two"]' | from-json | grep tw"#).expect("eval");
         assert_eq!(v, Value::Str("two".into()));
 
         // S3-T4 (streaming): the old top-level `Str`/`List`/other type
@@ -1578,7 +1623,7 @@ mod tests {
         // about composition with `head`/`get`, not about the row count.
         let json = r#"'[{"text":"Wasm1","href":"a"},{"text":"Wasm2","href":"b"},{"text":"Rust","href":"c"}]'"#;
         let v = eval(&format!(
-            "echo {json} | from json | grep -i wasm | head 1 | get text"
+            "echo {json} | from-json | grep -i wasm | head 1 | get text"
         ))
         .expect("eval");
         assert_eq!(v, Value::Str("Wasm1".into()));
@@ -1594,7 +1639,7 @@ mod tests {
     fn closure_filters_without_any_host_engine() {
         let json = r#"'[{"id":1},{"id":7},{"id":9}]'"#;
         let v = eval(&format!(
-            "echo {json} | from json | filter {{|o| $o.id > 5}} | length"
+            "echo {json} | from-json | filter {{|o| $o.id > 5}} | length"
         ))
         .expect("eval");
         assert_eq!(v, Value::Int(2));
@@ -1604,7 +1649,7 @@ mod tests {
     fn closure_maps_and_computes() {
         let json = r#"'[{"a":1,"b":2},{"a":10,"b":20}]'"#;
         let v = eval(&format!(
-            "echo {json} | from json | map {{|o| $o.a + $o.b}}"
+            "echo {json} | from-json | map {{|o| $o.a + $o.b}}"
         ))
         .expect("eval");
         assert_eq!(v, Value::List(vec![Value::Int(3), Value::Int(30)]));
@@ -1614,9 +1659,9 @@ mod tests {
     fn closure_works_as_on_selector_keeping_whole_rows() {
         let json = r#"'[{"t":"rust","n":1},{"t":"wasm","n":2}]'"#;
         // Match on a computed value but keep every column.
-        // `str upcase` isn't an expression — a clean parse error, not a panic.
+        // A multiword command is not an expression: a clean parse error, not a panic.
         let v = eval_any(&format!(
-            "echo {json} | from json | grep RUST --on {{|o| str upcase}} | length"
+            "echo {json} | from-json | grep RUST --on {{|o| str upcase}} | length"
         ));
         assert!(v.is_err());
 
@@ -1625,7 +1670,7 @@ mod tests {
         // than a one-element list — see the batch-model note above
         // `grep_filters_table_rows_across_all_columns`.
         let v = eval(&format!(
-            "echo {json} | from json | grep rust --on {{|o| $o.t}} | get n"
+            "echo {json} | from-json | grep rust --on {{|o| $o.t}} | get n"
         ))
         .expect("eval");
         assert_eq!(v, Value::Int(1));
@@ -1636,7 +1681,7 @@ mod tests {
         let json = r#"'[{"a":1,"b":9},{"a":5,"b":1}]'"#;
         // Sort by a sum that exists in no column.
         let v = eval(&format!(
-            "echo {json} | from json | sort-by --on {{|o| $o.a + $o.b}} | map a"
+            "echo {json} | from-json | sort-by --on {{|o| $o.a + $o.b}} | map a"
         ))
         .expect("eval");
         assert_eq!(v, Value::List(vec![Value::Int(5), Value::Int(1)]));
@@ -1646,7 +1691,7 @@ mod tests {
     fn closure_string_predicate_and_logical_ops() {
         let json = r#"'[{"t":"rust","n":1},{"t":"wasm","n":9}]'"#;
         let v = eval(&format!(
-            "echo {json} | from json | filter {{|o| $o.t == 'rust' || $o.n > 5}} | length"
+            "echo {json} | from-json | filter {{|o| $o.t == 'rust' || $o.n > 5}} | length"
         ))
         .expect("eval");
         assert_eq!(v, Value::Int(2));
@@ -1656,7 +1701,7 @@ mod tests {
     fn closure_errors_are_spanned_not_panics() {
         // Unknown variable inside a closure body.
         let err =
-            eval(r#"echo '[{"a":1}]' | from json | map {|o| $nope.a}"#).expect_err("unknown var");
+            eval(r#"echo '[{"a":1}]' | from-json | map {|o| $nope.a}"#).expect_err("unknown var");
         assert!(err.msg.contains("unknown variable"), "{}", err.msg);
     }
 
@@ -1707,7 +1752,7 @@ mod tests {
 
     #[test]
     fn a_real_command_wins_over_the_group_page() {
-        // `to json` exists and `to` is a group; resolving the command must
+        // The legacy `to json` alias exists and `to` is a group; resolving the command must
         // still take priority over listing.
         assert_eq!(
             eval("echo 1 | to json").expect("eval"),

@@ -195,6 +195,7 @@ pub enum CmdOrigin {
 struct Entry {
     command: Rc<dyn Command>,
     origin: CmdOrigin,
+    alias: bool,
 }
 
 /// Keyed by full (possibly multi-word) name, e.g. `"str upcase"`. Lookup
@@ -218,6 +219,23 @@ impl CommandRegistry {
             Entry {
                 command,
                 origin: CmdOrigin::Builtin,
+                alias: false,
+            },
+        );
+    }
+
+    /// Keep an older builtin spelling callable without advertising it in help
+    /// or command-name completion. The alias shares the canonical implementation.
+    pub fn register_builtin_alias(&mut self, alias: &str, target: &str) {
+        assert!(!self.map.contains_key(alias), "duplicate alias `{alias}`");
+        let entry = self.map.get(target).expect("alias target must exist");
+        assert_eq!(entry.origin, CmdOrigin::Builtin);
+        self.map.insert(
+            alias.into(),
+            Entry {
+                command: entry.command.clone(),
+                origin: CmdOrigin::Builtin,
+                alias: true,
             },
         );
     }
@@ -241,6 +259,7 @@ impl CommandRegistry {
                     Entry {
                         command,
                         origin: CmdOrigin::External,
+                        alias: false,
                     },
                 );
                 Ok(RegisterOutcome::Replaced)
@@ -251,6 +270,7 @@ impl CommandRegistry {
                     Entry {
                         command,
                         origin: CmdOrigin::External,
+                        alias: false,
                     },
                 );
                 Ok(RegisterOutcome::Added)
@@ -309,9 +329,30 @@ impl CommandRegistry {
     }
 
     pub fn names(&self) -> Vec<String> {
-        let mut names: Vec<String> = self.map.keys().cloned().collect();
+        let mut names: Vec<String> = self
+            .map
+            .iter()
+            .filter(|(_, entry)| !entry.alias)
+            .map(|(name, _)| name.clone())
+            .collect();
         names.sort();
         names
+    }
+
+    /// Include legacy spellings so argument completion still works when an
+    /// older command name is typed explicitly.
+    pub fn signatures(&self) -> Vec<Signature> {
+        let mut specs: Vec<Signature> = self
+            .map
+            .iter()
+            .map(|(name, entry)| {
+                let mut signature = entry.command.signature().clone();
+                signature.name = name.clone();
+                signature
+            })
+            .collect();
+        specs.sort_by(|a, b| a.name.cmp(&b.name));
+        specs
     }
 
     pub fn get(&self, name: &str) -> Option<Rc<dyn Command>> {

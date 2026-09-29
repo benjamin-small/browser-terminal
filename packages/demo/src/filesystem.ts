@@ -27,6 +27,7 @@ export async function filesystemDemo(bt: BrowserTerminal): Promise<void> {
   const button = (label: string) => { const el = document.createElement('button'); el.textContent = label; el.style.cssText = 'padding:8px;font:inherit'; controls.append(el); return el; };
   const home = button('Browser files'); home.disabled = true;
   const connect = button('Connect local folder');
+  const writeButtons = new Set<HTMLButtonElement>();
   const picker = (window as unknown as { showDirectoryPicker?: (options: { mode: 'read' }) => Promise<FileSystemDirectoryHandle> }).showDirectoryPicker;
   connect.disabled = !picker || !window.isSecureContext;
   let disposed = false;
@@ -37,13 +38,33 @@ export async function filesystemDemo(bt: BrowserTerminal): Promise<void> {
     let mountedPath: string | undefined;
     try {
       // Request only browsing access here. A missing write grant must not block
-      // mounting; the editor requests it separately from its Enable writes action.
+      // mounting; the folder and editor controls request write access separately.
       // Keep the picker directly in this click's user activation, before any await.
       const handle = await picker!.call(window, { mode: 'read' });
       if (disposed) return;
       mountedPath = filesystem.mountLocal(handle, { writable: true });
       await filesystem.cd(mountedPath, { session });
-      status.textContent = `Connected ${handle.name} at ${mountedPath}. Browser files remain at /scratch. Enable writes in the editor when needed. Local folders must be reconnected after a page reload.`;
+      if (disposed) return;
+      const path = mountedPath;
+      const enableWrites = button(`Enable writes: ${path}`);
+      writeButtons.add(enableWrites);
+      enableWrites.addEventListener('click', () => {
+        if (disposed || enableWrites.disabled) return;
+        enableWrites.disabled = true;
+        status.textContent = `Requesting write access to ${path}…`;
+        // Invoke directly from the click: requesting permission after shell work
+        // or another awaited operation can lose the browser's user activation.
+        void filesystem.requestWritePermission(path).then(granted => {
+          if (disposed) return;
+          status.textContent = granted
+            ? `Writes enabled for ${path}. You can save edits and create files with commands such as echo hello > new.txt when working in this folder.`
+            : `Write access was not granted for ${path}. You can still read files. Choose Enable writes to try again.`;
+        }).catch(error => { if (!disposed) report(error); }).finally(() => {
+          // Keep the action available if access is later revoked by the browser.
+          enableWrites.disabled = disposed;
+        });
+      });
+      status.textContent = `Connected ${handle.name} at ${path}. Choose Enable writes: ${path} to allow editor saves and creating files in this folder. Browser files remain at /scratch. Local folders must be reconnected after a page reload.`;
     } catch (error) {
       if (mountedPath && !disposed) filesystem.unmount(mountedPath);
       if (disposed) return;
@@ -88,6 +109,7 @@ export async function filesystemDemo(bt: BrowserTerminal): Promise<void> {
     if (event.type === 'dispose') {
       disposed = true;
       connect.disabled = home.disabled = true;
+      for (const control of writeButtons) control.disabled = true;
       // Editors remain available for exporting dirty buffers after disconnection.
     }
   });

@@ -362,7 +362,7 @@ async fn run_resolves_scalar_and_plain_objects() {
     assert_eq!(v.as_f64(), Some(5.0));
 
     // Records must arrive as plain objects (never Map).
-    let v = run_value(&core, "echo '{\"a\":1}' | from json")
+    let v = run_value(&core, "echo '{\"a\":1}' | from-json")
         .await
         .expect("resolves");
     assert!(v.is_object());
@@ -707,7 +707,7 @@ async fn nested_bytes_survive_records_lists_and_json_encoding() {
         Array::from(&Reflect::get(&result, &"payloads".into()).expect("binary operation succeeds"));
     assert_bytes(&payloads.get(0), &[0, 27, 128, 255]);
     assert_bytes(&payloads.get(1), &[]);
-    let json = run_value(&core, "nested-bytes | to json")
+    let json = run_value(&core, "nested-bytes | to-json")
         .await
         .expect("binary operation succeeds")
         .as_string()
@@ -716,7 +716,7 @@ async fn nested_bytes_survive_records_lists_and_json_encoding() {
         json,
         r#"{"__proto__":"ff","payloads":["001b80ff",""],"numbers":[0,255],"text":"00ff"}"#
     );
-    let pretty = run_value(&core, "nested-bytes | to json --pretty")
+    let pretty = run_value(&core, "nested-bytes | to-json --pretty")
         .await
         .expect("binary operation succeeds")
         .as_string()
@@ -765,7 +765,7 @@ async fn byte_variables_are_copied_on_both_sides_of_the_boundary() {
         Some(3.0)
     );
     assert_eq!(
-        run_value(&core, "echo $blob | to json | from json")
+        run_value(&core, "echo $blob | to-json | from-json")
             .await
             .expect("binary operation succeeds")
             .as_string()

@@ -1,8 +1,15 @@
 # Browser files and editing
 
-The optional filesystem adapter connects browser directory handles to shell
-commands. It keeps filesystem access in the host; importing the terminal alone
-adds no mounts, commands, permission prompts, or editor code.
+`BrowserTerminal.create()` mounts writable OPFS at `/scratch` by default and
+starts each session there, with a directory-aware prompt. It installs `pwd`,
+`cd`, `ls`, `cat`, `read-bytes`, `edit`, the text editor, path completion, and
+file redirection before resolving. `terminal.filesystem` exposes the adapter
+for additional mounts. Importing alone does not access storage.
+
+If OPFS is absent or cannot be opened, the terminal and JavaScript console
+both display a warning; the core shell remains usable and file commands are
+not installed. `terminal.filesystem` is then `null`. Set `filesystem: false`
+when creating the terminal to opt out of automatic setup and its warnings.
 
 The demo starts automatically in writable browser-private storage at `/scratch`.
 `ls`, `edit welcome.txt`, and `echo hello > hello.txt` work without a folder
@@ -11,9 +18,10 @@ not the HTTP response cache: it belongs to this website's origin and browser
 profile, is subject to quota/eviction, and is deleted when site data is cleared.
 Connecting a local folder is optional and requires browser consent.
 
-To give your own application the same startup behavior:
+For a host-managed setup, disable the default first:
 
 ```ts
+const terminal = await BrowserTerminal.create({ filesystem: false });
 const filesystem = installFilesystem(terminal, {
   editor: editor.open,
   initialDirectory: '/scratch',
@@ -23,6 +31,10 @@ terminal.setPrompt(({ session }) => `${filesystem.pwd(session)} `);
 await filesystem.mountScratch('scratch', { writable: true });
 terminal.setRedirectHandler(filesystem.createRedirectHandler());
 ```
+
+The automatic mount uses the origin's OPFS root. The demo opts out and uses
+its existing `browser-terminal-demo` subdirectory, preserving earlier demo files.
+Automatic setup does not create example files or install experimental devices.
 
 The demo uses a `browser-terminal-demo` subdirectory of OPFS to preserve its
 existing files. If browser storage is unavailable, it reports the failure and
@@ -35,7 +47,7 @@ import { BrowserTerminal } from '@benjamin-small/browser-terminal';
 import { installFilesystem } from '@benjamin-small/browser-terminal/filesystem';
 import { createTextEditor } from '@benjamin-small/browser-terminal/filesystem/editor';
 
-const terminal = await BrowserTerminal.create();
+const terminal = await BrowserTerminal.create({ filesystem: false });
 const editor = createTextEditor();
 const filesystem = installFilesystem(terminal, { editor: editor.open });
 
@@ -51,7 +63,15 @@ connectButton.addEventListener('click', async () => {
 
 `writable: true` permits the adapter to write, but does not grant browser write
 permission. The demo requests `read` when connecting so missing write permission
-does not prevent browsing. When editing needs write access, call
+does not prevent browsing. Each connected folder has an **Enable writes:
+/mnt/folder-name** button beside the connection controls. Click it and approve
+the browser request before saving edits or creating files with shell redirects,
+for example `echo hello > /mnt/projects/new.txt`. The grant applies to that
+folder; other connected folders keep their own permissions. Denial leaves
+browsing available, and the button can retry if access is denied or revoked.
+This action also works with an empty folder, without opening the editor first.
+
+When building a host UI, call
 `filesystem.requestWritePermission('/mnt/projects')`
 directly from an Enable writes button. The supplied editor shows this action
 only when write permission is missing. OPFS needs no permission grant. Omitting
@@ -109,7 +129,7 @@ files at `/scratch` remain available independently of the local folder picker.
 The demo prompt shows the current directory, for example `/scratch ❯`, and
 follows `cd`, session switches, and split panes. `cat welcome.txt` prints a
 file's contents. Press Tab at the end of a command prefix to complete names;
-this also works after `|` and `;` and for multiword names such as `str upcase`.
+this also works after `|` and `;` and for multiword host commands such as `task list`.
 Ambiguous prefixes expand to the shared prefix; another Tab lists candidates.
 The adapter also completes paths for `cat`, `cd`, `ls`, `edit`, `read-bytes`,
 and redirect targets. `cat <Tab>` lists entries; `cat wel<Tab>` completes a
@@ -168,8 +188,8 @@ terminal.setRedirectHandler(filesystem.createRedirectHandler());
 ```sh
 echo hello > /scratch/hello.txt
 echo world >> /scratch/hello.txt
-ls /scratch | to json > /scratch/list.json
-str upcase < /scratch/hello.txt
+ls /scratch | to-json > /scratch/list.json
+str-upcase < /scratch/hello.txt
 ```
 
 Reads decode UTF-8 with invalid sequences rejected. Pass `{ binary: true }` to

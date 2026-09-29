@@ -15,7 +15,7 @@ file-descriptor semantics are not goals.
 - Preserve value types across pipes and host boundaries. Strings, records,
   lists, and bytes do not become display text merely because they are piped.
   Rendering happens at the terminal boundary; explicit commands such as
-  `to json` perform serialization.
+  `to-json` perform serialization.
 - Let the host define application resources. A target may name a document,
   a virtual filesystem entry, or another application object. The core does
   not infer filesystem access, a current directory, or an encoding from it.

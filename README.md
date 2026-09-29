@@ -47,7 +47,7 @@ const { value } = await bt.run("links | filter {|o| $o.text != ''} | length");  
 - **Structured pipes**: values (strings, numbers, lists, records) flow between
   commands; tables render automatically at the end of a pipeline.
 - **Commands in Rust or TypeScript**: builtins (`filter`, `map`, `grep`,
-  `sort-by`, `get`, `head`, `to json`, …) plus `registerCommand` for page-side
+  `sort-by`, `get`, `head`, `to-json`, …) plus `registerCommand` for page-side
   commands.
   TS commands get an `AbortSignal` (Ctrl-C cancels in-flight `fetch`es) and an
   `emit()` for progressive output.
@@ -159,9 +159,13 @@ compatibility is not a goal; familiar syntax is adopted where it fits that model
 The [language direction](docs/language-direction.md) defines the rules for
 future features and supersedes compatibility assumptions in historical designs.
 
-`;`-separated pipelines; multi-word commands (`str upcase`); flags
+`;`-separated pipelines; multi-word host commands (`task list`); flags
 (`--limit 5`, `--limit=5`, `-l 5`); `'raw'` and `"interpolated $var"` strings;
 `#` comments.
+
+Use `to-json`, `from-json`, `str-upcase`, and `str-downcase` as single command
+names. Their former spaced spellings remain compatibility aliases but are
+omitted from the main help list and command-name completion.
 
 An embedded single `=` is part of a bareword when it has bareword characters
 on both sides: `dd if=/dev/hda count=1` passes the strings `if=/dev/hda` and
@@ -308,7 +312,11 @@ field of that name shadows it.
 With a host redirect handler installed, `cmd < source` feeds a structured
 value into the first command; `cmd | next > target` sends the collected
 result to the host, and `>> target` also sets `append: true`. Targets are
-strings interpreted by the host, with no built-in filesystem or text encoding.
+strings interpreted by the host; the core does not impose a filesystem or encoding.
+`BrowserTerminal.create()` installs writable OPFS at `/scratch`, filesystem
+commands, an editor, and file redirects by default. If storage is unavailable,
+it warns in the terminal and console and leaves the core shell usable.
+Use `create({ filesystem: false })` for a host-managed setup.
 See the [redirect API and semantics](packages/browser-terminal/README.md#structured-redirection).
 Without a handler, redirect syntax keeps its existing parse errors.
 

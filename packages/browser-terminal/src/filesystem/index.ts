@@ -324,7 +324,7 @@ export class BrowserFilesystem {
     return {
       read: (target, ctx) => options.binary ? this.readBytes(pathFor(target, ctx), ctx) : this.readText(pathFor(target, ctx), ctx),
       write: (target, value: Value, ctx) => {
-        if (typeof value !== 'string' && !(value instanceof Uint8Array)) throw new Error('File redirects require text or bytes; serialize structured values with to json');
+        if (typeof value !== 'string' && !(value instanceof Uint8Array)) throw new Error('File redirects require text or bytes; serialize structured values with to-json');
         return this.write(pathFor(target, ctx), typeof value === 'string' ? encoder.encode(value) : value, ctx, { append: ctx.append });
       },
     };

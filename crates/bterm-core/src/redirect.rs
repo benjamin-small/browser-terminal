@@ -119,8 +119,8 @@ mod tests {
         let bytes = Value::Bytes(vec![0, 128, 255]);
         let (engine, store) = fixture(bytes.clone());
         run(&engine, "map {|x| $x} < src >> dst").expect("bytes");
-        run(&engine, "echo '{\"x\":1}' | from json > dst").expect("record");
-        run(&engine, "echo '[]' | from json > empty").expect("empty list");
+        run(&engine, "echo '{\"x\":1}' | from-json > dst").expect("record");
+        run(&engine, "echo '[]' | from-json > empty").expect("empty list");
         assert_eq!(
             *store.writes.borrow(),
             vec![

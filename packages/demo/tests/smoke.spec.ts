@@ -501,7 +501,7 @@ test('binary values survive host commands and render safely in the terminal', as
     return {
       bytes: [...output],
       count: (await bt.run('binary-data | length')).value,
-      json: (await bt.run('binary-data | to json')).value,
+      json: (await bt.run('binary-data | to-json')).value,
     };
   });
   expect(result).toEqual({ bytes: [27, 91, 50, 74, 0, 255], count: 6, json: '"1b5b324a00ff"' });
@@ -578,7 +578,7 @@ test('SECURITY: diagnostics stay out of the pipe and cannot inject escapes', asy
   ).toBe(2);
 
   const asText = (await page.evaluate(() =>
-    window.bt.run('noisy | to json').then((r) => r.value),
+    window.bt.run('noisy | to-json').then((r) => r.value),
   )) as string;
   expect(asText).not.toContain('LOG-LINE');
   expect(asText).not.toContain('ERR-LINE');
