@@ -1,6 +1,6 @@
 {
   "name": "@benjamin-small/browser-terminal",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "A terminal/tmux experience for any web page, powered by a Rust/WASM core with structured-value pipes.",
   "license": "Apache-2.0",
   "author": "Benjamin Small",
@@ -36,6 +36,14 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./filesystem": {
+      "types": "./dist/filesystem/index.d.ts",
+      "import": "./dist/filesystem/index.js"
+    },
+    "./filesystem/editor": {
+      "types": "./dist/filesystem/editor.d.ts",
+      "import": "./dist/filesystem/editor.js"
     }
   },
   "files": [
@@ -43,7 +51,8 @@
   ],
   "scripts": {
     "prepublishOnly": "node scripts/check-publishable.mjs",
-    "build": "node scripts/gen-xterm-css.mjs && tsc -p tsconfig.json && rm -rf dist/wasm && cp -R src/wasm dist/wasm && cp ../../LICENSE ./LICENSE"
+    "build": "node scripts/gen-xterm-css.mjs && tsc -p tsconfig.json && rm -rf dist/wasm && cp -R src/wasm dist/wasm && cp ../../LICENSE ./LICENSE",
+    "test:filesystem": "node --test tests/filesystem.test.mjs"
   },
   "dependencies": {
     "@xterm/addon-fit": "^0.11.0",

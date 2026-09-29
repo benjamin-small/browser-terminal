@@ -94,6 +94,8 @@ writeFileSync(
   join(dir, 'src/main.ts'),
   `import { BrowserTerminal } from '${PKG}';
 import type { CommandSpec } from '${PKG}';
+import { installFilesystem } from '${PKG}/filesystem';
+import { createTextEditor } from '${PKG}/filesystem/editor';
 
 const spec: CommandSpec = { name: 'headings', summary: 'List headings' };
 
@@ -104,6 +106,16 @@ bt.registerCommand(spec, () =>
     text: h.textContent?.trim() ?? '',
   })),
 );
+
+const editor = createTextEditor();
+const fs = installFilesystem(bt, { editor: editor.open });
+await fs.mountScratch('scratch', { writable: true });
+bt.setRedirectHandler(fs.createRedirectHandler());
+await bt.run('echo packed > /scratch/consumer.txt');
+if ((await bt.run('cat /scratch/consumer.txt')).value !== 'packed') throw new Error('Packed filesystem failed');
+await bt.run('edit /scratch/consumer.txt');
+if (![...document.querySelectorAll('section')].some(el => el.shadowRoot?.querySelector('textarea'))) throw new Error('Packed editor failed');
+editor.dispose();
 
 const upper = await bt.run('echo hi | str upcase');
 const count = await bt.run('headings | length');

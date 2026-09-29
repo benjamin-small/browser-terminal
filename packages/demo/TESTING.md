@@ -54,3 +54,19 @@ Run `just demo`, open http://localhost:5173, then walk through:
 - [ ] Minimize (─) → pills only; pill click restores
 - [ ] Ctrl-B d hides the panel; Ctrl+` (globalToggle) brings it back
 - [ ] `bt.dispose()` in console removes everything; no stray keys/listeners
+
+## Filesystem and editing (record browser/version)
+- [ ] On HTTPS/localhost in Chrome and Edge, Connect folder opens a native picker
+- [ ] Cancelling the picker leaves mounts and cwd unchanged
+- [ ] Select a disposable fixture folder; `ls`, nested `cd`, and `cat` read its actual files
+- [ ] `cd ..` from its mount root reaches virtual `/`, never the real parent folder
+- [ ] Editing and Save request no implicit write grant; Enable writes prompts directly
+- [ ] Grant write permission, save, and verify the file bytes with a native editor
+- [ ] Denied/revoked permission leaves editor text available for export
+- [ ] Modify a file externally; Save reports a conflict and retains the unsaved buffer
+- [ ] LF/CRLF and UTF-8 BOM survive save; mixed endings are read-only
+- [ ] Close/Reload dirty text offers a discard decision; Ctrl/Cmd-S saves and focus returns on close
+- [ ] Open scratch, edit welcome.txt, reload page, and reopen scratch to verify persistence
+- [ ] On Firefox and Safari, verify unavailable picker messaging and test scratch capabilities
+- [ ] `read-bytes /dev/zero --length 16` works; unbounded reads and device redirects fail
+- [ ] Unmount/dispose retains dirty text for export and rejects later file writes

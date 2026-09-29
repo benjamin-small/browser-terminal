@@ -47,3 +47,16 @@ cargo test --all-features
 For the WebAssembly and browser boundaries, install the development
 prerequisites from the root README and run `just test-wasm` and
 `just test-e2e`.
+
+## Filesystem coverage
+
+`just test-filesystem` builds the package and runs deterministic Node contract
+checks against a memory filesystem, including failure injection, path handling,
+permissions, cancellation, transaction rollback, overlapping mounts, editor
+conflicts, and experimental devices. After an existing build, run
+`npm --prefix packages/browser-terminal run test:filesystem` directly.
+
+`packages/demo/tests/filesystem.spec.ts` exercises real OPFS through the WASM
+shell and editor in Chromium. The CI and release workflows now require these
+checks and the complete browser suite, alongside fmt, Clippy, native tests,
+and WASM boundary tests. Native folder-picker/save checks remain manual.

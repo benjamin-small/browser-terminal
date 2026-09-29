@@ -93,6 +93,9 @@ export class BrowserTerminal {
   private lastSnapshot: LayoutSnapshot | null = null;
   private globalToggleHandler: ((ev: KeyboardEvent) => void) | null = null;
   private disposed = false;
+  private disposing = false;
+  private readonly commandOwners = new Map<string, symbol>();
+  private readonly lifecycleListeners = new Set<(event: { type: 'dispose' } | { type: 'sessionClosed'; session: number }) => void>();
 
   private constructor(
     private readonly core: BtermCore,
@@ -160,6 +163,7 @@ export class BrowserTerminal {
           break;
       }
       paneManager.handleEvent(event);
+      if (event.type === 'sessionClosed') self?.notifyLifecycle(event);
     });
 
     const resizeObserver = new ResizeObserver(() => paneManager.fitAll());
@@ -199,12 +203,39 @@ export class BrowserTerminal {
   registerCommand(spec: CommandSpec, fn: CommandFn): void {
     this.assertLive();
     this.core.register_command(spec, fn as (...args: unknown[]) => unknown);
+    this.commandOwners.set(spec.name.trim().replace(/\s+/g, ' '), Symbol());
+  }
+
+  /** Register without replacing host commands; cleanup removes only this registration. */
+  registerOwnedCommand(spec: CommandSpec, fn: CommandFn): () => void {
+    this.assertLive();
+    const name = spec.name.trim().replace(/\s+/g, ' ');
+    if (this.commandOwners.has(name)) throw new Error(`Command already registered: ${name}`);
+    this.registerCommand({ ...spec, name }, fn);
+    const owner = this.commandOwners.get(name);
+    return () => {
+      if (!this.disposed && this.commandOwners.get(name) === owner) this.unregisterCommand(name);
+    };
+  }
+
+  /** Subscribe to resource cleanup events. Unsubscribe is safe after disposal. */
+  onLifecycle(listener: (event: { type: 'dispose' } | { type: 'sessionClosed'; session: number }) => void): () => void {
+    this.assertLive();
+    this.lifecycleListeners.add(listener);
+    return () => { this.lifecycleListeners.delete(listener); };
+  }
+
+  private notifyLifecycle(event: { type: 'dispose' } | { type: 'sessionClosed'; session: number }): void {
+    for (const listener of [...this.lifecycleListeners]) {
+      try { listener(event); } catch (error) { console.error('Terminal cleanup failed', error); }
+    }
   }
 
   /** Remove a TS-registered command (builtins are not removable). */
   unregisterCommand(name: string): void {
     this.assertLive();
     this.core.unregister_command(name);
+    this.commandOwners.delete(name.trim().replace(/\s+/g, ' '));
   }
 
   /** Enable structured `<`, `>`, and `>>` redirects; null disables future lines. */
@@ -441,7 +472,11 @@ export class BrowserTerminal {
   }
 
   dispose(): void {
-    if (this.disposed) return;
+    if (this.disposed || this.disposing) return;
+    this.disposing = true;
+    this.notifyLifecycle({ type: 'dispose' });
+    this.lifecycleListeners.clear();
+    this.commandOwners.clear();
     this.disposed = true;
     if (this.globalToggleHandler) {
       window.removeEventListener('keydown', this.globalToggleHandler);

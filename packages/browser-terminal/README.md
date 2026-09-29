@@ -373,3 +373,20 @@ because its `boolean` has nowhere to put an error. So `undefined` from
 - [Issues](https://github.com/benjamin-small/browser-terminal/issues)
 
 Apache-2.0
+
+## Optional browser filesystem and editor
+
+Import `installFilesystem` from
+`@benjamin-small/browser-terminal/filesystem` to connect directory handles to
+`pwd`, `cd`, structured `ls`, `cat`, `read-bytes`, and `edit`. The optional
+`@benjamin-small/browser-terminal/filesystem/editor` export supplies a small
+text editor; hosts can provide their own instead.
+
+Mounts are read-only by default. Local folder selection needs browser support
+and a user gesture; writing requires host opt-in and browser permission.
+Redirection is installed separately so the adapter does not replace existing
+host hooks. OPFS scratch storage and experimental file-backed block access are
+also available.
+
+See the [filesystem guide](https://github.com/benjamin-small/browser-terminal/blob/main/docs/filesystem.md)
+for setup, command examples, byte I/O, cancellation, and save limitations.
