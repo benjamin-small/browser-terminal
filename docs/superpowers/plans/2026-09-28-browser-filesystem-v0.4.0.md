@@ -9,23 +9,21 @@ consolidated in `filesystem/index.ts`; byte transactions, paths, types, devices,
 and editor remain separate. All adapter writes share a conservative queue,
 which covers overlapping mount aliases without assuming path identity.
 
-Local validation passes: 274 native tests, 48 WASM boundary tests, 18 filesystem
-contract tests, 36 Chromium browser tests, and six filesystem tests each in
-Firefox 151 and WebKit 26.5. WebKit tests use disposable persistent profiles
-because OPFS failed in its ephemeral context. Rust formatting and Clippy pass;
-the baseline formatting cleanup is a separate commit. All three built demos
-passed artifact verification. npm reports 0.3.0 as current and no 0.4.0 release.
+Local validation passes: 278 native tests, 48 WASM boundary tests, 24 filesystem
+contract tests, and 45 Chromium browser tests. Firefox 151 and WebKit 26.5 also
+exercise the filesystem suite; see the release notes for current counts.
+WebKit uses disposable persistent profiles because OPFS failed in its ephemeral
+context. Rust formatting and Clippy pass.
 
-Manual Chrome 154 checks verified the real folder picker, local navigation,
-reading, opening a local file, and refusal to save without write permission.
-Automated approval review rejected granting write access to the generated
-`/tmp/browser-terminal-native-fixture`; native save verification remains pending
-explicit user authorization. No release tag or npm publication has occurred.
-The clean-tree package guard and packed npm consumer test pass, including both
-optional entrypoints and an OPFS edit/read round trip. Automatic approval review
-rejected pushing the local release branch to GitHub, so remote CI and the release
-dry run remain pending push authorization. The remaining checklist is in the
-draft release notes.
+Manual Chrome checks verified folder selection, local navigation, reads, editor
+opening, and refusal to save without write permission. The user also confirmed
+selection, permission approval, and mounting in external Chrome. The embedded
+browser fails to complete that permission flow; `/scratch` remains available.
+Native local saves and native Edge/Safari coverage remain unverified.
+
+The user authorized committing, pushing, and publishing v0.4.0 on 2026-09-28.
+Remote release validation and package publication are tracked in the release
+notes. Remaining native-browser coverage is documented as a release limitation.
 
 ## Outcome and release scope
 
@@ -51,7 +49,12 @@ Release requirements:
   `/dev/zero`, enabled separately from ordinary filesystem commands.
 - Consumer documentation, browser tests, and packed-package verification.
 
-Follow-ups after v0.4.0: path completion, per-session directory prompts,
+Scope update: the requested command-name Tab completion and per-session directory
+prompts are now included in v0.4.0, along with automatic browser-storage startup.
+Follow-up feedback also adds file/directory arguments, flags, booleans, and a
+host argument-completion provider API.
+
+Follow-ups after v0.4.0:
 remembered mounts, syntax highlighting, a terminal-mode editor, full hex editing,
 recursive file operations, rename/move, filesystem watchers, and general live
 character streams. No raw disk, OS device, POSIX descriptor, or native process

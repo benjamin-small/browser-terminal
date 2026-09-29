@@ -227,3 +227,97 @@ test('session cleanup invalidates its readers without disconnecting another sess
   assert.equal(decode(await second.readAt(0, 1)), 'h');
   fs.dispose(); await assert.rejects(second.readAt(0, 1), /disposed/);
 });
+
+test('initial directory applies to existing and new sessions, with unmount fallback', async () => {
+  const fs = new BrowserFilesystem({ initialDirectory: '/scratch' });
+  assert.equal(fs.pwd(1), '/');
+  const root = new MemoryDirectory(); root.directory('src');
+  fs.mount('scratch', root, { writable: true });
+  assert.equal(fs.pwd(1), '/scratch'); assert.equal(fs.pwd(2), '/scratch');
+  await fs.cd('/scratch/src', ctx); assert.equal(fs.pwd(1), '/scratch/src');
+  assert.equal(fs.pwd(2), '/scratch');
+  fs.unmount('scratch'); assert.equal(fs.pwd(1), '/'); assert.equal(fs.pwd(3), '/');
+});
+
+test('editor permission inspection never requests access', async () => {
+  const { fs, root } = fixture(); let requests = 0;
+  root.requestPermission = async () => { requests++; return 'granted'; };
+  const doc = await fs.document('/local/hello.txt', ctx);
+  assert.equal(await doc.writePermission(), 'granted');
+  root.permission = 'prompt'; assert.equal(await doc.writePermission(), 'prompt');
+  assert.equal(requests, 0);
+});
+
+test('path completion follows cwd and filters cd to directories', async () => {
+  const { fs } = fixture();
+  await fs.cd('/local', ctx);
+  const context = { command: 'cat', prefix: '', argumentIndex: 0, args: [], kind: 'argument', session: 1, pane: 1, signal: new AbortController().signal };
+  assert.deepEqual(await fs.completePath(context), [{ value: 'hello.txt', directory: false }, { value: 'src/', directory: true }]);
+  assert.deepEqual(await fs.completePath({ ...context, command: 'cd' }), [{ value: 'src/', directory: true }]);
+  assert.deepEqual(await fs.completePath({ ...context, prefix: 'src/日' }), [{ value: 'src/日本語 space.txt', directory: false }]);
+  assert.deepEqual(await fs.completePath({ ...context, command: 'echo', kind: 'redirect', prefix: '/lo' }), [{ value: '/local/', directory: true }]);
+  assert.deepEqual(await fs.completePath({ ...context, flag: 'offset', command: 'read-bytes' }), []);
+  assert.deepEqual(await fs.completePath({ ...context, argumentIndex: 1 }), []);
+});
+
+test('argument completion parses flags, quotes, redirects, and typed values without evaluation', async () => {
+  const { argumentTarget, completionEdit } = await import('../dist/completion.js');
+  const specs = [{ name: 'ls', flags: [{ long: 'long', short: 'l' }] }, { name: 'cat' }, { name: 'echo' }, { name: 'choose', required: [{ name: 'enabled', shape: 'bool' }], flags: [{ long: 'enabled', shape: 'bool' }] }];
+  assert.deepEqual(argumentTarget('ls --l', specs).flags, ['--long', '-l', '--help']);
+  assert.equal(argumentTarget('ls --long ', specs).argumentIndex, 0);
+  assert.equal(argumentTarget('cat "my ', specs).prefix, 'my ');
+  assert.equal(argumentTarget('echo x | cat ../', specs).prefix, '../');
+  assert.equal(argumentTarget('echo hi > new', specs).kind, 'redirect');
+  assert.equal(argumentTarget('choose --enabled=tr', specs).shape, 'bool');
+  assert.equal(argumentTarget('choose --enabled=tr', specs).replaceStart, 17);
+  assert.equal(argumentTarget('cat "$variable', specs), null);
+  assert.equal(argumentTarget('echo {|x| cat f', specs), null);
+  const edited = completionEdit('cat no', 4, 'no', [{ value: 'notes $x;".txt' }]);
+  assert.equal(edited.replacement, 'cat "notes \\$x;\\".txt" ');
+  assert.deepEqual(completionEdit('cat ', 4, '', [{ value: 'a' }, { value: 'b' }]).candidates, ['a', 'b']);
+  assert.equal(completionEdit('cat he', 4, 'he', [{ value: 'hello.txt' }, { value: 'help.txt' }]).replacement, 'cat hel');
+});
+
+test('local mounts default to /mnt with unique names and virtual parent navigation', async () => {
+  const fs = new BrowserFilesystem({ initialDirectory: '/mnt/projects' });
+  const root = new MemoryDirectory('projects'); root.file('notes.txt', 'local contents'); root.directory('src').file('index.txt', 'source');
+  assert.deepEqual(await collect(fs.list('/mnt', ctx)), []);
+  const path = fs.mountLocal(root, { writable: true });
+  assert.equal(path, '/mnt/projects');
+  assert.equal(fs.pwd(1), path);
+  assert.equal(fs.mountLocal(root), '/mnt/projects-2');
+  assert.deepEqual((await collect(fs.list('/', ctx))).map(x => x.name), ['mnt']);
+  assert.deepEqual((await collect(fs.list('/mnt', ctx))).map(x => x.path), ['/mnt/projects', '/mnt/projects-2']);
+  assert.equal(await fs.readText('notes.txt', ctx), 'local contents');
+  await fs.cd('src', ctx); assert.equal(await fs.readText('index.txt', ctx), 'source');
+  await fs.cd('../..', ctx); assert.equal(fs.pwd(1), '/mnt');
+  await fs.write('/mnt/projects/notes.txt', encode('saved'), ctx);
+  assert.equal(await fs.readText('/mnt/projects-2/notes.txt', ctx), 'saved');
+  assert.equal(await fs.requestWritePermission(path), true);
+  await fs.cd(path, ctx);
+  const reader = await fs.openReader('notes.txt', ctx);
+  fs.unmount(path); assert.equal(fs.pwd(1), '/');
+  await assert.rejects(reader.readAt(0, 2), /Unmounted/);
+  await assert.rejects(fs.readText('/mnt/projects/notes.txt', ctx), /Unknown mount/);
+  assert.equal(await fs.readText('/mnt/projects-2/notes.txt', ctx), 'saved');
+  fs.unmount('/mnt/projects-2');
+  assert.deepEqual(await collect(fs.list('/mnt', ctx)), []);
+});
+
+test('nested explicit mounts cannot shadow parents or escape virtual paths', async () => {
+  const fs = new BrowserFilesystem({ devices: true });
+  const root = new MemoryDirectory('same name'); root.file('file.txt', 'hello');
+  fs.mount('/custom/nested', root);
+  assert.deepEqual(await collect(fs.list('/custom', ctx)), [{ name: 'nested', kind: 'directory', path: '/custom/nested' }]);
+  assert.equal(await fs.readText('/custom/nested/file.txt', ctx), 'hello');
+  assert.throws(() => fs.mount('custom', root), /overlap/);
+  assert.throws(() => fs.mount('custom/nested/child', root), /overlap/);
+  for (const name of ['mnt', 'mnt/../escape', 'mnt//folder', 'dev/folder']) assert.throws(() => fs.mount(name, root), /Invalid/);
+  assert.throws(() => fs.mountLocal(root, { name: '../escape' }), /Invalid/);
+  assert.equal(fs.mountLocal(root), '/mnt/same name');
+  const completion = await fs.completePath({ command: 'cd', args: [], prefix: '/mnt/sa', argumentIndex: 0, kind: 'argument', session: 1, pane: 1, signal: new AbortController().signal });
+  assert.deepEqual(completion, [{ value: '/mnt/same name/', directory: true }]);
+  await fs.cd('/custom', ctx);
+  fs.unmount('/custom/nested');
+  assert.equal(fs.pwd(1), '/');
+});

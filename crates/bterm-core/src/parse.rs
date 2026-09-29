@@ -275,6 +275,9 @@ impl Parser {
             TokenKind::StrInterp(parts) => Ok(Expr::StrInterp(parts, tok.span)),
             TokenKind::Var(name) => Ok(Expr::Var(name, tok.span)),
             TokenKind::Bareword(w) => Ok(Expr::Bareword(w, tok.span)),
+            // A standalone slash is the filesystem root in command arguments.
+            // Closure expressions use parse_operator_expr and retain division.
+            TokenKind::Op(Op::Slash) => Ok(Expr::Bareword("/".into(), tok.span)),
             TokenKind::Reserved(r) => Err(ShellError::parse(
                 format!("`{r}` is not supported yet"),
                 tok.span,
@@ -538,6 +541,14 @@ mod tests {
         let out = parse(src);
         assert!(out.errors.is_empty(), "unexpected errors: {:?}", out.errors);
         out.line
+    }
+
+    #[test]
+    fn root_path_is_an_argument_while_closures_keep_division() {
+        let line = ok("cd /; ls /; echo 6 | map {|x| $x / 2}");
+        assert!(
+            matches!(&line.pipelines[0].calls[0].args[0], Arg::Positional(Expr::Bareword(path, _)) if path == "/")
+        );
     }
 
     #[test]

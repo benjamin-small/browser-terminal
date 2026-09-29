@@ -222,10 +222,20 @@ impl Engine {
 
     /// Sync input hot path: feed raw input to the pane's editor.
     pub fn feed(&mut self, pane: u32, data: &str) -> Effects {
-        match self.mux.pane_mut(pane) {
-            Some(p) => p.editor.feed(data),
+        let commands = if data.contains('\t') {
+            self.registry.names()
+        } else {
+            Vec::new()
+        };
+        let session = self.mux.session_of_pane(pane).unwrap_or_default();
+        let mut effects = match self.mux.pane_mut(pane) {
+            Some(p) => p.editor.feed_with_commands(data, &commands),
             None => Effects::default(),
+        };
+        if let Some(request) = &mut effects.completion {
+            request.session = session;
         }
+        effects
     }
 
     pub fn resize(&mut self, pane: u32, cols: u16, rows: u16) {

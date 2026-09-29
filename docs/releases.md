@@ -17,6 +17,6 @@ changes. Update them to match completed work before publishing.
 
 Cargo and npm manifests and their lockfiles now target 0.4.0. Verify the exact
 packed artifact from a clean checkout and run the release workflow with
-`dry_run: true` before pushing a version tag. Native folder save verification
-and remaining manual browser checks must be completed before publishing. Tags matching `v*` trigger
+`dry_run: true` before pushing a version tag. Record native folder save and manual browser coverage explicitly in the release
+notes; v0.4.0 ships with the remaining coverage limitations documented. Tags matching `v*` trigger
 npm publishing through `.github/workflows/release.yml`.

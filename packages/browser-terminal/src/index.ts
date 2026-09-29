@@ -12,6 +12,8 @@ import { PaneManager, type TerminalOptions } from './panes.js';
 import type { ITheme } from '@xterm/xterm';
 import { PanelHost, type PanelMode } from './panels.js';
 import type { Effects, EngineEvent, HostMsg, LayoutSnapshot } from './events.js';
+import { argumentTarget, completionEdit, type CompletionProvider } from './completion.js';
+export type { CompletionProvider, CompletionItem, ArgumentCompletionContext } from './completion.js';
 import type {
   CommandFn,
   CommandSpec,
@@ -91,6 +93,9 @@ let instanceLive = false;
 
 export class BrowserTerminal {
   private lastSnapshot: LayoutSnapshot | null = null;
+  private promptProvider: ((context: { session: number; pane: number }) => string) | null = null;
+  private readonly completionProviders = new Set<CompletionProvider>();
+  private readonly completionRequests = new Map<number, AbortController>();
   private globalToggleHandler: ((ev: KeyboardEvent) => void) | null = null;
   private disposed = false;
   private disposing = false;
@@ -142,7 +147,12 @@ export class BrowserTerminal {
     const paneManager = new PaneManager(
       mount,
       {
-        feed: (pane, data) => core.feed(pane, data) as Effects | null,
+        feed: (pane, data) => {
+          self.completionRequests.get(pane)?.abort();
+          const effects = core.feed(pane, data) as Effects | null;
+          if (effects?.completion) void self.completeArguments(pane, effects.completion);
+          return effects;
+        },
         resize: (pane, cols, rows) => core.resize(pane, cols, rows),
         dispatch: (msg) => core.dispatch(msg),
       },
@@ -163,6 +173,7 @@ export class BrowserTerminal {
           break;
       }
       paneManager.handleEvent(event);
+      if (event.type === 'layoutChanged') self?.refreshPrompt();
       if (event.type === 'sessionClosed') self?.notifyLifecycle(event);
     });
 
@@ -425,10 +436,58 @@ export class BrowserTerminal {
    * Include spacing, e.g. '/mnt '. Escape sequences and controls are stripped;
    * line breaks and tabs become spaces. Pass '' to restore the default.
    * Idle panes redraw immediately; busy panes update at their next prompt.
+   * A callback receives the visible pane/session and is recomputed on layout
+   * changes. Call refreshPrompt() when its host state changes.
    */
-  setPrompt(prefix: string): void {
+  setPrompt(prefix: string | ((context: { session: number; pane: number }) => string)): void {
     this.assertLive();
-    this.core.set_prompt(prefix);
+    this.promptProvider = typeof prefix === 'function' ? prefix : null;
+    if (typeof prefix === 'string') this.core.set_prompt(prefix);
+    else this.refreshPrompt();
+  }
+
+  /** Recompute a dynamic prompt after host state changes. Layout changes do this automatically. */
+  refreshPrompt(): void {
+    this.assertLive();
+    for (const request of this.completionRequests.values()) request.abort();
+    if (!this.promptProvider || !this.lastSnapshot) return;
+    const session = this.lastSnapshot.sessions.find(item => item.active)!.id;
+    for (const { pane } of this.lastSnapshot.panes) {
+      this.core.set_pane_prompt(pane, this.promptProvider({ session, pane }));
+    }
+  }
+
+  /** Add argument suggestions. Cleanup removes this provider and cancels pending suggestions. */
+  addCompletionProvider(provider: CompletionProvider): () => void {
+    this.assertLive();
+    this.completionProviders.add(provider);
+    return () => {
+      this.completionProviders.delete(provider);
+      for (const request of this.completionRequests.values()) request.abort();
+    };
+  }
+
+  private async completeArguments(pane: number, request: NonNullable<Effects['completion']>): Promise<void> {
+    const controller = new AbortController();
+    this.completionRequests.set(pane, controller);
+    try {
+      // Let the synchronous key echo settle before an async result redraws it.
+      await Promise.resolve();
+      if (controller.signal.aborted || this.disposed) return;
+      const target = argumentTarget(request.line, this.core.command_specs() as CommandSpec[]);
+      if (!target) return;
+      const context = { ...target, pane, session: request.session, signal: controller.signal };
+      const items = target.flags ? target.flags.map(value => ({ value }))
+        : target.shape === 'bool' && target.kind !== 'redirect' ? [{ value: 'true' }, { value: 'false' }]
+        : (await Promise.all([...this.completionProviders].map(provider => provider(context)))).flat();
+      if (controller.signal.aborted || this.disposed) return;
+      const edit = completionEdit(request.line, target.replaceStart, target.prefix, items, !!target.flags || target.shape === 'bool');
+      if (edit) this.core.apply_completion(pane, request.revision, request.line, edit.replacement, edit.candidates);
+    } catch {
+      // Missing directories, revoked permissions, or disconnected mounts leave input intact.
+    } finally {
+      if (this.completionRequests.get(pane) === controller) this.completionRequests.delete(pane);
+    }
   }
 
   /** Focus the active pane's terminal input. */
@@ -474,6 +533,8 @@ export class BrowserTerminal {
   dispose(): void {
     if (this.disposed || this.disposing) return;
     this.disposing = true;
+    for (const request of this.completionRequests.values()) request.abort();
+    this.completionRequests.clear();
     this.notifyLifecycle({ type: 'dispose' });
     this.lifecycleListeners.clear();
     this.commandOwners.clear();

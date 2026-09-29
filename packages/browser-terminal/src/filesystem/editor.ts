@@ -28,6 +28,7 @@ export function createTextEditor(options: { mount?: HTMLElement; confirmDiscard?
   const open = async (document: EditorDocument): Promise<void> => {
     let original = await document.read();
     let model = textModel(original);
+    let permissionState = await document.writePermission();
     document.signal.throwIfAborted();
     const previous = window.document.activeElement;
     const host = window.document.createElement('section');
@@ -63,6 +64,7 @@ export function createTextEditor(options: { mount?: HTMLElement; confirmDiscard?
       textarea.readOnly = !document.writable || model.mixed || document.signal.aborted;
       save.disabled = textarea.readOnly || busy;
       reload.disabled = busy || document.signal.aborted;
+      permission.hidden = !document.writable || permissionState === 'granted';
       permission.disabled = busy || !document.writable || document.signal.aborted;
       close.disabled = busy;
       title.textContent = `${document.path}${dirty() ? ' *' : ''}`;
@@ -76,6 +78,10 @@ export function createTextEditor(options: { mount?: HTMLElement; confirmDiscard?
       if (sameBytes(bytes, original)) return;
       busy = true; refresh();
       try { await document.save(bytes, original); original = bytes; }
+      catch (error) {
+        permissionState = await document.writePermission().catch(() => 'denied' as PermissionState);
+        throw error;
+      }
       finally { busy = false; refresh(); }
     };
     const save = button('Save', saveNow);
@@ -90,6 +96,8 @@ export function createTextEditor(options: { mount?: HTMLElement; confirmDiscard?
     permission.addEventListener('click', () => {
       if (busy) return;
       void document.requestWritePermission().then(granted => {
+        permissionState = granted ? 'granted' : 'denied';
+        refresh();
         status.textContent = granted ? 'Write permission granted. Choose Save to apply changes.' : 'Write permission denied.';
       }).catch(report);
     });

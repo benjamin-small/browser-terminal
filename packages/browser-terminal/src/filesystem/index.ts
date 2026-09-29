@@ -1,4 +1,5 @@
 import type { RedirectHandler, Value } from '../types.js';
+import type { ArgumentCompletionContext, CompletionItem } from '../completion.js';
 import type { ByteReader, DirectoryHandle, EditorDocument, Entry, FileHandle, FilesystemHost, FilesystemOptions, FsContext, WriteTransaction } from './types.js';
 import { checkRange, decodeText, integer, normalizePath, sameBytes } from './paths.js';
 import { openTransaction, WriteGate } from './io.js';
@@ -7,7 +8,7 @@ export { normalizePath } from './paths.js';
 export { openBlockDevice } from './devices.js';
 
 interface Mount { name: string; root: DirectoryHandle; writable: boolean; controller: AbortController }
-interface Location { path: string; parts: string[]; mount?: Mount; signal: AbortSignal; check(): void }
+interface Location { path: string; parts: string[]; relativeParts: string[]; mount?: Mount; signal: AbortSignal; check(): void }
 interface PermissionHandle {
   queryPermission?(options: { mode: 'readwrite' }): Promise<PermissionState>;
   requestPermission?(options: { mode: 'readwrite' }): Promise<PermissionState>;
@@ -73,6 +74,7 @@ export class BrowserFilesystem {
           this.directories.delete(event.session); this.cdQueues.delete(event.session);
         }
       }));
+      if (host.addCompletionProvider) this.cleanup.push(host.addCompletionProvider(context => this.completePath(context)));
       installed.set(host, this);
       this.cleanup.push(() => { installed.delete(host); });
     } catch (error) {
@@ -83,12 +85,45 @@ export class BrowserFilesystem {
   }
 
   private live(): void { this.controller.signal.throwIfAborted(); }
+  /** Filesystem arguments and redirect targets; never opens a picker or requests access. */
+  async completePath(context: ArgumentCompletionContext): Promise<CompletionItem[]> {
+    const { command, prefix, signal, session } = context;
+    if (context.kind !== 'redirect' && (context.flag || context.argumentIndex !== 0 || !['cat', 'cd', 'ls', 'edit', 'read-bytes'].includes(command))) return [];
+    const cwd = this.pwd(session);
+    const slash = prefix.lastIndexOf('/');
+    const parent = slash < 0 ? '' : prefix.slice(0, slash + 1);
+    const leaf = prefix.slice(slash + 1);
+    const entries: CompletionItem[] = [];
+    let scanned = 0;
+    for await (const entry of this.list(parent || '.', { session, signal })) {
+      signal.throwIfAborted();
+      if (++scanned > 5000 || entries.length >= 200) break;
+      if (!entry.name.startsWith(leaf) || (command === 'cd' && context.kind !== 'redirect' && entry.kind !== 'directory')) continue;
+      const directory = entry.kind === 'directory';
+      entries.push({ value: parent + entry.name + (directory ? '/' : ''), directory });
+    }
+    signal.throwIfAborted();
+    return this.pwd(session) === cwd ? entries : [];
+  }
   mount(name: string, root: DirectoryHandle | FileSystemDirectoryHandle, options: { writable?: boolean } = {}): void {
     this.live();
-    if (!name || name === '.' || name === '..' || /[/\0]/.test(name) || (name === 'dev' && this.options.devices)) throw new Error('Invalid or reserved mount name');
+    name = name.replace(/^\//, '');
+    if (!name || name.split('/').some(part => !part || part === '.' || part === '..' || part.includes('\0')) || name === 'mnt' || (name.split('/')[0] === 'dev' && this.options.devices)) throw new Error('Invalid or reserved mount name');
     if (this.mounts.has(name)) throw new Error(`Mount already exists: /${name}`);
+    if ([...this.mounts.keys()].some(existing => existing.startsWith(`${name}/`) || name.startsWith(`${existing}/`))) throw new Error('Mount paths cannot overlap');
     if (root.kind !== 'directory' || typeof (root as DirectoryHandle).values !== 'function') throw new Error('Expected a supported directory handle');
     this.mounts.set(name, { name, root: root as DirectoryHandle, writable: options.writable ?? false, controller: new AbortController() });
+    this.options.onDirectoryChange?.();
+  }
+  /** Map a selected local directory under /mnt, returning its full virtual path. */
+  mountLocal(root: DirectoryHandle | FileSystemDirectoryHandle, options: { writable?: boolean; name?: string } = {}): string {
+    this.live();
+    const base = options.name ?? root.name;
+    if (!base || base === '.' || base === '..' || /[/\0]/.test(base)) throw new Error('Invalid local mount name');
+    let name = `mnt/${base}`, suffix = 2;
+    while ([...this.mounts.keys()].some(existing => existing === name || existing.startsWith(`${name}/`))) name = `mnt/${base}-${suffix++}`;
+    this.mount(name, root, options);
+    return `/${name}`;
   }
   async mountScratch(name = 'scratch', options: { writable?: boolean } = {}): Promise<void> {
     if (!navigator.storage?.getDirectory) throw new Error('Browser-private storage is unavailable');
@@ -96,29 +131,42 @@ export class BrowserFilesystem {
   }
   unmount(name: string): void {
     this.live();
+    name = name.replace(/^\//, '');
     const mount = this.mounts.get(name);
     if (!mount) throw new Error(`Unknown mount: /${name}`);
     mount.controller.abort(new Error(`Unmounted /${name}`));
     this.mounts.delete(name);
     for (const [session, cwd] of this.directories) {
-      if (cwd === `/${name}` || cwd.startsWith(`/${name}/`)) this.directories.set(session, '/');
+      if (!this.mountAt(cwd) && !this.virtualDirectory(cwd) && !(cwd === '/dev' && this.options.devices)) this.directories.set(session, '/');
     }
+    this.options.onDirectoryChange?.();
   }
-  pwd(session: number): string { this.live(); return this.directories.get(session) ?? '/'; }
+  pwd(session: number): string {
+    this.live();
+    const initial = normalizePath(this.options.initialDirectory ?? '/');
+    const mounted = this.virtualDirectory(initial) || !!this.mountAt(initial);
+    return this.directories.get(session) ?? (mounted ? initial : '/');
+  }
+  private mountAt(path: string): Mount | undefined {
+    return [...this.mounts.values()].find(mount => path === `/${mount.name}` || path.startsWith(`/${mount.name}/`));
+  }
+  private virtualDirectory(path: string): boolean {
+    return path === '/' || path === '/mnt' || [...this.mounts.keys()].some(name => `/${name}`.startsWith(`${path}/`));
+  }
   private locate(path: string, ctx: FsContext): Location {
     this.live();
     const normalized = normalizePath(path, this.pwd(ctx.session));
     const parts = normalized.split('/').filter(Boolean);
-    const mount = this.mounts.get(parts[0] ?? '');
-    if (parts.length && !mount && !(parts[0] === 'dev' && this.options.devices)) throw new Error(`Unknown mount: /${parts[0]}`);
+    const mount = this.mountAt(normalized);
+    if (!mount && !this.virtualDirectory(normalized) && !(parts[0] === 'dev' && this.options.devices)) throw new Error(`Unknown mount: ${normalized}`);
     let session = this.sessions.get(ctx.session);
     if (!session) { session = new AbortController(); this.sessions.set(ctx.session, session); }
     const signal = AbortSignal.any([this.controller.signal, session.signal, ...(mount ? [mount.controller.signal] : []), ...(ctx.signal ? [ctx.signal] : [])]);
     const check = () => { signal.throwIfAborted(); };
     check();
-    return { path: normalized, parts, mount, signal, check };
+    return { path: normalized, parts, relativeParts: mount ? parts.slice(mount.name.split('/').length) : [], mount, signal, check };
   }
-  private async directory(location: Location, parts = location.parts.slice(1)): Promise<DirectoryHandle> {
+  private async directory(location: Location, parts = location.relativeParts): Promise<DirectoryHandle> {
     if (!location.mount) throw new Error(`Not a filesystem directory: ${location.path}`);
     let directory = location.mount.root;
     for (const name of parts) { location.check(); directory = await directory.getDirectoryHandle(name); }
@@ -126,9 +174,9 @@ export class BrowserFilesystem {
     return directory;
   }
   private async file(location: Location, create = false): Promise<FileHandle> {
-    if (location.parts.length < 2) throw new Error(`Not a file: ${location.path}`);
-    const directory = await this.directory(location, location.parts.slice(1, -1));
-    const handle = await directory.getFileHandle(location.parts.at(-1)!, { create });
+    if (!location.mount || !location.relativeParts.length) throw new Error(`Not a file: ${location.path}`);
+    const directory = await this.directory(location, location.relativeParts.slice(0, -1));
+    const handle = await directory.getFileHandle(location.relativeParts.at(-1)!, { create });
     location.check();
     return handle;
   }
@@ -138,9 +186,11 @@ export class BrowserFilesystem {
     const prior = this.cdQueues.get(ctx.session) ?? Promise.resolve();
     const result = prior.catch(() => {}).then(async () => {
       location.check();
-      if (location.path !== '/' && location.path !== '/dev') await this.directory(location);
+      if (location.mount) await this.directory(location);
+      else if (!this.virtualDirectory(location.path) && location.path !== '/dev') throw new Error(`Not a directory: ${location.path}`);
       location.check();
       this.directories.set(ctx.session, location.path);
+      this.options.onDirectoryChange?.();
     });
     this.cdQueues.set(ctx.session, result);
     try { await result; } finally { if (this.cdQueues.get(ctx.session) === result) this.cdQueues.delete(ctx.session); }
@@ -149,9 +199,12 @@ export class BrowserFilesystem {
     return this.listAt(this.locate(path, ctx), long);
   }
   private async *listAt(location: Location, long: boolean): AsyncGenerator<Entry> {
-    if (location.path === '/') {
-      for (const name of [...this.mounts.keys(), ...(this.options.devices ? ['dev'] : [])].sort()) {
-        location.check(); yield { name, kind: 'directory', path: `/${name}` };
+    if (!location.mount && this.virtualDirectory(location.path)) {
+      const prefix = location.path === '/' ? '/' : `${location.path}/`;
+      const paths = ['/mnt', ...[...this.mounts.keys()].map(name => `/${name}`), ...(this.options.devices ? ['/dev'] : [])];
+      const children = new Set(paths.filter(path => path.startsWith(prefix)).map(path => path.slice(prefix.length).split('/')[0]!).filter(Boolean));
+      for (const name of [...children].sort()) {
+        location.check(); yield { name, kind: 'directory', path: `${prefix}${name}` };
       }
     } else if (location.path === '/dev' && this.options.devices) {
       for (const name of ['null', 'zero']) yield { name, kind: 'device', path: `/dev/${name}` };
@@ -227,6 +280,7 @@ export class BrowserFilesystem {
   /** Call directly in a click handler; this never changes the mount's host policy. */
   async requestWritePermission(name: string): Promise<boolean> {
     this.live();
+    name = name.replace(/^\//, '');
     const mount = this.mounts.get(name);
     if (!mount?.writable) throw new Error('Mount is read-only; enable writes in the host');
     const permissions = mount.root as PermissionHandle;
@@ -295,6 +349,14 @@ export class BrowserFilesystem {
         location.check();
         if (bytes.length > this.maxEditorBytes) throw new Error(`Editor limit is ${this.maxEditorBytes} bytes`);
         await this.write(location.path, bytes, context, { expected: original });
+      },
+      writePermission: async () => {
+        location.check();
+        if (!location.mount?.writable) return 'denied';
+        const permissions = location.mount.root as PermissionHandle;
+        const state = permissions.queryPermission ? await permissions.queryPermission({ mode: 'readwrite' }) : 'granted';
+        location.check();
+        return state;
       },
       requestWritePermission: () => { location.check(); return this.requestWritePermission(location.mount!.name); },
     };

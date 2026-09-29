@@ -154,14 +154,12 @@ impl Mux {
     /// Update existing and future panes. Return whether the visible prefix changed.
     pub fn set_prompt_prefix(&mut self, prefix: &str) -> bool {
         let prefix = crate::render::diagnostic_text(prefix);
-        if prefix == self.prompt_prefix {
-            return false;
-        }
+        let mut changed = prefix != self.prompt_prefix;
         self.prompt_prefix = prefix;
         for pane in self.panes.values_mut() {
-            pane.editor.set_prompt_prefix(&self.prompt_prefix);
+            changed |= pane.editor.set_prompt_prefix(&self.prompt_prefix);
         }
-        true
+        changed
     }
 
     fn create_window(&mut self, name: String) -> Window {

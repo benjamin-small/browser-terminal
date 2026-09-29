@@ -375,6 +375,26 @@ impl BtermCore {
         Ok(())
     }
 
+    /// Set one pane's plain-text prefix, preserving its input and status.
+    pub fn set_pane_prompt(&self, pane: u32, prefix: &str) -> Result<(), JsValue> {
+        if !engine_alive() {
+            return Err(js_error("browser-terminal: engine is disposed"));
+        }
+        WasmAccess.with(|e| {
+            let Some(p) = e.mux.pane_mut(pane) else {
+                return;
+            };
+            let before = p.editor.prompt();
+            p.editor.set_prompt_prefix(prefix);
+            if p.editor.prompt() != before && !tasks::pane_busy(pane) {
+                let prompt = p.editor.prompt_line();
+                e.emit_output(pane, &prompt);
+            }
+        });
+        flush_events();
+        Ok(())
+    }
+
     /// Current layout snapshot (sessions, windows, pane rects).
     pub fn snapshot(&self) -> JsValue {
         if !engine_alive() {
@@ -414,6 +434,46 @@ impl BtermCore {
         }
         flush_events();
         to_js(&effects)
+    }
+
+    /// Current command metadata, including commands registered by the host.
+    pub fn command_specs(&self) -> JsValue {
+        if !engine_alive() {
+            return JsValue::NULL;
+        }
+        let specs = WasmAccess.with(|e| {
+            e.registry
+                .names()
+                .iter()
+                .filter_map(|name| e.registry.get(name).map(|c| c.signature().clone()))
+                .collect::<Vec<_>>()
+        });
+        to_js(&specs)
+    }
+
+    pub fn apply_completion(
+        &self,
+        pane: u32,
+        revision: u32,
+        line: &str,
+        replacement: Option<String>,
+        candidates: JsValue,
+    ) -> Result<(), JsValue> {
+        if !engine_alive() || tasks::pane_busy(pane) {
+            return Ok(());
+        }
+        let candidates: Vec<String> =
+            serde_wasm_bindgen::from_value(candidates).map_err(|e| js_error(e.to_string()))?;
+        WasmAccess.with(|e| {
+            if let Some(p) = e.mux.pane_mut(pane) {
+                let echo =
+                    p.editor
+                        .apply_completion(revision, line, replacement.as_deref(), &candidates);
+                e.emit_output(pane, &echo);
+            }
+        });
+        flush_events();
+        Ok(())
     }
 
     pub fn resize(&self, pane: u32, cols: u16, rows: u16) {

@@ -50,9 +50,14 @@ export interface EditorDocument {
   readonly signal: AbortSignal;
   read(): Promise<Uint8Array>;
   save(bytes: Uint8Array, original: Uint8Array): Promise<void>;
+  writePermission(): Promise<PermissionState>;
   requestWritePermission(): Promise<boolean>;
 }
 export interface FilesystemOptions {
+  /** Notify the host to refresh directory-dependent UI after cd or mount changes. */
+  onDirectoryChange?: () => void;
+  /** Initial cwd for sessions without an explicit cd; falls back to / if unmounted. */
+  initialDirectory?: string;
   maxReadBytes?: number;
   maxEditorBytes?: number;
   chunkSize?: number;
@@ -61,6 +66,7 @@ export interface FilesystemOptions {
 }
 /** Minimal host contract also supports deterministic tests without loading WASM. */
 export interface FilesystemHost {
+  addCompletionProvider?(provider: import('../completion.js').CompletionProvider): () => void;
   registerOwnedCommand(spec: CommandSpec, fn: CommandFn): () => void;
   onLifecycle(listener: (event: { type: 'dispose' } | { type: 'sessionClosed'; session: number }) => void): () => void;
 }

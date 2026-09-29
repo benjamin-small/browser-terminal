@@ -21,7 +21,7 @@ function shadow(selector: string) {
 async function waitForTerminal(page: import('@playwright/test').Page) {
   await page.waitForFunction(
     () =>
-      !!document
+      !!window.bt && !!document
         .querySelector('[data-browser-terminal]')
         ?.shadowRoot?.querySelector('.xterm-helper-textarea'),
   );
@@ -418,6 +418,8 @@ test('host redirects preserve values, append intent, and visible diagnostics', a
   await waitForTerminal(page);
   const result = await page.evaluate(async () => {
     const bt = window.bt;
+    // The demo enables OPFS redirects; exercise the library's disabled state explicitly.
+    bt.setRedirectHandler(null);
     const disabled = await bt.run('echo hi > out').then(() => false, () => true);
     const store = new Map<string, import('@benjamin-small/browser-terminal').Value>([
       ['/in', [{ n: 1 }, { n: 2 }]],

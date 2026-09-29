@@ -247,7 +247,7 @@ async function main(): Promise<void> {
   );
 
   // Expose for programmatic-run experiments in the console.
-  filesystemDemo(bt);
+  await filesystemDemo(bt);
   window.bt = bt;
 }
 
