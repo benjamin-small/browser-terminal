@@ -293,6 +293,41 @@ print a prompt. The prefix is plain text: escape sequences and controls are
 removed, and newlines, tabs, and carriage returns become spaces. `setPrompt()`
 throws after disposal.
 
+For a directory-aware prompt, supply a synchronous callback:
+
+```ts
+bt.setPrompt(({ session }) => `${filesystem.pwd(session)} `);
+```
+
+Callbacks refresh when the visible layout changes. Call `bt.refreshPrompt()`
+when host state changes; the filesystem's `onDirectoryChange` option can do
+this after navigation and mount changes. Passing a string restores a static
+prefix for all panes.
+
+Tab completes built-in and host-registered command names at the end of the
+input line, including multiword commands and command positions after `|` or
+`;`. It expands a shared prefix or lists ambiguous candidates without executing
+anything. Command signatures also provide flag names (including `--help`) and
+`true`/`false` suggestions for boolean arguments and flag values. The filesystem
+adapter adds path arguments and redirect targets. Completion does not evaluate
+closures or interpolated variables.
+
+Hosts can add command-specific argument choices:
+
+```ts
+const removeCompletion = bt.addCompletionProvider(context => {
+  if (context.command !== 'theme' || context.argumentIndex !== 0 || context.flag) return [];
+  return [{ value: 'dark' }, { value: 'light' }];
+});
+```
+
+Providers receive the command, preceding arguments, current prefix, positional
+index or flag name, session/pane IDs, and an abort signal. They may return a
+promise. Values are filtered by prefix and quoted for insertion; use
+`{ value: 'folder/', directory: true }` for a directory. Call the returned
+cleanup function when unregistering the feature. Delayed results cannot replace
+newer edits. Unrestricted text and numeric arguments have no automatic choices.
+
 Inject application state and reference it as `$name`, instead of pasting it
 into the command text:
 
@@ -373,3 +408,20 @@ because its `boolean` has nowhere to put an error. So `undefined` from
 - [Issues](https://github.com/benjamin-small/browser-terminal/issues)
 
 Apache-2.0
+
+## Optional browser filesystem and editor
+
+Import `installFilesystem` from
+`@benjamin-small/browser-terminal/filesystem` to connect directory handles to
+`pwd`, `cd`, structured `ls`, `cat`, `read-bytes`, and `edit`. The optional
+`@benjamin-small/browser-terminal/filesystem/editor` export supplies a small
+text editor; hosts can provide their own instead.
+
+Mounts are read-only by default. Local folder selection needs browser support
+and a user gesture; writing requires host opt-in and browser permission.
+Redirection is installed separately so the adapter does not replace existing
+host hooks. OPFS scratch storage and experimental file-backed block access are
+also available.
+
+See the [filesystem guide](https://github.com/benjamin-small/browser-terminal/blob/main/docs/filesystem.md)
+for setup, command examples, byte I/O, cancellation, and save limitations.

@@ -104,8 +104,8 @@ impl FinalConsumer for CollectingConsumer {
 
     fn finish(&mut self) -> PipelineData {
         let items = std::mem::take(&mut self.items);
-        let all_rendered = !items.is_empty()
-            && items.iter().all(|i| matches!(i, PipelineData::Rendered(_)));
+        let all_rendered =
+            !items.is_empty() && items.iter().all(|i| matches!(i, PipelineData::Rendered(_)));
         if all_rendered {
             let joined = items
                 .into_iter()
@@ -367,7 +367,11 @@ async fn eval_call(
 /// these gets plain `Str` (via `into_value`), which is where the trust drops.
 async fn send_lines(text: &str, output: &crate::chan::Sender) {
     for line in text.lines() {
-        if output.send(PipelineData::Rendered(line.to_string())).await.is_err() {
+        if output
+            .send(PipelineData::Rendered(line.to_string()))
+            .await
+            .is_err()
+        {
             return;
         }
     }
@@ -385,7 +389,10 @@ pub fn block_on<T>(fut: impl std::future::Future<Output = T>) -> T {
             noop_raw_waker()
         }
         fn noop(_: *const ()) {}
-        RawWaker::new(std::ptr::null(), &RawWakerVTable::new(clone, noop, noop, noop))
+        RawWaker::new(
+            std::ptr::null(),
+            &RawWakerVTable::new(clone, noop, noop, noop),
+        )
     }
 
     // SAFETY: the vtable functions are all no-ops over a null pointer.
@@ -404,8 +411,8 @@ pub fn block_on<T>(fut: impl std::future::Future<Output = T>) -> T {
 mod tests {
     use super::*;
     use crate::registry::{ready, HostHooks, LocalBoxFuture};
-    use crate::value::Value;
     use crate::signature::{BoundCall, Shape, Signature};
+    use crate::value::Value;
 
     struct NullHost;
     impl HostHooks for NullHost {}
@@ -514,7 +521,10 @@ mod tests {
         assert!(out.errors.is_empty());
         let (results, error) = block_on(eval_line(&out.line, &registry(), &ctx(), &Scope::new()));
         assert_eq!(results, vec![PipelineData::Value(Value::Int(1))]);
-        assert!(error.expect("second pipeline fails").msg.contains("unknown command"));
+        assert!(error
+            .expect("second pipeline fails")
+            .msg
+            .contains("unknown command"));
     }
 
     #[test]
@@ -547,7 +557,11 @@ mod tests {
         // The first error wins: a later stage must not overwrite it with a
         // downstream symptom of the same failure.
         let err = eval("emit 1 | boom | double").expect_err("boom should fail");
-        assert!(err.msg.contains("boom"), "wrong error survived: {}", err.msg);
+        assert!(
+            err.msg.contains("boom"),
+            "wrong error survived: {}",
+            err.msg
+        );
     }
 
     #[test]
@@ -591,17 +605,26 @@ mod tests {
         // `sort-by --help` has a `--reverse` line; grep keeps only it.
         let out = crate::parse::parse("sort-by --help | grep reverse");
         assert!(out.errors.is_empty(), "{:?}", out.errors);
-        let (mut results, error) =
-            block_on(eval_line(&out.line, &registry, &ctx, &Scope::new()));
+        let (mut results, error) = block_on(eval_line(&out.line, &registry, &ctx, &Scope::new()));
         assert!(error.is_none(), "{:?}", error);
-        let value = results.pop().map(PipelineData::into_value).unwrap_or(Value::Null);
+        let value = results
+            .pop()
+            .map(PipelineData::into_value)
+            .unwrap_or(Value::Null);
         let text = match value {
             Value::Str(s) => s,
-            Value::List(items) => items.iter().map(|v| v.as_str().unwrap_or("")).collect::<Vec<_>>().join("\n"),
+            Value::List(items) => items
+                .iter()
+                .map(|v| v.as_str().unwrap_or(""))
+                .collect::<Vec<_>>()
+                .join("\n"),
             other => panic!("unexpected: {other:?}"),
         };
         assert!(text.contains("reverse"), "no reverse line: {text:?}");
-        assert!(!text.contains("Usage"), "did not filter to one line: {text:?}");
+        assert!(
+            !text.contains("Usage"),
+            "did not filter to one line: {text:?}"
+        );
     }
 
     #[test]
@@ -629,8 +652,7 @@ mod tests {
         };
         let out = crate::parse::parse("sort-by --help");
         assert!(out.errors.is_empty(), "{:?}", out.errors);
-        let (mut results, error) =
-            block_on(eval_line(&out.line, &registry, &ctx, &Scope::new()));
+        let (mut results, error) = block_on(eval_line(&out.line, &registry, &ctx, &Scope::new()));
         assert!(error.is_none(), "{:?}", error);
         // A bare --help stays one Rendered block (verbatim, styled), NOT a
         // table of lines.

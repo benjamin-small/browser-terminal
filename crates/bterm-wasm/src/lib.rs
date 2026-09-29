@@ -17,8 +17,8 @@
 mod convert;
 mod js_command;
 mod js_fn;
-mod js_regex;
 mod js_redirect;
+mod js_regex;
 mod tasks;
 
 use bterm_core::abort::Abortable;
@@ -128,8 +128,16 @@ fn js_error(msg: impl AsRef<str>) -> JsValue {
 /// with no check would silently continue.
 fn run_rejection(msg: &str, sink: &bterm_core::sink::CollectingSink) -> JsValue {
     let e = js_sys::Error::new(msg);
-    let _ = js_sys::Reflect::set(&e, &JsValue::from_str("log"), &string_array(&sink.log_lines()));
-    let _ = js_sys::Reflect::set(&e, &JsValue::from_str("err"), &string_array(&sink.err_lines()));
+    let _ = js_sys::Reflect::set(
+        &e,
+        &JsValue::from_str("log"),
+        &string_array(&sink.log_lines()),
+    );
+    let _ = js_sys::Reflect::set(
+        &e,
+        &JsValue::from_str("err"),
+        &string_array(&sink.err_lines()),
+    );
     e.into()
 }
 
@@ -248,9 +256,7 @@ fn var_target(opts: &JsValue) -> Result<VarTarget, JsValue> {
                 .ok()
                 .and_then(|v| v.as_f64())
                 .ok_or_else(|| {
-                    js_error(
-                        "{ scope: 'session' } needs a `session` id from snapshot.sessions",
-                    )
+                    js_error("{ scope: 'session' } needs a `session` id from snapshot.sessions")
                 })?;
             Ok(VarTarget::Session(id as u32))
         }
@@ -307,7 +313,9 @@ impl BtermCore {
         let json = js_sys::JSON::stringify(&msg)
             .map_err(|_| js_error("invalid HostMsg: not JSON-serializable"))?;
         let msg: bterm_core::protocol::HostMsg = serde_json::from_str(
-            &json.as_string().ok_or_else(|| js_error("invalid HostMsg"))?,
+            &json
+                .as_string()
+                .ok_or_else(|| js_error("invalid HostMsg"))?,
         )
         .map_err(|e| js_error(format!("invalid HostMsg: {e}")))?;
 
@@ -367,6 +375,26 @@ impl BtermCore {
         Ok(())
     }
 
+    /// Set one pane's plain-text prefix, preserving its input and status.
+    pub fn set_pane_prompt(&self, pane: u32, prefix: &str) -> Result<(), JsValue> {
+        if !engine_alive() {
+            return Err(js_error("browser-terminal: engine is disposed"));
+        }
+        WasmAccess.with(|e| {
+            let Some(p) = e.mux.pane_mut(pane) else {
+                return;
+            };
+            let before = p.editor.prompt();
+            p.editor.set_prompt_prefix(prefix);
+            if p.editor.prompt() != before && !tasks::pane_busy(pane) {
+                let prompt = p.editor.prompt_line();
+                e.emit_output(pane, &prompt);
+            }
+        });
+        flush_events();
+        Ok(())
+    }
+
     /// Current layout snapshot (sessions, windows, pane rects).
     pub fn snapshot(&self) -> JsValue {
         if !engine_alive() {
@@ -406,6 +434,46 @@ impl BtermCore {
         }
         flush_events();
         to_js(&effects)
+    }
+
+    /// Current command metadata, including commands registered by the host.
+    pub fn command_specs(&self) -> JsValue {
+        if !engine_alive() {
+            return JsValue::NULL;
+        }
+        let specs = WasmAccess.with(|e| {
+            e.registry
+                .names()
+                .iter()
+                .filter_map(|name| e.registry.get(name).map(|c| c.signature().clone()))
+                .collect::<Vec<_>>()
+        });
+        to_js(&specs)
+    }
+
+    pub fn apply_completion(
+        &self,
+        pane: u32,
+        revision: u32,
+        line: &str,
+        replacement: Option<String>,
+        candidates: JsValue,
+    ) -> Result<(), JsValue> {
+        if !engine_alive() || tasks::pane_busy(pane) {
+            return Ok(());
+        }
+        let candidates: Vec<String> =
+            serde_wasm_bindgen::from_value(candidates).map_err(|e| js_error(e.to_string()))?;
+        WasmAccess.with(|e| {
+            if let Some(p) = e.mux.pane_mut(pane) {
+                let echo =
+                    p.editor
+                        .apply_completion(revision, line, replacement.as_deref(), &candidates);
+                e.emit_output(pane, &echo);
+            }
+        });
+        flush_events();
+        Ok(())
     }
 
     pub fn resize(&self, pane: u32, cols: u16, rows: u16) {
@@ -725,9 +793,7 @@ impl BtermCore {
     /// same tick rejects it with `aborted`.
     pub fn run(&self, pane: u32, line: String) -> js_sys::Promise {
         if !engine_alive() {
-            return js_sys::Promise::reject(&js_error(
-                "browser-terminal: engine is disposed",
-            ));
+            return js_sys::Promise::reject(&js_error("browser-terminal: engine is disposed"));
         }
         let run_id = tasks::next_id();
         let Ok(controller) = web_sys::AbortController::new() else {

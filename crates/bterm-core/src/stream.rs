@@ -76,7 +76,9 @@ mod tests {
         let (tx, mut rx) = channel(8);
         block_on(async {
             let list = Value::List(vec![Value::Int(1), Value::Int(2), Value::Int(3)]);
-            flatten(PipelineData::Value(list), &tx).await.expect("flatten");
+            flatten(PipelineData::Value(list), &tx)
+                .await
+                .expect("flatten");
             drop(tx);
             let mut seen = Vec::new();
             while let Some(item) = rx.recv().await {
@@ -94,7 +96,9 @@ mod tests {
         let (tx, mut rx) = channel(8);
         block_on(async {
             let list = Value::List(vec![Value::Int(7)]);
-            flatten(PipelineData::Value(list), &tx).await.expect("flatten");
+            flatten(PipelineData::Value(list), &tx)
+                .await
+                .expect("flatten");
             drop(tx);
             assert_eq!(
                 collect(&mut rx).await,
@@ -109,7 +113,9 @@ mod tests {
         // always wrapping: `echo 5` must stay 5, not become [5].
         let (tx, mut rx) = channel(8);
         block_on(async {
-            flatten(PipelineData::Value(Value::Int(5)), &tx).await.expect("flatten");
+            flatten(PipelineData::Value(Value::Int(5)), &tx)
+                .await
+                .expect("flatten");
             drop(tx);
             assert_eq!(collect(&mut rx).await, PipelineData::Value(Value::Int(5)));
         });
@@ -139,7 +145,9 @@ mod tests {
         let (down_tx, mut down_rx) = channel(8);
         block_on(async {
             let list = Value::List(vec![Value::Int(1), Value::Int(2)]);
-            flatten(PipelineData::Value(list), &up_tx).await.expect("flatten");
+            flatten(PipelineData::Value(list), &up_tx)
+                .await
+                .expect("flatten");
             drop(up_tx);
 
             down_tx.share_batching_with(&up_rx);
@@ -165,7 +173,9 @@ mod tests {
                 Value::List(vec![Value::Int(1), Value::Int(2)]),
                 Value::List(vec![Value::Int(3)]),
             ]);
-            flatten(PipelineData::Value(nested), &tx).await.expect("flatten");
+            flatten(PipelineData::Value(nested), &tx)
+                .await
+                .expect("flatten");
             drop(tx);
             let mut count = 0;
             while rx.recv().await.is_some() {

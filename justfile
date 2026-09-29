@@ -26,6 +26,10 @@ build: wasm
 test:
     cargo test --workspace
 
+# Pure adapter contract tests against a deterministic filesystem.
+test-filesystem: build
+    npm --prefix packages/browser-terminal run test:filesystem
+
 test-wasm:
     cargo test -p bterm-wasm --target wasm32-unknown-unknown
 

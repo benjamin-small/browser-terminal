@@ -54,3 +54,31 @@ Run `just demo`, open http://localhost:5173, then walk through:
 - [ ] Minimize (─) → pills only; pill click restores
 - [ ] Ctrl-B d hides the panel; Ctrl+` (globalToggle) brings it back
 - [ ] `bt.dispose()` in console removes everything; no stray keys/listeners
+
+## Filesystem and editing (record browser/version)
+- [ ] `ca` then Tab completes `cat`; `cat welcome.txt` displays its contents
+- [ ] `cat ` then Tab lists entries; filename prefixes and quoted paths complete
+- [ ] `cd ` then Tab suggests directories; `ls --lo` then Tab completes `--long`
+- [ ] Typing while a completion is pending preserves the newer input
+- [ ] Tab completes registered and multiword commands after pipes; ambiguous names list candidates
+- [ ] Prompt shows cwd after `cd`, session switches, pane splits, and unmount
+- [ ] Startup uses `/scratch`; `ls`, editing, saving, and redirects need no permissions
+- [ ] On HTTPS/localhost in Chrome and Edge, Connect local folder requests read access and mounts even when write permission is missing
+- [ ] Cancelling the picker leaves mounts and cwd unchanged
+- [ ] Pending selection disables duplicate attempts; cancellation and browser errors show a useful status and re-enable connection
+- [ ] A rejected selection reports the original error; AbortError is not presented as proof of cancellation
+- [ ] Select a disposable fixture folder; `ls`, nested `cd`, and `cat` read its actual files
+- [ ] A selected folder appears at `/mnt/<folder-name>`; duplicate names use `-2`, `-3`, etc.
+- [ ] `ls /mnt` lists connected folders; Tab completes their paths
+- [ ] `cd ..` from its mount root reaches virtual `/mnt`, then `/`, never the real parent folder
+- [ ] Editing and Save request no implicit write grant; Enable writes appears only if permission is missing and prompts directly
+- [ ] Grant write permission, save, and verify the file bytes with a native editor
+- [ ] Denied/revoked permission leaves editor text available for export
+- [ ] Modify a file externally; Save reports a conflict and retains the unsaved buffer
+- [ ] LF/CRLF and UTF-8 BOM survive save; mixed endings are read-only
+- [ ] Close/Reload dirty text offers a discard decision; Ctrl/Cmd-S saves and focus returns on close
+- [ ] Edit welcome.txt, reload page, and verify automatic `/scratch` startup and saved contents
+- [ ] Browser files returns to `/scratch` after visiting a local mount
+- [ ] On Firefox and Safari, verify unavailable picker messaging and test scratch capabilities
+- [ ] `read-bytes /dev/zero --length 16` works; unbounded reads and device redirects fail
+- [ ] Unmount/dispose retains dirty text for export and rejects later file writes

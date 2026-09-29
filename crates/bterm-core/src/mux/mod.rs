@@ -25,7 +25,10 @@ pub enum Dir {
 #[derive(Clone, Debug, PartialEq)]
 pub enum LayoutNode {
     Leaf(PaneId),
-    Split { dir: Dir, children: Vec<(f32, LayoutNode)> },
+    Split {
+        dir: Dir,
+        children: Vec<(f32, LayoutNode)>,
+    },
 }
 
 /// Fractional rectangle in [0,1] pane-container space. TS turns these into
@@ -39,7 +42,12 @@ pub struct Rect {
 }
 
 impl Rect {
-    pub const FULL: Rect = Rect { x: 0.0, y: 0.0, w: 1.0, h: 1.0 };
+    pub const FULL: Rect = Rect {
+        x: 0.0,
+        y: 0.0,
+        w: 1.0,
+        h: 1.0,
+    };
 
     fn center(&self) -> (f32, f32) {
         (self.x + self.w / 2.0, self.y + self.h / 2.0)
@@ -56,7 +64,12 @@ pub struct PaneShell {
 
 impl PaneShell {
     fn new() -> Self {
-        PaneShell { editor: LineEditor::new(), cols: 80, rows: 24, running: false }
+        PaneShell {
+            editor: LineEditor::new(),
+            cols: 80,
+            rows: 24,
+            running: false,
+        }
     }
 }
 
@@ -141,14 +154,12 @@ impl Mux {
     /// Update existing and future panes. Return whether the visible prefix changed.
     pub fn set_prompt_prefix(&mut self, prefix: &str) -> bool {
         let prefix = crate::render::diagnostic_text(prefix);
-        if prefix == self.prompt_prefix {
-            return false;
-        }
+        let mut changed = prefix != self.prompt_prefix;
         self.prompt_prefix = prefix;
         for pane in self.panes.values_mut() {
-            pane.editor.set_prompt_prefix(&self.prompt_prefix);
+            changed |= pane.editor.set_prompt_prefix(&self.prompt_prefix);
         }
-        true
+        changed
     }
 
     fn create_window(&mut self, name: String) -> Window {
@@ -170,7 +181,13 @@ impl Mux {
         windows.insert(wid, window);
         self.sessions.insert(
             sid,
-            Session { id: sid, name, windows, active_window: wid, vars: Scope::new() },
+            Session {
+                id: sid,
+                name,
+                windows,
+                active_window: wid,
+                vars: Scope::new(),
+            },
         );
         sid
     }
@@ -202,7 +219,11 @@ impl Mux {
     pub fn session_of_pane(&self, pane: PaneId) -> Option<SessionId> {
         self.sessions
             .values()
-            .find(|s| s.windows.values().any(|w| leaves(&w.layout).contains(&pane)))
+            .find(|s| {
+                s.windows
+                    .values()
+                    .any(|w| leaves(&w.layout).contains(&pane))
+            })
             .map(|s| s.id)
     }
 
@@ -238,7 +259,10 @@ impl Mux {
     /// Kill the active pane, collapsing the tree. Cascades window → session;
     /// a fresh "main" session is created if the last one closes.
     pub fn kill_active_pane(&mut self) -> MuxOutcome {
-        let mut outcome = MuxOutcome { layout_changed: true, ..Default::default() };
+        let mut outcome = MuxOutcome {
+            layout_changed: true,
+            ..Default::default()
+        };
         let sid = self.active_session;
         let target = self.active_pane();
         self.panes.shift_remove(&target);
@@ -296,7 +320,11 @@ impl Mux {
         session.active_window = wid;
         (
             pane,
-            MuxOutcome { opened_panes: vec![pane], layout_changed: true, ..Default::default() },
+            MuxOutcome {
+                opened_panes: vec![pane],
+                layout_changed: true,
+                ..Default::default()
+            },
         )
     }
 
@@ -318,7 +346,10 @@ impl Mux {
             };
             session.active_window = ids[next];
         }
-        MuxOutcome { layout_changed: true, ..Default::default() }
+        MuxOutcome {
+            layout_changed: true,
+            ..Default::default()
+        }
     }
 
     pub fn toggle_zoom(&mut self) -> MuxOutcome {
@@ -327,7 +358,10 @@ impl Mux {
             Some(_) => None,
             None => Some(window.active_pane),
         };
-        MuxOutcome { layout_changed: true, ..Default::default() }
+        MuxOutcome {
+            layout_changed: true,
+            ..Default::default()
+        }
     }
 
     pub fn focus(&mut self, dir: FocusDir) -> MuxOutcome {
@@ -374,7 +408,10 @@ impl Mux {
         };
         window.active_pane = next;
         window.zoomed = window.zoomed.map(|_| next);
-        MuxOutcome { layout_changed: true, ..Default::default() }
+        MuxOutcome {
+            layout_changed: true,
+            ..Default::default()
+        }
     }
 
     /// Focus a specific pane (host click). No-op if it isn't in the active
@@ -388,7 +425,10 @@ impl Mux {
                 if leaves(&window.layout).contains(&pane) {
                     session.active_window = *wid;
                     window.active_pane = pane;
-                    return MuxOutcome { layout_changed: true, ..Default::default() };
+                    return MuxOutcome {
+                        layout_changed: true,
+                        ..Default::default()
+                    };
                 }
             }
         }
@@ -403,7 +443,11 @@ impl Mux {
         let pane = s.windows[&s.active_window].active_pane;
         (
             pane,
-            MuxOutcome { opened_panes: vec![pane], layout_changed: true, ..Default::default() },
+            MuxOutcome {
+                opened_panes: vec![pane],
+                layout_changed: true,
+                ..Default::default()
+            },
         )
     }
 
@@ -421,7 +465,10 @@ impl Mux {
             };
             self.active_session = ids[next];
         }
-        MuxOutcome { layout_changed: true, ..Default::default() }
+        MuxOutcome {
+            layout_changed: true,
+            ..Default::default()
+        }
     }
 
     /// Focus a window by id in the active session (status-bar tab click).
@@ -432,7 +479,10 @@ impl Mux {
             .expect("active session");
         if session.windows.contains_key(&window) && session.active_window != window {
             session.active_window = window;
-            return MuxOutcome { layout_changed: true, ..Default::default() };
+            return MuxOutcome {
+                layout_changed: true,
+                ..Default::default()
+            };
         }
         MuxOutcome::default()
     }
@@ -441,7 +491,10 @@ impl Mux {
     pub fn focus_session(&mut self, session: SessionId) -> MuxOutcome {
         if self.sessions.contains_key(&session) && self.active_session != session {
             self.active_session = session;
-            return MuxOutcome { layout_changed: true, ..Default::default() };
+            return MuxOutcome {
+                layout_changed: true,
+                ..Default::default()
+            };
         }
         MuxOutcome::default()
     }
@@ -450,7 +503,10 @@ impl Mux {
         match self.sessions.values().find(|s| s.name == name) {
             Some(s) => {
                 self.active_session = s.id;
-                Ok(MuxOutcome { layout_changed: true, ..Default::default() })
+                Ok(MuxOutcome {
+                    layout_changed: true,
+                    ..Default::default()
+                })
             }
             None => Err(format!("no session named `{name}`")),
         }
@@ -479,7 +535,10 @@ impl Mux {
                 let clamped = fraction.clamp(0.05, pair_total - 0.05);
                 children[last].0 = clamped;
                 children[last + 1].0 = pair_total - clamped;
-                return MuxOutcome { layout_changed: true, ..Default::default() };
+                return MuxOutcome {
+                    layout_changed: true,
+                    ..Default::default()
+                };
             }
         }
         MuxOutcome::default()
@@ -535,19 +594,39 @@ fn collect_dividers(
     for (i, (fraction, child)) in children.iter().enumerate() {
         let share = fraction / total;
         let sub = match dir {
-            Dir::Row => Rect { x: rect.x + rect.w * offset, y: rect.y, w: rect.w * share, h: rect.h },
-            Dir::Col => Rect { x: rect.x, y: rect.y + rect.h * offset, w: rect.w, h: rect.h * share },
+            Dir::Row => Rect {
+                x: rect.x + rect.w * offset,
+                y: rect.y,
+                w: rect.w * share,
+                h: rect.h,
+            },
+            Dir::Col => Rect {
+                x: rect.x,
+                y: rect.y + rect.h * offset,
+                w: rect.w,
+                h: rect.h * share,
+            },
         };
         if i + 1 < children.len() {
             let boundary = offset + share;
             let (strip, span_start, span_size) = match dir {
                 Dir::Row => (
-                    Rect { x: rect.x + rect.w * boundary, y: rect.y, w: 0.0, h: rect.h },
+                    Rect {
+                        x: rect.x + rect.w * boundary,
+                        y: rect.y,
+                        w: 0.0,
+                        h: rect.h,
+                    },
                     rect.x,
                     rect.w,
                 ),
                 Dir::Col => (
-                    Rect { x: rect.x, y: rect.y + rect.h * boundary, w: rect.w, h: 0.0 },
+                    Rect {
+                        x: rect.x,
+                        y: rect.y + rect.h * boundary,
+                        w: rect.w,
+                        h: 0.0,
+                    },
                     rect.y,
                     rect.h,
                 ),
@@ -661,7 +740,10 @@ fn remove_leaf(node: &LayoutNode, target: PaneId) -> Option<LayoutNode> {
                     for (f, _) in &mut kept {
                         *f /= total;
                     }
-                    Some(LayoutNode::Split { dir: *dir, children: kept })
+                    Some(LayoutNode::Split {
+                        dir: *dir,
+                        children: kept,
+                    })
                 }
             }
         }
@@ -703,10 +785,40 @@ mod tests {
         assert_eq!(rects.len(), 3);
         assert_covers(&rects);
 
-        let find = |p: PaneId| rects.iter().find(|(q, _)| *q == p).map(|(_, r)| *r).expect("pane rect");
-        assert_eq!(find(first), Rect { x: 0.0, y: 0.0, w: 0.5, h: 1.0 });
-        assert_eq!(find(second), Rect { x: 0.5, y: 0.0, w: 0.5, h: 0.5 });
-        assert_eq!(find(third), Rect { x: 0.5, y: 0.5, w: 0.5, h: 0.5 });
+        let find = |p: PaneId| {
+            rects
+                .iter()
+                .find(|(q, _)| *q == p)
+                .map(|(_, r)| *r)
+                .expect("pane rect")
+        };
+        assert_eq!(
+            find(first),
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 0.5,
+                h: 1.0
+            }
+        );
+        assert_eq!(
+            find(second),
+            Rect {
+                x: 0.5,
+                y: 0.0,
+                w: 0.5,
+                h: 0.5
+            }
+        );
+        assert_eq!(
+            find(third),
+            Rect {
+                x: 0.5,
+                y: 0.5,
+                w: 0.5,
+                h: 0.5
+            }
+        );
     }
 
     #[test]

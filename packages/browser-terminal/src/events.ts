@@ -69,4 +69,5 @@ export interface Effects {
   echo: string;
   submitted: string[];
   ctrl_c: boolean;
+  completion?: { line: string; revision: number; session: number } | null;
 }

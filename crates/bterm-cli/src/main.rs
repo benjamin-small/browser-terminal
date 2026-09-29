@@ -138,7 +138,11 @@ fn main() {
     println!("bterm — structured shell (native harness). Ctrl-D to exit.");
     let mut last_ok = true;
     loop {
-        let prompt = if last_ok { "\x1b[32m❯\x1b[0m " } else { "\x1b[31m❯\x1b[0m " };
+        let prompt = if last_ok {
+            "\x1b[32m❯\x1b[0m "
+        } else {
+            "\x1b[31m❯\x1b[0m "
+        };
         match editor.readline(prompt) {
             Ok(src) => {
                 if src.trim().is_empty() {
@@ -197,8 +201,14 @@ mod tests {
         // the only ones that may carry SGR at all -- but the invariant is
         // unconditional so no future record type can slip through.
         let raw = wire_text(&Record::raw_log("\x1b[8mconceal"));
-        assert!(raw.starts_with("\x1b[0m"), "raw record not reset-prefixed: {raw:?}");
-        assert!(raw.ends_with("conceal"), "a partial write must stay partial: {raw:?}");
+        assert!(
+            raw.starts_with("\x1b[0m"),
+            "raw record not reset-prefixed: {raw:?}"
+        );
+        assert!(
+            raw.ends_with("conceal"),
+            "a partial write must stay partial: {raw:?}"
+        );
 
         let cooked = wire_text(&Record::log("plain"));
         assert_eq!(cooked, "\x1b[0mplain\n");

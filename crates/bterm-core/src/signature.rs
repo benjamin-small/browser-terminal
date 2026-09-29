@@ -79,22 +79,45 @@ impl Signature {
     }
 
     pub fn required_arg(mut self, name: &str, shape: Shape, desc: &str) -> Self {
-        self.required.push(PosArg { name: name.into(), shape, desc: desc.into() });
+        self.required.push(PosArg {
+            name: name.into(),
+            shape,
+            desc: desc.into(),
+        });
         self
     }
 
     pub fn optional_arg(mut self, name: &str, shape: Shape, desc: &str) -> Self {
-        self.optional.push(PosArg { name: name.into(), shape, desc: desc.into() });
+        self.optional.push(PosArg {
+            name: name.into(),
+            shape,
+            desc: desc.into(),
+        });
         self
     }
 
     pub fn rest_arg(mut self, name: &str, shape: Shape, desc: &str) -> Self {
-        self.rest = Some(PosArg { name: name.into(), shape, desc: desc.into() });
+        self.rest = Some(PosArg {
+            name: name.into(),
+            shape,
+            desc: desc.into(),
+        });
         self
     }
 
-    pub fn flag(mut self, long: &str, short: Option<char>, shape: Option<Shape>, desc: &str) -> Self {
-        self.flags.push(FlagSpec { long: long.into(), short, shape, desc: desc.into() });
+    pub fn flag(
+        mut self,
+        long: &str,
+        short: Option<char>,
+        shape: Option<Shape>,
+        desc: &str,
+    ) -> Self {
+        self.flags.push(FlagSpec {
+            long: long.into(),
+            short,
+            shape,
+            desc: desc.into(),
+        });
         self
     }
 
@@ -244,7 +267,9 @@ pub type Scope = HashMap<String, Value>;
 /// Did the raw call ask for `--help`? Checked before binding so a bad call
 /// can still get help.
 pub fn wants_help(call: &Call) -> bool {
-    call.args.iter().any(|a| matches!(a, Arg::Flag { name, long: true, .. } if name == "help"))
+    call.args
+        .iter()
+        .any(|a| matches!(a, Arg::Flag { name, long: true, .. } if name == "help"))
 }
 
 /// Evaluate an argument expression to a Value against the scope.
@@ -262,7 +287,8 @@ pub fn eval_expr(expr: &Expr, scope: &Scope) -> Result<Value, ShellError> {
         Expr::Bareword(w, _) if w == "false" => Ok(Value::Bool(false)),
         Expr::Bareword(w, _) => Ok(Value::Str(w.clone())),
         Expr::Var(name, span) => scope.get(name).cloned().ok_or_else(|| {
-            let e = ShellError::new(ErrorKind::Runtime, format!("unknown variable `${name}`")).with_span(*span);
+            let e = ShellError::new(ErrorKind::Runtime, format!("unknown variable `${name}`"))
+                .with_span(*span);
             match did_you_mean(name, scope.keys().map(|s| s.as_str())) {
                 Some(s) => e.with_help(format!("did you mean `${s}`?")),
                 None => e,
@@ -307,7 +333,11 @@ fn coerce(value: Value, shape: Shape, at: Span, what: &str) -> Result<Value, She
     let fail = |v: &Value| {
         Err(ShellError::new(
             ErrorKind::Type,
-            format!("{what} expects {}, found {} ", shape_name(shape), v.type_name()),
+            format!(
+                "{what} expects {}, found {} ",
+                shape_name(shape),
+                v.type_name()
+            ),
         )
         .with_span(at))
     };
@@ -324,15 +354,20 @@ fn coerce(value: Value, shape: Shape, at: Span, what: &str) -> Result<Value, She
             Value::Int(n) => Ok(Value::Int(n)),
             Value::Str(s) => {
                 let n = s.parse::<i64>().map_err(|_| {
-                    ShellError::new(ErrorKind::Type, format!("{what} expects an int, found `{s}`"))
-                        .with_span(at)
+                    ShellError::new(
+                        ErrorKind::Type,
+                        format!("{what} expects an int, found `{s}`"),
+                    )
+                    .with_span(at)
                 })?;
                 // Same 2^53 gate as the lexer — coercion must not be a
                 // second door for precision-losing integers.
                 if n.unsigned_abs() > crate::value::MAX_SAFE_INT as u64 {
                     return Err(ShellError::new(
                         ErrorKind::Type,
-                        format!("{what}: `{s}` exceeds 2^53 and would lose precision in JavaScript"),
+                        format!(
+                            "{what}: `{s}` exceeds 2^53 and would lose precision in JavaScript"
+                        ),
                     )
                     .with_span(at));
                 }
@@ -343,13 +378,13 @@ fn coerce(value: Value, shape: Shape, at: Span, what: &str) -> Result<Value, She
         Shape::Float => match value {
             Value::Float(f) => Ok(Value::Float(f)),
             Value::Int(n) => Ok(Value::Float(n as f64)),
-            Value::Str(s) => s
-                .parse::<f64>()
-                .map(Value::Float)
-                .map_err(|_| {
-                    ShellError::new(ErrorKind::Type, format!("{what} expects a float, found `{s}`"))
-                        .with_span(at)
-                }),
+            Value::Str(s) => s.parse::<f64>().map(Value::Float).map_err(|_| {
+                ShellError::new(
+                    ErrorKind::Type,
+                    format!("{what} expects a float, found `{s}`"),
+                )
+                .with_span(at)
+            }),
             ref v => fail(v),
         },
         Shape::Bool => match value {
@@ -413,7 +448,12 @@ pub fn bind(
                     positionals.push((eval_expr(expr, scope)?, expr.span()));
                 }
             }
-            Arg::Flag { name, long, span, value } => {
+            Arg::Flag {
+                name,
+                long,
+                span,
+                value,
+            } => {
                 // A bundled short cluster (`-iv`) expands to `-i -v`. Only
                 // switches may bundle: a value-taking flag inside a bundle
                 // has nowhere to receive its value, so that is a clear error
@@ -432,7 +472,9 @@ pub fn bind(
                         if spec.shape.is_some() {
                             return Err(ShellError::new(
                                 ErrorKind::Binding,
-                                format!("`-{ch}` takes a value, so it can't be bundled in `-{name}`"),
+                                format!(
+                                    "`-{ch}` takes a value, so it can't be bundled in `-{name}`"
+                                ),
                             )
                             .with_span(*span)
                             .with_help(format!("pass it on its own, e.g. `-{ch} <value>`")));
@@ -543,7 +585,11 @@ pub fn bind(
                 let span = leftovers[0].1;
                 return Err(ShellError::new(
                     ErrorKind::Binding,
-                    format!("`{}` takes at most {} positional arguments", sig.name, declared.len()),
+                    format!(
+                        "`{}` takes at most {} positional arguments",
+                        sig.name,
+                        declared.len()
+                    ),
                 )
                 .with_span(span)
                 .with_help(format!("run `{} --help` for usage", sig.name)));
@@ -551,10 +597,20 @@ pub fn bind(
         }
     }
 
-    Ok(BoundCall { head_span: call.words_span(), positionals: bound, flags, closures })
+    Ok(BoundCall {
+        head_span: call.words_span(),
+        positionals: bound,
+        flags,
+        closures,
+    })
 }
 
-fn find_flag<'a>(sig: &'a Signature, name: &str, long: bool, span: Span) -> Result<&'a FlagSpec, ShellError> {
+fn find_flag<'a>(
+    sig: &'a Signature,
+    name: &str,
+    long: bool,
+    span: Span,
+) -> Result<&'a FlagSpec, ShellError> {
     let found = if long {
         sig.flags.iter().find(|f| f.long == name)
     } else {
@@ -562,8 +618,13 @@ fn find_flag<'a>(sig: &'a Signature, name: &str, long: bool, span: Span) -> Resu
         sig.flags.iter().find(|f| f.short.is_some() && f.short == c)
     };
     found.ok_or_else(|| {
-        let display = if long { format!("--{name}") } else { format!("-{name}") };
-        let e = ShellError::new(ErrorKind::Binding, format!("unknown flag `{display}`")).with_span(span);
+        let display = if long {
+            format!("--{name}")
+        } else {
+            format!("-{name}")
+        };
+        let e = ShellError::new(ErrorKind::Binding, format!("unknown flag `{display}`"))
+            .with_span(span);
         match did_you_mean(name, sig.flags.iter().map(|f| f.long.as_str())) {
             Some(s) => e.with_help(format!("did you mean `--{s}`?")),
             None if sig.flags.is_empty() => e.with_help(format!("`{}` takes no flags", sig.name)),
@@ -662,7 +723,11 @@ mod tests {
 
     #[test]
     fn missing_required_errors() {
-        let s = Signature::build("get", "Get a column").required_arg("column", Shape::Str, "column name");
+        let s = Signature::build("get", "Get a column").required_arg(
+            "column",
+            Shape::Str,
+            "column name",
+        );
         let c = call("get");
         let err = bind(&s, &c.words[1..], &c, &Scope::new()).expect_err("should fail");
         assert!(err.msg.contains("missing required argument `column`"));

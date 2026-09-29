@@ -182,7 +182,9 @@ mod tests {
     }
 
     fn host() -> FakeHost {
-        FakeHost { calls: RefCell::new(0) }
+        FakeHost {
+            calls: RefCell::new(0),
+        }
     }
 
     fn record(pairs: Vec<(&str, Value)>) -> Value {

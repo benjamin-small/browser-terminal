@@ -100,11 +100,9 @@ pub fn eval_expr(expr: &Expr, scope: &Scope) -> Result<Value, ShellError> {
             let r = eval_expr(rhs, scope)?;
             binary(*op, l, r, *span)
         }
-        Expr::Closure(_, span) => Err(ShellError::type_error(
-            "a closure is not a value here",
-        )
-        .with_span(*span)
-        .with_help("closures are only accepted where a command takes a function")),
+        Expr::Closure(_, span) => Err(ShellError::type_error("a closure is not a value here")
+            .with_span(*span)
+            .with_help("closures are only accepted where a command takes a function")),
     }
 }
 
@@ -165,7 +163,12 @@ fn binary(op: BinOp, l: Value, r: Value, span: crate::error::Span) -> Result<Val
     }
 }
 
-fn arithmetic(op: BinOp, l: Value, r: Value, span: crate::error::Span) -> Result<Value, ShellError> {
+fn arithmetic(
+    op: BinOp,
+    l: Value,
+    r: Value,
+    span: crate::error::Span,
+) -> Result<Value, ShellError> {
     let nums = match (&l, &r) {
         (Value::Int(a), Value::Int(b)) => Some((*a, *b)),
         _ => None,
@@ -278,7 +281,10 @@ mod tests {
     #[test]
     fn comparison_on_a_field() {
         let item = record(vec![("n", Value::Int(7))]);
-        assert_eq!(apply("f {|x| $x.n > 5}", item.clone()), Ok(Value::Bool(true)));
+        assert_eq!(
+            apply("f {|x| $x.n > 5}", item.clone()),
+            Ok(Value::Bool(true))
+        );
         assert_eq!(apply("f {|x| $x.n < 5}", item), Ok(Value::Bool(false)));
     }
 
@@ -287,9 +293,15 @@ mod tests {
         let item = Value::Null;
         // * binds tighter than +
         assert_eq!(apply("f {|x| 2 + 3 * 4}", item.clone()), Ok(Value::Int(14)));
-        assert_eq!(apply("f {|x| (2 + 3) * 4}", item.clone()), Ok(Value::Int(20)));
+        assert_eq!(
+            apply("f {|x| (2 + 3) * 4}", item.clone()),
+            Ok(Value::Int(20))
+        );
         // comparison binds looser than arithmetic
-        assert_eq!(apply("f {|x| 2 + 3 > 4}", item.clone()), Ok(Value::Bool(true)));
+        assert_eq!(
+            apply("f {|x| 2 + 3 > 4}", item.clone()),
+            Ok(Value::Bool(true))
+        );
         // && binds tighter than ||
         assert_eq!(
             apply("f {|x| false && false || true}", item),
@@ -327,7 +339,10 @@ mod tests {
 
     #[test]
     fn nested_field_paths_and_missing_fields() {
-        let item = record(vec![("u", record(vec![("name", Value::Str("ada".into()))]))]);
+        let item = record(vec![(
+            "u",
+            record(vec![("name", Value::Str("ada".into()))]),
+        )]);
         assert_eq!(
             apply("f {|x| $x.u.name}", item.clone()),
             Ok(Value::Str("ada".into()))
@@ -349,10 +364,22 @@ mod tests {
             ("l", Value::List(vec![Value::Int(1), Value::Int(2)])),
             ("b", Value::Bytes(vec![0, 128, 255])),
         ]);
-        assert_eq!(apply("f {|x| $x.s.length}", item.clone()), Ok(Value::Int(5)));
-        assert_eq!(apply("f {|x| $x.l.length}", item.clone()), Ok(Value::Int(2)));
-        assert_eq!(apply("f {|x| $x.b.length}", item.clone()), Ok(Value::Int(3)));
-        assert_eq!(apply("f {|x| $x.s.length > 4}", item), Ok(Value::Bool(true)));
+        assert_eq!(
+            apply("f {|x| $x.s.length}", item.clone()),
+            Ok(Value::Int(5))
+        );
+        assert_eq!(
+            apply("f {|x| $x.l.length}", item.clone()),
+            Ok(Value::Int(2))
+        );
+        assert_eq!(
+            apply("f {|x| $x.b.length}", item.clone()),
+            Ok(Value::Int(3))
+        );
+        assert_eq!(
+            apply("f {|x| $x.s.length > 4}", item),
+            Ok(Value::Bool(true))
+        );
     }
 
     #[test]
@@ -368,10 +395,19 @@ mod tests {
     fn comparing_a_missing_field_is_false_not_an_error() {
         // A ragged row must not abort the whole pipeline.
         let item = record(vec![("other", Value::Int(1))]);
-        assert_eq!(apply("f {|x| $x.nope > 5}", item.clone()), Ok(Value::Bool(false)));
-        assert_eq!(apply("f {|x| $x.nope < 5}", item.clone()), Ok(Value::Bool(false)));
+        assert_eq!(
+            apply("f {|x| $x.nope > 5}", item.clone()),
+            Ok(Value::Bool(false))
+        );
+        assert_eq!(
+            apply("f {|x| $x.nope < 5}", item.clone()),
+            Ok(Value::Bool(false))
+        );
         // Equality still works normally against null.
-        assert_eq!(apply("f {|x| $x.nope == null}", item), Ok(Value::Bool(true)));
+        assert_eq!(
+            apply("f {|x| $x.nope == null}", item),
+            Ok(Value::Bool(true))
+        );
     }
 
     #[test]

@@ -19,7 +19,11 @@ pub enum TokenKind {
     Var(String),
     /// `--name` (long) or `-n` (short). `has_eq` means `--name=value`: the
     /// value expression is the immediately following token.
-    Flag { name: String, long: bool, has_eq: bool },
+    Flag {
+        name: String,
+        long: bool,
+        has_eq: bool,
+    },
     Pipe,
     Semi,
     /// Operators and grouping for closures, plus `<`/`>` for host redirects.
@@ -93,7 +97,11 @@ pub struct Token {
 }
 
 fn is_bareword_char(c: char) -> bool {
-    !c.is_whitespace() && !matches!(c, '|' | ';' | '#' | '\'' | '"' | '$' | '(' | ')' | '{' | '}' | '>' | '<' | '&' | '=')
+    !c.is_whitespace()
+        && !matches!(
+            c,
+            '|' | ';' | '#' | '\'' | '"' | '$' | '(' | ')' | '{' | '}' | '>' | '<' | '&' | '='
+        )
 }
 
 /// A single `=` between bareword characters belongs to the word, so
@@ -162,62 +170,105 @@ pub fn lex(src: &str) -> Result<Vec<Token>, ShellError> {
                 // separator. Inside `{|x| …}` the parser reinterprets the
                 // single pipes as parameter delimiters.
                 if rest.starts_with("||") {
-                    tokens.push(Token { kind: TokenKind::Op(Op::OrOr), span: Span::new(start, start + 2) });
+                    tokens.push(Token {
+                        kind: TokenKind::Op(Op::OrOr),
+                        span: Span::new(start, start + 2),
+                    });
                     i += 2;
                 } else {
-                    tokens.push(Token { kind: TokenKind::Pipe, span: Span::new(start, start + 1) });
+                    tokens.push(Token {
+                        kind: TokenKind::Pipe,
+                        span: Span::new(start, start + 1),
+                    });
                     i += 1;
                 }
             }
             ';' => {
-                tokens.push(Token { kind: TokenKind::Semi, span: Span::new(start, start + 1) });
+                tokens.push(Token {
+                    kind: TokenKind::Semi,
+                    span: Span::new(start, start + 1),
+                });
                 i += 1;
             }
             '&' => {
                 if rest.starts_with("&&") {
-                    tokens.push(Token { kind: TokenKind::Op(Op::AndAnd), span: Span::new(start, start + 2) });
+                    tokens.push(Token {
+                        kind: TokenKind::Op(Op::AndAnd),
+                        span: Span::new(start, start + 2),
+                    });
                     i += 2;
                 } else {
                     // Single `&` (background jobs) is still fenced off.
-                    tokens.push(Token { kind: TokenKind::Reserved("&".into()), span: Span::new(start, start + 1) });
+                    tokens.push(Token {
+                        kind: TokenKind::Reserved("&".into()),
+                        span: Span::new(start, start + 1),
+                    });
                     i += 1;
                 }
             }
             '(' | ')' | '{' | '}' | '<' | '>' | '=' | '!' => {
                 let (op, len) = lex_operator(rest);
-                tokens.push(Token { kind: TokenKind::Op(op), span: Span::new(start, start + len as u32) });
+                tokens.push(Token {
+                    kind: TokenKind::Op(op),
+                    span: Span::new(start, start + len as u32),
+                });
                 i += len;
             }
             '\'' => {
                 let (s, consumed) = lex_raw_string(rest, start)?;
-                tokens.push(Token { kind: TokenKind::StrRaw(s), span: Span::new(start, start + consumed as u32) });
+                tokens.push(Token {
+                    kind: TokenKind::StrRaw(s),
+                    span: Span::new(start, start + consumed as u32),
+                });
                 i += consumed;
             }
             '"' => {
                 let (parts, consumed) = lex_interp_string(rest, start)?;
-                tokens.push(Token { kind: TokenKind::StrInterp(parts), span: Span::new(start, start + consumed as u32) });
+                tokens.push(Token {
+                    kind: TokenKind::StrInterp(parts),
+                    span: Span::new(start, start + consumed as u32),
+                });
                 i += consumed;
             }
             '$' => {
-                let name: String = rest[1..].chars().take_while(|&ch| is_var_char(ch)).collect();
+                let name: String = rest[1..]
+                    .chars()
+                    .take_while(|&ch| is_var_char(ch))
+                    .collect();
                 if name.is_empty() {
-                    return Err(ShellError::parse("expected a variable name after `$`", Span::new(start, start + 1)));
+                    return Err(ShellError::parse(
+                        "expected a variable name after `$`",
+                        Span::new(start, start + 1),
+                    ));
                 }
                 let len = 1 + name.len();
-                tokens.push(Token { kind: TokenKind::Var(name), span: Span::new(start, start + len as u32) });
+                tokens.push(Token {
+                    kind: TokenKind::Var(name),
+                    span: Span::new(start, start + len as u32),
+                });
                 i += len;
             }
             '-' => {
                 let after = rest[1..].chars().next();
                 if let Some(after_dashes) = rest.strip_prefix("--") {
-                    let name: String = after_dashes.chars().take_while(|&ch| is_flag_char(ch)).collect();
+                    let name: String = after_dashes
+                        .chars()
+                        .take_while(|&ch| is_flag_char(ch))
+                        .collect();
                     if name.is_empty() {
-                        return Err(ShellError::parse("expected a flag name after `--`", Span::new(start, start + 2)));
+                        return Err(ShellError::parse(
+                            "expected a flag name after `--`",
+                            Span::new(start, start + 2),
+                        ));
                     }
                     let mut len = 2 + name.len();
                     let has_eq = rest[len..].starts_with('=');
                     tokens.push(Token {
-                        kind: TokenKind::Flag { name, long: true, has_eq },
+                        kind: TokenKind::Flag {
+                            name,
+                            long: true,
+                            has_eq,
+                        },
                         span: Span::new(start, start + len as u32),
                     });
                     if has_eq {
@@ -236,7 +287,11 @@ pub fn lex(src: &str) -> Result<Vec<Token>, ShellError> {
                     let word = bareword(&rest[1..]).to_string();
                     if word.chars().all(|ch| ch.is_ascii_alphabetic()) {
                         tokens.push(Token {
-                            kind: TokenKind::Flag { name: word.clone(), long: false, has_eq: false },
+                            kind: TokenKind::Flag {
+                                name: word.clone(),
+                                long: false,
+                                has_eq: false,
+                            },
                             span: Span::new(start, start + 1 + word.len() as u32),
                         });
                         i += 1 + word.len();
@@ -257,7 +312,10 @@ pub fn lex(src: &str) -> Result<Vec<Token>, ShellError> {
                         Some(op) => TokenKind::Op(op),
                         None => TokenKind::Bareword(rest[..len].to_string()),
                     };
-                    tokens.push(Token { kind, span: Span::new(start, start + len as u32) });
+                    tokens.push(Token {
+                        kind,
+                        span: Span::new(start, start + len as u32),
+                    });
                     i += len;
                 }
             }
@@ -273,7 +331,10 @@ pub fn lex(src: &str) -> Result<Vec<Token>, ShellError> {
                     Some(op) => TokenKind::Op(op),
                     None => TokenKind::Bareword(word.to_string()),
                 };
-                tokens.push(Token { kind, span: Span::new(start, start + word.len() as u32) });
+                tokens.push(Token {
+                    kind,
+                    span: Span::new(start, start + word.len() as u32),
+                });
                 i += word.len();
             }
         }
@@ -337,7 +398,13 @@ fn lex_number(rest: &str, start: u32) -> Result<(Token, usize), ShellError> {
             digits += 1;
             len = idx + 1;
             chars.next();
-        } else if ch == '.' && !saw_dot && rest[idx + 1..].chars().next().is_some_and(|d| d.is_ascii_digit()) {
+        } else if ch == '.'
+            && !saw_dot
+            && rest[idx + 1..]
+                .chars()
+                .next()
+                .is_some_and(|d| d.is_ascii_digit())
+        {
             saw_dot = true;
             len = idx + 1;
             chars.next();
@@ -351,7 +418,10 @@ fn lex_number(rest: &str, start: u32) -> Result<(Token, usize), ShellError> {
     if word.len() > len {
         let wlen = word.len();
         return Ok((
-            Token { kind: TokenKind::Bareword(word.to_string()), span: Span::new(start, start + wlen as u32) },
+            Token {
+                kind: TokenKind::Bareword(word.to_string()),
+                span: Span::new(start, start + wlen as u32),
+            },
             wlen,
         ));
     }
@@ -419,7 +489,10 @@ fn lex_interp_string(rest: &str, start: u32) -> Result<(Vec<InterpPart>, usize),
                 Some((i2, other)) => {
                     return Err(ShellError::parse(
                         format!("unknown escape `\\{other}`"),
-                        Span::new(start + i2 as u32 - 1, start + i2 as u32 + other.len_utf8() as u32),
+                        Span::new(
+                            start + i2 as u32 - 1,
+                            start + i2 as u32 + other.len_utf8() as u32,
+                        ),
                     ))
                 }
                 None => break,
@@ -455,7 +528,11 @@ mod tests {
     use super::*;
 
     fn kinds(src: &str) -> Vec<TokenKind> {
-        lex(src).expect("lex ok").into_iter().map(|t| t.kind).collect()
+        lex(src)
+            .expect("lex ok")
+            .into_iter()
+            .map(|t| t.kind)
+            .collect()
     }
 
     #[test]
@@ -563,10 +640,22 @@ mod tests {
             kinds("ls --limit=20 -a --all"),
             vec![
                 TokenKind::Bareword("ls".into()),
-                TokenKind::Flag { name: "limit".into(), long: true, has_eq: true },
+                TokenKind::Flag {
+                    name: "limit".into(),
+                    long: true,
+                    has_eq: true
+                },
                 TokenKind::Int(20),
-                TokenKind::Flag { name: "a".into(), long: false, has_eq: false },
-                TokenKind::Flag { name: "all".into(), long: true, has_eq: false },
+                TokenKind::Flag {
+                    name: "a".into(),
+                    long: false,
+                    has_eq: false
+                },
+                TokenKind::Flag {
+                    name: "all".into(),
+                    long: true,
+                    has_eq: false
+                },
             ]
         );
     }
@@ -577,7 +666,11 @@ mod tests {
         assert_eq!(kinds("-1.5"), vec![TokenKind::Float(-1.5)]);
         assert_eq!(
             kinds("-f"),
-            vec![TokenKind::Flag { name: "f".into(), long: false, has_eq: false }]
+            vec![TokenKind::Flag {
+                name: "f".into(),
+                long: false,
+                has_eq: false
+            }]
         );
         assert_eq!(kinds("-v2.1"), vec![TokenKind::Bareword("-v2.1".into())]);
     }
@@ -597,10 +690,13 @@ mod tests {
 
     #[test]
     fn comments_are_skipped() {
-        assert_eq!(kinds("echo hi # rest ignored"), vec![
-            TokenKind::Bareword("echo".into()),
-            TokenKind::Bareword("hi".into()),
-        ]);
+        assert_eq!(
+            kinds("echo hi # rest ignored"),
+            vec![
+                TokenKind::Bareword("echo".into()),
+                TokenKind::Bareword("hi".into()),
+            ]
+        );
     }
 
     #[test]
@@ -663,7 +759,10 @@ mod tests {
     #[test]
     fn overflowing_float_literal_rejected() {
         let huge = format!("1{}0.5", "0".repeat(400));
-        assert!(lex(&huge).is_err(), "non-finite float literal must be rejected");
+        assert!(
+            lex(&huge).is_err(),
+            "non-finite float literal must be rejected"
+        );
     }
 
     #[test]

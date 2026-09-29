@@ -186,7 +186,10 @@ mod tests {
                     raw()
                 }
                 fn noop(_: *const ()) {}
-                RawWaker::new(std::ptr::null(), &RawWakerVTable::new(clone, noop, noop, noop))
+                RawWaker::new(
+                    std::ptr::null(),
+                    &RawWakerVTable::new(clone, noop, noop, noop),
+                )
             }
             // SAFETY: every vtable entry is a no-op over a null pointer.
             unsafe { Waker::from_raw(raw()) }

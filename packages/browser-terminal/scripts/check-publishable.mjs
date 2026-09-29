@@ -28,7 +28,9 @@ const statOr = (p) => {
 };
 
 // 1. The artifacts a consumer actually imports.
-const required = ['dist/index.js', 'dist/index.d.ts', 'dist/wasm/bterm_wasm_bg.wasm'];
+const required = ['dist/index.js', 'dist/index.d.ts', 'dist/wasm/bterm_wasm_bg.wasm',
+  'dist/filesystem/index.js', 'dist/filesystem/index.d.ts',
+  'dist/filesystem/editor.js', 'dist/filesystem/editor.d.ts'];
 for (const rel of required) {
   if (!statOr(join(pkgDir, rel))) {
     fail(`${rel} is missing`, 'just build');

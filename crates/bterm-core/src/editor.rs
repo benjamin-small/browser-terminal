@@ -13,17 +13,23 @@ const PASTE_END: &str = "\x1b[201~";
 /// What a `feed` call produced. `echo` goes to the terminal immediately;
 /// each entry in `submitted` becomes its own evaluation task; `ctrl_c` asks
 /// the engine to abort the pane's running pipeline (if any).
-///
-/// A `completion_request` field is reserved here as the v2 tab-completion
-/// hook.
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
 pub struct Effects {
     pub echo: String,
     pub submitted: Vec<String>,
     pub ctrl_c: bool,
+    pub completion: Option<CompletionRequest>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct CompletionRequest {
+    pub line: String,
+    pub revision: u32,
+    pub session: u32,
 }
 
 pub struct LineEditor {
+    revision: u32,
     buffer: Vec<char>,
     cursor: usize,
     history: Vec<String>,
@@ -47,6 +53,7 @@ impl Default for LineEditor {
 impl LineEditor {
     pub fn new() -> Self {
         LineEditor {
+            revision: 0,
             buffer: Vec::new(),
             cursor: 0,
             history: Vec::new(),
@@ -70,8 +77,11 @@ impl LineEditor {
     }
 
     /// Plain text before the status marker; spacing belongs to the caller.
-    pub fn set_prompt_prefix(&mut self, prefix: &str) {
-        self.prompt_prefix = crate::render::diagnostic_text(prefix);
+    pub fn set_prompt_prefix(&mut self, prefix: &str) -> bool {
+        let prefix = crate::render::diagnostic_text(prefix);
+        let changed = self.prompt_prefix != prefix;
+        self.prompt_prefix = prefix;
+        changed
     }
 
     pub fn prompt(&self) -> String {
@@ -109,6 +119,11 @@ impl LineEditor {
     }
 
     pub fn feed(&mut self, input: &str) -> Effects {
+        self.feed_with_commands(input, &[])
+    }
+
+    pub fn feed_with_commands(&mut self, input: &str, commands: &[String]) -> Effects {
+        self.revision = self.revision.wrapping_add(1);
         let mut fx = Effects::default();
         let data = format!("{}{}", std::mem::take(&mut self.pending), input);
         let mut rest = data.as_str();
@@ -214,6 +229,18 @@ impl LineEditor {
                     self.cursor = start;
                     fx.echo.push_str(&self.prompt_line());
                 }
+                '\t' => {
+                    rest = &rest[1..];
+                    let before = fx.echo.len();
+                    self.complete(commands, &mut fx);
+                    if before == fx.echo.len() && self.cursor == self.buffer.len() {
+                        fx.completion = Some(CompletionRequest {
+                            line: self.buffer.iter().collect(),
+                            revision: self.revision,
+                            session: 0,
+                        });
+                    }
+                }
                 '\x0c' => {
                     // C-l: clear screen, redraw the input line at the top.
                     rest = &rest[1..];
@@ -238,6 +265,125 @@ impl LineEditor {
             }
         }
         fx
+    }
+
+    /// Complete only plain command positions, never quoted text, arguments,
+    /// redirects, or closures. Pasted tabs are handled by insert_paste instead.
+    fn complete(&mut self, commands: &[String], fx: &mut Effects) {
+        if self.cursor != self.buffer.len() {
+            return;
+        }
+        let mut start = 0;
+        let mut quote = None;
+        let mut escaped = false;
+        let mut depth = 0usize;
+        for (i, &c) in self.buffer.iter().enumerate() {
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            if c == '\\' {
+                escaped = true;
+                continue;
+            }
+            if let Some(q) = quote {
+                if c == q {
+                    quote = None;
+                }
+                continue;
+            }
+            match c {
+                '\'' | '"' => quote = Some(c),
+                '{' | '(' | '[' => depth += 1,
+                '}' | ')' | ']' => depth = depth.saturating_sub(1),
+                '|' | ';' if depth == 0 => start = i + 1,
+                _ => {}
+            }
+        }
+        if quote.is_some() || escaped || depth != 0 {
+            return;
+        }
+        while start < self.cursor && self.buffer[start] == ' ' {
+            start += 1;
+        }
+        let prefix: String = self.buffer[start..self.cursor].iter().collect();
+        let safe = |c: char| c.is_alphanumeric() || matches!(c, '-' | '_' | ' ');
+        if !prefix.chars().all(safe) {
+            return;
+        }
+        let mut matches: Vec<&str> = commands
+            .iter()
+            .map(String::as_str)
+            .filter(|name| name.starts_with(&prefix) && name.chars().all(safe))
+            .collect();
+        matches.sort_unstable();
+        matches.dedup();
+        let Some(first) = matches.first() else {
+            return;
+        };
+        let mut common: Vec<char> = first.chars().collect();
+        for candidate in &matches[1..] {
+            let shared = common
+                .iter()
+                .copied()
+                .zip(candidate.chars())
+                .take_while(|(a, b)| a == b)
+                .count();
+            common.truncate(shared);
+        }
+        if matches.len() == 1 {
+            common.push(' ');
+        }
+        if common.len() > self.cursor - start {
+            self.buffer
+                .splice(start..self.cursor, common.iter().copied());
+            self.cursor = start + common.len();
+        } else if matches.len() > 1 {
+            fx.echo.push_str("\r\n");
+            fx.echo.push_str(&matches.join("  "));
+            fx.echo.push_str("\r\n");
+        }
+        fx.echo.push_str(&self.prompt_line());
+    }
+
+    /// Async providers may only change the exact editor revision they observed.
+    pub fn apply_completion(
+        &mut self,
+        revision: u32,
+        line: &str,
+        replacement: Option<&str>,
+        candidates: &[String],
+    ) -> String {
+        if revision != self.revision
+            || self.cursor != self.buffer.len()
+            || self.in_paste
+            || !self.pending.is_empty()
+            || self.buffer.iter().collect::<String>() != line
+        {
+            return String::new();
+        }
+        if let Some(text) = replacement {
+            if text.chars().any(char::is_control) {
+                return String::new();
+            }
+            self.buffer = text.chars().collect();
+            self.cursor = self.buffer.len();
+            self.revision = self.revision.wrapping_add(1);
+        }
+        let mut echo = String::new();
+        if !candidates.is_empty() {
+            echo.push_str("\r\n");
+            echo.push_str(
+                &candidates
+                    .iter()
+                    .map(|s| crate::render::diagnostic_text(s))
+                    .collect::<Vec<_>>()
+                    .join("  "),
+            );
+            echo.push_str("\r\n");
+        }
+        echo.push_str(&self.prompt_line());
+        echo
     }
 
     fn submit(&mut self, fx: &mut Effects) {
@@ -431,6 +577,82 @@ mod tests {
     }
 
     #[test]
+    fn async_completion_rejects_stale_input_and_control_sequences() {
+        let mut ed = LineEditor::new();
+        let request = ed
+            .feed("cat fi\t")
+            .completion
+            .expect("argument completion request");
+        ed.feed("x");
+        ed.feed("\x7f"); // Same text, different revision: still stale.
+        assert!(ed
+            .apply_completion(request.revision, &request.line, Some("cat file "), &[])
+            .is_empty());
+        let request = ed
+            .feed("\t")
+            .completion
+            .expect("argument completion request");
+        assert!(ed
+            .apply_completion(
+                request.revision,
+                &request.line,
+                Some("cat file\nclear"),
+                &[]
+            )
+            .is_empty());
+        let echo = ed.apply_completion(request.revision, &request.line, Some("cat file "), &[]);
+        assert!(echo.contains("cat file "));
+        assert_eq!(ed.feed("\r").submitted, vec!["cat file "]);
+    }
+
+    #[test]
+    fn completion_handles_commands_groups_pipelines_and_ambiguity() {
+        let names = ["cat", "cd", "str upcase", "str trim", "echo"].map(str::to_owned);
+        let mut ed = LineEditor::new();
+        assert_eq!(
+            ed.feed_with_commands("ca\tfile\r", &names).submitted,
+            vec!["cat file"]
+        );
+        assert_eq!(
+            ed.feed_with_commands("echo hi | str up\t\r", &names)
+                .submitted,
+            vec!["echo hi | str upcase "]
+        );
+        assert_eq!(
+            ed.feed_with_commands("echo hi; ca\t\r", &names).submitted,
+            vec!["echo hi; cat "]
+        );
+        let fx = ed.feed_with_commands("c\t", &names);
+        assert!(fx.echo.contains("cat  cd"));
+        assert_eq!(ed.feed("\r").submitted, vec!["c"]);
+        assert_eq!(
+            ed.feed_with_commands("str\t\r", &names).submitted,
+            vec!["str "]
+        );
+    }
+
+    #[test]
+    fn completion_leaves_arguments_quotes_closures_and_paste_alone() {
+        let names = ["cat", "cd"].map(str::to_owned);
+        for input in [
+            "echo ca",
+            "echo 'x|ca",
+            "echo \"x;ca",
+            "filter {|x| ca",
+            "cat > ca",
+            "echo x\\|ca",
+        ] {
+            let mut ed = LineEditor::new();
+            ed.feed_with_commands(input, &names);
+            ed.feed_with_commands("\t", &names);
+            assert_eq!(ed.feed("\r").submitted, vec![input]);
+        }
+        let mut ed = LineEditor::new();
+        ed.feed_with_commands("\x1b[200~ca\t\x1b[201~", &names);
+        assert!(!ed.feed("\r").submitted[0].starts_with("cat"));
+    }
+
+    #[test]
     fn typing_appends_and_submits() {
         let mut ed = LineEditor::new();
         let fx = ed.feed("echo hi");
@@ -458,7 +680,11 @@ mod tests {
         ed.feed("ac");
         ed.feed("\x1b[D");
         let fx = ed.feed("b");
-        assert!(fx.echo.contains("abc"), "redraw shows full line: {:?}", fx.echo);
+        assert!(
+            fx.echo.contains("abc"),
+            "redraw shows full line: {:?}",
+            fx.echo
+        );
         let fx = ed.feed("\r");
         assert_eq!(fx.submitted, vec!["abc".to_string()]);
     }

@@ -1,4 +1,5 @@
 import { BrowserTerminal } from '@benjamin-small/browser-terminal';
+import { filesystemDemo } from './filesystem';
 import { codePanel, helpPanel } from './code';
 // The panel below shows this very file — `?raw` guarantees the example on
 // the page is the code that actually ran.
@@ -246,6 +247,7 @@ async function main(): Promise<void> {
   );
 
   // Expose for programmatic-run experiments in the console.
+  await filesystemDemo(bt);
   window.bt = bt;
 }
 

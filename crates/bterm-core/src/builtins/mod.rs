@@ -1,11 +1,9 @@
 //! Built-in commands. All v1 builtins are synchronous; `Builtin` wraps a fn
 //! pointer in a ready future so they satisfy the async `Command` trait.
 
-use crate::error::{ErrorKind, ShellError};
-use crate::registry::{
-    Command, CommandRegistry, ExecContext, LocalBoxFuture, PipelineData,
-};
 use crate::callable::{is_truthy, Selector};
+use crate::error::{ErrorKind, ShellError};
+use crate::registry::{Command, CommandRegistry, ExecContext, LocalBoxFuture, PipelineData};
 use crate::render::plain;
 use crate::signature::{BoundCall, Shape, Signature};
 use crate::value::Value;
@@ -83,41 +81,70 @@ fn streaming(sig: Signature, run_fn: StreamFn) -> Rc<dyn Command> {
 
 pub fn register_all(registry: &mut CommandRegistry) {
     registry.register_builtin(cmd(
-        Signature::build("echo", "Return the given values").rest_arg("values", Shape::Any, "values to return"),
+        Signature::build("echo", "Return the given values").rest_arg(
+            "values",
+            Shape::Any,
+            "values to return",
+        ),
         echo,
     ));
     registry.register_builtin(cmd(
-        Signature::build("get", "Extract a column from a record or table")
-            .required_arg("column", Shape::Str, "column/field name"),
+        Signature::build("get", "Extract a column from a record or table").required_arg(
+            "column",
+            Shape::Str,
+            "column/field name",
+        ),
         get,
     ));
     registry.register_builtin(streaming(
         Signature::build("grep", "Filter rows or lines matching a pattern")
-            .required_arg("pattern", Shape::Str, "regex in the browser, substring in the CLI")
+            .required_arg(
+                "pattern",
+                Shape::Str,
+                "regex in the browser, substring in the CLI",
+            )
             .on_selector("match against this field, path, {|o| …} closure, or @name")
             .flag("ignore-case", Some('i'), None, "case-insensitive match")
             .flag("invert", Some('v'), None, "keep non-matching rows instead"),
         grep,
     ));
     registry.register_builtin(streaming(
-        Signature::build("map", "Project each item through a closure or field")
-            .required_arg("selector", Shape::Str, "{|o| …} closure, field, dotted path, '(o) => …', or @name"),
+        Signature::build("map", "Project each item through a closure or field").required_arg(
+            "selector",
+            Shape::Str,
+            "{|o| …} closure, field, dotted path, '(o) => …', or @name",
+        ),
         map,
     ));
     registry.register_builtin(streaming(
         Signature::build("filter", "Keep items whose predicate is truthy")
-            .required_arg("predicate", Shape::Str, "{|o| …} closure, '(o) => …', or @name")
-            .flag("invert", Some('v'), None, "keep items that return false instead"),
+            .required_arg(
+                "predicate",
+                Shape::Str,
+                "{|o| …} closure, '(o) => …', or @name",
+            )
+            .flag(
+                "invert",
+                Some('v'),
+                None,
+                "keep items that return false instead",
+            ),
         filter,
     ));
     registry.register_builtin(streaming(
-        Signature::build("head", "Take the first row (or first n rows)")
-            .optional_arg("n", Shape::Int, "how many rows"),
+        Signature::build("head", "Take the first row (or first n rows)").optional_arg(
+            "n",
+            Shape::Int,
+            "how many rows",
+        ),
         head,
     ));
     registry.register_builtin(cmd(
-        Signature::build("tail", "Take the last row (or last n rows)")
-            .optional_arg("n", Shape::Int, "how many rows"),
+        Signature::build("tail", "Take the last row (or last n rows)").optional_arg(
+            "n",
+            Shape::Int,
+            "how many rows",
+        ),
         tail,
     ));
     registry.register_builtin(cmd(
@@ -126,24 +153,38 @@ pub fn register_all(registry: &mut CommandRegistry) {
     ));
     registry.register_builtin(cmd(
         Signature::build("sort-by", "Sort a table by a column or computed key")
-            .optional_arg("column", Shape::Str, "column to sort by (shorthand for --on)")
+            .optional_arg(
+                "column",
+                Shape::Str,
+                "column to sort by (shorthand for --on)",
+            )
             .on_selector("sort by this field, path, or {|o| …} computed key")
             .flag("reverse", Some('r'), None, "descending order"),
         sort_by,
     ));
     registry.register_builtin(cmd(
-        Signature::build("str upcase", "Uppercase the input (or given) strings")
-            .rest_arg("values", Shape::Str, "strings to transform"),
+        Signature::build("str upcase", "Uppercase the input (or given) strings").rest_arg(
+            "values",
+            Shape::Str,
+            "strings to transform",
+        ),
         str_upcase,
     ));
     registry.register_builtin(cmd(
-        Signature::build("str downcase", "Lowercase the input (or given) strings")
-            .rest_arg("values", Shape::Str, "strings to transform"),
+        Signature::build("str downcase", "Lowercase the input (or given) strings").rest_arg(
+            "values",
+            Shape::Str,
+            "strings to transform",
+        ),
         str_downcase,
     ));
     registry.register_builtin(cmd(
-        Signature::build("to json", "Serialize the input to a JSON string")
-            .flag("pretty", Some('p'), None, "indent the output"),
+        Signature::build("to json", "Serialize the input to a JSON string").flag(
+            "pretty",
+            Some('p'),
+            None,
+            "indent the output",
+        ),
         to_json,
     ));
     registry.register_builtin(cmd(
@@ -151,12 +192,18 @@ pub fn register_all(registry: &mut CommandRegistry) {
         from_json,
     ));
     registry.register_builtin(cmd(
-        Signature::build("table", "Force-render the input as text at the current width"),
+        Signature::build(
+            "table",
+            "Force-render the input as text at the current width",
+        ),
         table,
     ));
     registry.register_builtin(cmd(
-        Signature::build("help", "List commands, or show help for one")
-            .rest_arg("command", Shape::Str, "command name words"),
+        Signature::build("help", "List commands, or show help for one").rest_arg(
+            "command",
+            Shape::Str,
+            "command name words",
+        ),
         help,
     ));
     registry.register_builtin(cmd(
@@ -194,8 +241,11 @@ pub fn register_all(registry: &mut CommandRegistry) {
         |ctx, _c, _i| mux_do(ctx, MuxAction::KillPane),
     ));
     registry.register_builtin(cmd(
-        Signature::build("mux focus", "Move focus between panes")
-            .required_arg("direction", Shape::Str, "next|left|right|up|down"),
+        Signature::build("mux focus", "Move focus between panes").required_arg(
+            "direction",
+            Shape::Str,
+            "next|left|right|up|down",
+        ),
         mux_focus,
     ));
     registry.register_builtin(cmd(
@@ -207,8 +257,11 @@ pub fn register_all(registry: &mut CommandRegistry) {
         |ctx, _c, _i| mux_do(ctx, MuxAction::Hide),
     ));
     registry.register_builtin(cmd(
-        Signature::build("session new", "Fork a new shell session")
-            .optional_arg("name", Shape::Str, "session name"),
+        Signature::build("session new", "Fork a new shell session").optional_arg(
+            "name",
+            Shape::Str,
+            "session name",
+        ),
         session_new,
     ));
     registry.register_builtin(cmd(
@@ -216,8 +269,11 @@ pub fn register_all(registry: &mut CommandRegistry) {
         |ctx, _c, _i| mux_do(ctx, MuxAction::SessionList),
     ));
     registry.register_builtin(cmd(
-        Signature::build("session switch", "Switch to a session by name")
-            .required_arg("name", Shape::Str, "session name"),
+        Signature::build("session switch", "Switch to a session by name").required_arg(
+            "name",
+            Shape::Str,
+            "session name",
+        ),
         session_switch,
     ));
     registry.register_builtin(cmd(
@@ -240,7 +296,11 @@ fn mux_do(ctx: ExecContext, action: MuxAction) -> Result<PipelineData, ShellErro
     })
 }
 
-fn mux_split(ctx: ExecContext, call: BoundCall, _input: PipelineData) -> Result<PipelineData, ShellError> {
+fn mux_split(
+    ctx: ExecContext,
+    call: BoundCall,
+    _input: PipelineData,
+) -> Result<PipelineData, ShellError> {
     let action = if call.has_flag("down") {
         MuxAction::SplitDown
     } else {
@@ -249,12 +309,20 @@ fn mux_split(ctx: ExecContext, call: BoundCall, _input: PipelineData) -> Result<
     mux_do(ctx, action)
 }
 
-fn mux_focus(ctx: ExecContext, call: BoundCall, _input: PipelineData) -> Result<PipelineData, ShellError> {
+fn mux_focus(
+    ctx: ExecContext,
+    call: BoundCall,
+    _input: PipelineData,
+) -> Result<PipelineData, ShellError> {
     let dir = call.positionals[0].as_str().unwrap_or_default().to_string();
     mux_do(ctx, MuxAction::Focus(dir))
 }
 
-fn session_new(ctx: ExecContext, call: BoundCall, _input: PipelineData) -> Result<PipelineData, ShellError> {
+fn session_new(
+    ctx: ExecContext,
+    call: BoundCall,
+    _input: PipelineData,
+) -> Result<PipelineData, ShellError> {
     let name = call
         .positionals
         .first()
@@ -263,7 +331,11 @@ fn session_new(ctx: ExecContext, call: BoundCall, _input: PipelineData) -> Resul
     mux_do(ctx, MuxAction::SessionNew { name })
 }
 
-fn session_switch(ctx: ExecContext, call: BoundCall, _input: PipelineData) -> Result<PipelineData, ShellError> {
+fn session_switch(
+    ctx: ExecContext,
+    call: BoundCall,
+    _input: PipelineData,
+) -> Result<PipelineData, ShellError> {
     let name = call.positionals[0].as_str().unwrap_or_default().to_string();
     mux_do(ctx, MuxAction::SessionSwitch { name })
 }
@@ -275,7 +347,11 @@ fn type_err(cmd: &str, wanted: &str, got: &Value) -> ShellError {
     )
 }
 
-fn echo(_ctx: ExecContext, call: BoundCall, _input: PipelineData) -> Result<PipelineData, ShellError> {
+fn echo(
+    _ctx: ExecContext,
+    call: BoundCall,
+    _input: PipelineData,
+) -> Result<PipelineData, ShellError> {
     let mut values = call.positionals;
     Ok(match values.len() {
         0 => PipelineData::Empty,
@@ -284,7 +360,11 @@ fn echo(_ctx: ExecContext, call: BoundCall, _input: PipelineData) -> Result<Pipe
     })
 }
 
-fn get(_ctx: ExecContext, call: BoundCall, input: PipelineData) -> Result<PipelineData, ShellError> {
+fn get(
+    _ctx: ExecContext,
+    call: BoundCall,
+    input: PipelineData,
+) -> Result<PipelineData, ShellError> {
     let column = call.positionals[0].as_str().unwrap_or_default().to_string();
     let missing = |map: &indexmap::IndexMap<String, Value>| {
         ShellError::new(ErrorKind::Runtime, format!("no column `{column}`"))
@@ -303,7 +383,9 @@ fn get(_ctx: ExecContext, call: BoundCall, input: PipelineData) -> Result<Pipeli
             let mut out = Vec::new();
             for row in &rows {
                 match row {
-                    Value::Record(map) => out.push(map.get(&column).cloned().unwrap_or(Value::Null)),
+                    Value::Record(map) => {
+                        out.push(map.get(&column).cloned().unwrap_or(Value::Null))
+                    }
                     other => return Err(type_err("get", "a record or table", other)),
                 }
             }
@@ -354,7 +436,11 @@ fn positional_selector(
 }
 
 /// Apply a selector, converting its failure into a spanned shell error.
-fn project(selector: &Selector, item: &Value, span: crate::error::Span) -> Result<Value, ShellError> {
+fn project(
+    selector: &Selector,
+    item: &Value,
+    span: crate::error::Span,
+) -> Result<Value, ShellError> {
     selector
         .apply(item)
         .map_err(|msg| ShellError::runtime(msg).with_span(span))
@@ -468,7 +554,10 @@ fn grep(
             .map_err(|msg| {
                 ShellError::new(
                     ErrorKind::Binding,
-                    format!("invalid {} pattern `{pattern_src}`: {msg}", ctx.host.pattern_dialect()),
+                    format!(
+                        "invalid {} pattern `{pattern_src}`: {msg}",
+                        ctx.host.pattern_dialect()
+                    ),
                 )
                 .with_span(call.head_span)
             })?;
@@ -501,7 +590,9 @@ fn take_n(call: &BoundCall) -> Result<Option<usize>, ShellError> {
         // try_from, not `as`: on wasm32 (32-bit usize) an as-cast truncates
         // and `head 4294967296` would silently take 0 rows.
         Some(Value::Int(n)) if *n >= 0 => Ok(Some(usize::try_from(*n).unwrap_or(usize::MAX))),
-        Some(Value::Int(n)) => Err(ShellError::runtime(format!("`{n}` is negative")).with_span(call.head_span)),
+        Some(Value::Int(n)) => {
+            Err(ShellError::runtime(format!("`{n}` is negative")).with_span(call.head_span))
+        }
         Some(other) => Err(type_err("head/tail", "an int", other)),
     }
 }
@@ -532,7 +623,11 @@ fn head(
     })
 }
 
-fn tail(_ctx: ExecContext, call: BoundCall, input: PipelineData) -> Result<PipelineData, ShellError> {
+fn tail(
+    _ctx: ExecContext,
+    call: BoundCall,
+    input: PipelineData,
+) -> Result<PipelineData, ShellError> {
     let n = take_n(&call)?;
     match input.into_value() {
         Value::List(items) => Ok(PipelineData::Value(match n {
@@ -546,7 +641,11 @@ fn tail(_ctx: ExecContext, call: BoundCall, input: PipelineData) -> Result<Pipel
     }
 }
 
-fn length(_ctx: ExecContext, _call: BoundCall, input: PipelineData) -> Result<PipelineData, ShellError> {
+fn length(
+    _ctx: ExecContext,
+    _call: BoundCall,
+    input: PipelineData,
+) -> Result<PipelineData, ShellError> {
     match input.into_value() {
         Value::List(items) => Ok(PipelineData::Value(Value::Int(items.len() as i64))),
         Value::Str(s) => Ok(PipelineData::Value(Value::Int(s.chars().count() as i64))),
@@ -555,7 +654,11 @@ fn length(_ctx: ExecContext, _call: BoundCall, input: PipelineData) -> Result<Pi
     }
 }
 
-fn sort_by(ctx: ExecContext, call: BoundCall, input: PipelineData) -> Result<PipelineData, ShellError> {
+fn sort_by(
+    ctx: ExecContext,
+    call: BoundCall,
+    input: PipelineData,
+) -> Result<PipelineData, ShellError> {
     // `sort-by n` is shorthand for `sort-by --on n`; --on wins if both are
     // given, and it additionally allows computed keys.
     let selector = match on_selector(&ctx, &call)? {
@@ -592,7 +695,11 @@ fn sort_by(ctx: ExecContext, call: BoundCall, input: PipelineData) -> Result<Pip
     for row in rows.drain(..) {
         let key = project(&selector, &row, call.head_span)?;
         // Missing fields sort last, as before.
-        let key = if matches!(key, Value::Null) { None } else { Some(key) };
+        let key = if matches!(key, Value::Null) {
+            None
+        } else {
+            Some(key)
+        };
         keyed.push((key, row));
     }
     keyed.sort_by(|(a, _), (b, _)| match (a, b) {
@@ -642,22 +749,34 @@ fn map_strings(
     }
 }
 
-fn str_upcase(_ctx: ExecContext, call: BoundCall, input: PipelineData) -> Result<PipelineData, ShellError> {
+fn str_upcase(
+    _ctx: ExecContext,
+    call: BoundCall,
+    input: PipelineData,
+) -> Result<PipelineData, ShellError> {
     map_strings("str upcase", call, input, |s| s.to_uppercase())
 }
 
-fn str_downcase(_ctx: ExecContext, call: BoundCall, input: PipelineData) -> Result<PipelineData, ShellError> {
+fn str_downcase(
+    _ctx: ExecContext,
+    call: BoundCall,
+    input: PipelineData,
+) -> Result<PipelineData, ShellError> {
     map_strings("str downcase", call, input, |s| s.to_lowercase())
 }
 
-fn to_json(_ctx: ExecContext, call: BoundCall, input: PipelineData) -> Result<PipelineData, ShellError> {
+fn to_json(
+    _ctx: ExecContext,
+    call: BoundCall,
+    input: PipelineData,
+) -> Result<PipelineData, ShellError> {
     let value = input.into_value();
     if value.has_non_finite() {
-        return Err(ShellError::runtime(
-            "cannot serialize NaN or Infinity to JSON",
-        )
-        .with_span(call.head_span)
-        .with_help("JSON has no representation for non-finite numbers"));
+        return Err(
+            ShellError::runtime("cannot serialize NaN or Infinity to JSON")
+                .with_span(call.head_span)
+                .with_help("JSON has no representation for non-finite numbers"),
+        );
     }
     let json = if call.has_flag("pretty") {
         serde_json::to_string_pretty(&value)
@@ -668,23 +787,38 @@ fn to_json(_ctx: ExecContext, call: BoundCall, input: PipelineData) -> Result<Pi
     Ok(PipelineData::Value(Value::Str(json)))
 }
 
-fn from_json(_ctx: ExecContext, call: BoundCall, input: PipelineData) -> Result<PipelineData, ShellError> {
+fn from_json(
+    _ctx: ExecContext,
+    call: BoundCall,
+    input: PipelineData,
+) -> Result<PipelineData, ShellError> {
     match input.into_value() {
         Value::Str(s) => {
-            let v: Value = serde_json::from_str(&s)
-                .map_err(|e| ShellError::runtime(format!("invalid JSON: {e}")).with_span(call.head_span))?;
+            let v: Value = serde_json::from_str(&s).map_err(|e| {
+                ShellError::runtime(format!("invalid JSON: {e}")).with_span(call.head_span)
+            })?;
             Ok(PipelineData::Value(v))
         }
         other => Err(type_err("from json", "a JSON string", &other)),
     }
 }
 
-fn table(ctx: ExecContext, _call: BoundCall, input: PipelineData) -> Result<PipelineData, ShellError> {
+fn table(
+    ctx: ExecContext,
+    _call: BoundCall,
+    input: PipelineData,
+) -> Result<PipelineData, ShellError> {
     let rendered = crate::render::render(&input.into_value(), ctx.width);
-    Ok(PipelineData::Rendered(rendered.trim_end_matches('\n').to_string()))
+    Ok(PipelineData::Rendered(
+        rendered.trim_end_matches('\n').to_string(),
+    ))
 }
 
-fn help(ctx: ExecContext, call: BoundCall, _input: PipelineData) -> Result<PipelineData, ShellError> {
+fn help(
+    ctx: ExecContext,
+    call: BoundCall,
+    _input: PipelineData,
+) -> Result<PipelineData, ShellError> {
     if call.positionals.is_empty() {
         let rows: Vec<Value> = ctx
             .host
@@ -707,19 +841,29 @@ fn help(ctx: ExecContext, call: BoundCall, _input: PipelineData) -> Result<Pipel
         .join(" ");
     match ctx.host.help_for(&name) {
         Some(text) => Ok(PipelineData::Rendered(text)),
-        None => Err(ShellError::new(ErrorKind::UnknownCommand, format!("no help for `{name}`"))
-            .with_span(call.head_span)
-            .with_help("run `help` to list commands")),
+        None => Err(
+            ShellError::new(ErrorKind::UnknownCommand, format!("no help for `{name}`"))
+                .with_span(call.head_span)
+                .with_help("run `help` to list commands"),
+        ),
     }
 }
 
-fn history(ctx: ExecContext, _call: BoundCall, _input: PipelineData) -> Result<PipelineData, ShellError> {
+fn history(
+    ctx: ExecContext,
+    _call: BoundCall,
+    _input: PipelineData,
+) -> Result<PipelineData, ShellError> {
     Ok(PipelineData::Value(Value::List(
         ctx.host.history().into_iter().map(Value::Str).collect(),
     )))
 }
 
-fn vars(ctx: ExecContext, _call: BoundCall, _input: PipelineData) -> Result<PipelineData, ShellError> {
+fn vars(
+    ctx: ExecContext,
+    _call: BoundCall,
+    _input: PipelineData,
+) -> Result<PipelineData, ShellError> {
     let mut rows = ctx.host.visible_vars();
     // Sorted so the table is stable between runs: the underlying maps
     // iterate in an arbitrary order, which would make the output shuffle
@@ -730,7 +874,10 @@ fn vars(ctx: ExecContext, _call: BoundCall, _input: PipelineData) -> Result<Pipe
             .map(|row| {
                 Value::record([
                     ("name".to_string(), Value::Str(row.name)),
-                    ("scope".to_string(), Value::Str(row.origin.as_str().to_string())),
+                    (
+                        "scope".to_string(),
+                        Value::Str(row.origin.as_str().to_string()),
+                    ),
                     ("value".to_string(), row.value),
                 ])
             })
@@ -738,7 +885,11 @@ fn vars(ctx: ExecContext, _call: BoundCall, _input: PipelineData) -> Result<Pipe
     )))
 }
 
-fn clear(ctx: ExecContext, _call: BoundCall, _input: PipelineData) -> Result<PipelineData, ShellError> {
+fn clear(
+    ctx: ExecContext,
+    _call: BoundCall,
+    _input: PipelineData,
+) -> Result<PipelineData, ShellError> {
     ctx.host.request_clear();
     Ok(PipelineData::Empty)
 }
@@ -764,7 +915,10 @@ mod tests {
             // exercise.
             vec![
                 ("echo".into(), "Return the given values".into()),
-                ("get".into(), "Extract a column from a record or table".into()),
+                (
+                    "get".into(),
+                    "Extract a column from a record or table".into(),
+                ),
             ]
         }
         fn help_for(&self, name: &str) -> Option<String> {
@@ -806,7 +960,10 @@ mod tests {
         if let Some(e) = error {
             return Err(e);
         }
-        Ok(results.pop().map(PipelineData::into_value).unwrap_or(Value::Null))
+        Ok(results
+            .pop()
+            .map(PipelineData::into_value)
+            .unwrap_or(Value::Null))
     }
 
     /// Like `eval`, but returns parse errors as `Err` instead of asserting
@@ -830,7 +987,10 @@ mod tests {
         if let Some(e) = error {
             return Err(e);
         }
-        Ok(results.pop().map(PipelineData::into_value).unwrap_or(Value::Null))
+        Ok(results
+            .pop()
+            .map(PipelineData::into_value)
+            .unwrap_or(Value::Null))
     }
 
     fn table_json() -> &'static str {
@@ -881,9 +1041,13 @@ mod tests {
 
     #[test]
     fn sort_by_orders_and_reverses() {
-        let v = eval(r#"echo '[{"n":5},{"n":1},{"n":10}]' | from json | sort-by n --reverse | get n"#)
-            .expect("eval");
-        assert_eq!(v, Value::List(vec![Value::Int(10), Value::Int(5), Value::Int(1)]));
+        let v =
+            eval(r#"echo '[{"n":5},{"n":1},{"n":10}]' | from json | sort-by n --reverse | get n"#)
+                .expect("eval");
+        assert_eq!(
+            v,
+            Value::List(vec![Value::Int(10), Value::Int(5), Value::Int(1)])
+        );
     }
 
     #[test]
@@ -896,8 +1060,14 @@ mod tests {
 
     #[test]
     fn str_case_on_input_and_args() {
-        assert_eq!(eval("echo abc | str upcase").expect("eval"), Value::Str("ABC".into()));
-        assert_eq!(eval("str downcase HI").expect("eval"), Value::Str("hi".into()));
+        assert_eq!(
+            eval("echo abc | str upcase").expect("eval"),
+            Value::Str("ABC".into())
+        );
+        assert_eq!(
+            eval("str downcase HI").expect("eval"),
+            Value::Str("hi".into())
+        );
     }
 
     #[test]
@@ -984,13 +1154,19 @@ mod tests {
         assert!(out.errors.is_empty(), "{:?}", out.errors);
         let (mut results, error) = block_on(eval_line(&out.line, &registry, &ctx, &Scope::new()));
         assert!(error.is_none(), "{error:?}");
-        assert_eq!(results.pop().map(PipelineData::into_value), Some(Value::Int(0)));
+        assert_eq!(
+            results.pop().map(PipelineData::into_value),
+            Some(Value::Int(0))
+        );
     }
 
     #[test]
     fn echo_multiple_makes_list() {
         let v = eval("echo a b").expect("eval");
-        assert_eq!(v, Value::List(vec![Value::Str("a".into()), Value::Str("b".into())]));
+        assert_eq!(
+            v,
+            Value::List(vec![Value::Str("a".into()), Value::Str("b".into())])
+        );
     }
 
     #[test]
@@ -1033,9 +1209,16 @@ mod tests {
         // Deterministic: all numbers first (sorted), then all strings.
         match v {
             Value::List(items) => {
-                let first_str = items.iter().position(|x| matches!(x, Value::Str(_))).expect("has strings");
-                assert!(items[..first_str].iter().all(|x| matches!(x, Value::Int(_))));
-                assert!(items[first_str..].iter().all(|x| matches!(x, Value::Str(_))));
+                let first_str = items
+                    .iter()
+                    .position(|x| matches!(x, Value::Str(_)))
+                    .expect("has strings");
+                assert!(items[..first_str]
+                    .iter()
+                    .all(|x| matches!(x, Value::Int(_))));
+                assert!(items[first_str..]
+                    .iter()
+                    .all(|x| matches!(x, Value::Str(_))));
             }
             other => panic!("expected list, got {other:?}"),
         }
@@ -1044,13 +1227,16 @@ mod tests {
     #[test]
     fn sort_by_reverse_keeps_missing_last_and_is_stable() {
         let json = r#"[{"n":1,"tag":"a"},{"tag":"missing"},{"n":3,"tag":"b"},{"n":3,"tag":"c"}]"#;
-        let v = eval(&format!("echo '{json}' | from json | sort-by n --reverse | get tag")).expect("eval");
+        let v = eval(&format!(
+            "echo '{json}' | from json | sort-by n --reverse | get tag"
+        ))
+        .expect("eval");
         assert_eq!(
             v,
             Value::List(vec![
-                Value::Str("b".into()), // 3 (first of the equal run — stable)
-                Value::Str("c".into()), // 3
-                Value::Str("a".into()), // 1
+                Value::Str("b".into()),       // 3 (first of the equal run — stable)
+                Value::Str("c".into()),       // 3
+                Value::Str("a".into()),       // 1
                 Value::Str("missing".into()), // missing column stays last
             ])
         );
@@ -1142,7 +1328,11 @@ mod tests {
         // Since `str` resolves as a group, the diagnostic can name it rather
         // than reporting the whole phrase as one unknown command.
         let err = eval("str upcsae hi").expect_err("typo");
-        assert!(err.msg.contains("`str` has no subcommand `upcsae`"), "{}", err.msg);
+        assert!(
+            err.msg.contains("`str` has no subcommand `upcsae`"),
+            "{}",
+            err.msg
+        );
         assert_eq!(err.help.as_deref(), Some("did you mean `str upcase`?"));
     }
 
@@ -1172,8 +1362,11 @@ mod tests {
         // One row survives, and one row is still a table: `length` answers 1
         // rather than erroring on a bare record. This is the case the note
         // above describes.
-        let v = eval(&format!("echo {} | from json | grep Rust | length", table_json()))
-            .expect("a one-row table is still a table");
+        let v = eval(&format!(
+            "echo {} | from json | grep Rust | length",
+            table_json()
+        ))
+        .expect("a one-row table is still a table");
         assert_eq!(v, Value::Int(1));
 
         // `get` on a one-row table still returns the field as a scalar —
@@ -1205,8 +1398,10 @@ mod tests {
         let v = eval(&format!("echo {json} | from json | grep rust | length")).expect("eval");
         assert_eq!(v, Value::Int(2));
         // --on t leaves exactly one row; `get href` reads its column.
-        let v = eval(&format!("echo {json} | from json | grep rust --on t | get href"))
-            .expect("eval");
+        let v = eval(&format!(
+            "echo {json} | from json | grep rust --on t | get href"
+        ))
+        .expect("eval");
         assert_eq!(v, Value::Str("a".into()));
     }
 
@@ -1254,8 +1449,10 @@ mod tests {
 
         // And the path really is being walked: a value that appears nowhere
         // under u.name matches nothing rather than everything.
-        let v = eval(&format!("echo {json} | from json | grep zzz --on u.name | length"))
-            .expect("eval");
+        let v = eval(&format!(
+            "echo {json} | from json | grep zzz --on u.name | length"
+        ))
+        .expect("eval");
         assert_eq!(v, Value::Int(0));
     }
 
@@ -1266,7 +1463,10 @@ mod tests {
         let a = eval(&format!("echo {json} | from json | sort-by n | get n")).expect("eval");
         let b = eval(&format!("echo {json} | from json | sort-by --on n | get n")).expect("eval");
         assert_eq!(a, b);
-        assert_eq!(a, Value::List(vec![Value::Int(1), Value::Int(2), Value::Int(3)]));
+        assert_eq!(
+            a,
+            Value::List(vec![Value::Int(1), Value::Int(2), Value::Int(3)])
+        );
     }
 
     #[test]
@@ -1305,7 +1505,8 @@ mod tests {
         // rely on. So a field-name typo in `map` now silently produces
         // `null`s instead of erroring — a real, reported trade-off of
         // streaming, not a bug to patch by making `project` throw.
-        let v = eval(r#"echo '[{"a":1},{"a":2}]' | from json | map nope"#).expect("no longer errors");
+        let v =
+            eval(r#"echo '[{"a":1},{"a":2}]' | from json | map nope"#).expect("no longer errors");
         assert_eq!(v, Value::List(vec![Value::Null, Value::Null]));
     }
 
@@ -1313,8 +1514,8 @@ mod tests {
     fn inline_functions_need_a_js_host_natively() {
         // The native test host has no scripting engine; the error must say
         // so rather than mangling the source into a field name.
-        let err = eval(r#"echo '[{"a":1}]' | from json | map '(o) => o.a'"#)
-            .expect_err("no js host");
+        let err =
+            eval(r#"echo '[{"a":1}]' | from json | map '(o) => o.a'"#).expect_err("no js host");
         assert!(err.msg.contains("JavaScript host"), "{}", err.msg);
     }
 
@@ -1343,8 +1544,8 @@ mod tests {
         // `List`, not `Empty` — only the pipeline's terminal boundary treats
         // zero items as "no value" — so `length` sees `[]` and correctly
         // returns 0, exactly as before the streaming-commands change.
-        let v = eval(r#"echo '[{"a":"x"},{"a":"y"}]' | from json | grep zzz | length"#)
-            .expect("eval");
+        let v =
+            eval(r#"echo '[{"a":"x"},{"a":"y"}]' | from json | grep zzz | length"#).expect("eval");
         assert_eq!(v, Value::Int(0));
     }
 
@@ -1376,7 +1577,10 @@ mod tests {
         // record first (see the batch-model note above) — this test is
         // about composition with `head`/`get`, not about the row count.
         let json = r#"'[{"text":"Wasm1","href":"a"},{"text":"Wasm2","href":"b"},{"text":"Rust","href":"c"}]'"#;
-        let v = eval(&format!("echo {json} | from json | grep -i wasm | head 1 | get text")).expect("eval");
+        let v = eval(&format!(
+            "echo {json} | from json | grep -i wasm | head 1 | get text"
+        ))
+        .expect("eval");
         assert_eq!(v, Value::Str("Wasm1".into()));
     }
 
@@ -1389,15 +1593,20 @@ mod tests {
     #[test]
     fn closure_filters_without_any_host_engine() {
         let json = r#"'[{"id":1},{"id":7},{"id":9}]'"#;
-        let v = eval(&format!("echo {json} | from json | filter {{|o| $o.id > 5}} | length"))
-            .expect("eval");
+        let v = eval(&format!(
+            "echo {json} | from json | filter {{|o| $o.id > 5}} | length"
+        ))
+        .expect("eval");
         assert_eq!(v, Value::Int(2));
     }
 
     #[test]
     fn closure_maps_and_computes() {
         let json = r#"'[{"a":1,"b":2},{"a":10,"b":20}]'"#;
-        let v = eval(&format!("echo {json} | from json | map {{|o| $o.a + $o.b}}")).expect("eval");
+        let v = eval(&format!(
+            "echo {json} | from json | map {{|o| $o.a + $o.b}}"
+        ))
+        .expect("eval");
         assert_eq!(v, Value::List(vec![Value::Int(3), Value::Int(30)]));
     }
 
@@ -1415,8 +1624,10 @@ mod tests {
         // to a bare record before `get` sees it, returning a scalar rather
         // than a one-element list — see the batch-model note above
         // `grep_filters_table_rows_across_all_columns`.
-        let v = eval(&format!("echo {json} | from json | grep rust --on {{|o| $o.t}} | get n"))
-            .expect("eval");
+        let v = eval(&format!(
+            "echo {json} | from json | grep rust --on {{|o| $o.t}} | get n"
+        ))
+        .expect("eval");
         assert_eq!(v, Value::Int(1));
     }
 
@@ -1444,14 +1655,17 @@ mod tests {
     #[test]
     fn closure_errors_are_spanned_not_panics() {
         // Unknown variable inside a closure body.
-        let err = eval(r#"echo '[{"a":1}]' | from json | map {|o| $nope.a}"#)
-            .expect_err("unknown var");
+        let err =
+            eval(r#"echo '[{"a":1}]' | from json | map {|o| $nope.a}"#).expect_err("unknown var");
         assert!(err.msg.contains("unknown variable"), "{}", err.msg);
     }
 
     #[test]
     fn malformed_closures_report_clearly() {
-        assert!(eval_any("echo 1 | map {|o| $o.a").is_err(), "unterminated closure");
+        assert!(
+            eval_any("echo 1 | map {|o| $o.a").is_err(),
+            "unterminated closure"
+        );
         assert!(eval_any("echo 1 | map {$o}").is_err(), "missing parameters");
     }
 
@@ -1476,24 +1690,37 @@ mod tests {
     #[test]
     fn unknown_subcommand_suggests_a_sibling_not_a_stranger() {
         let err = eval("mux windo").expect_err("bad subcommand");
-        assert!(err.msg.contains("`mux` has no subcommand `windo`"), "{}", err.msg);
+        assert!(
+            err.msg.contains("`mux` has no subcommand `windo`"),
+            "{}",
+            err.msg
+        );
         assert_eq!(err.help.as_deref(), Some("did you mean `mux window`?"));
 
         // Nothing close: point at the group listing rather than guess.
         let err = eval("str frobnicate").expect_err("bad subcommand");
-        assert_eq!(err.help.as_deref(), Some("run `str` to list its subcommands"));
+        assert_eq!(
+            err.help.as_deref(),
+            Some("run `str` to list its subcommands")
+        );
     }
 
     #[test]
     fn a_real_command_wins_over_the_group_page() {
         // `to json` exists and `to` is a group; resolving the command must
         // still take priority over listing.
-        assert_eq!(eval("echo 1 | to json").expect("eval"), Value::Str("1".into()));
+        assert_eq!(
+            eval("echo 1 | to json").expect("eval"),
+            Value::Str("1".into())
+        );
     }
 
     #[test]
     fn quoted_true_stays_string_bareword_true_is_bool() {
-        assert_eq!(eval("echo 'true'").expect("eval"), Value::Str("true".into()));
+        assert_eq!(
+            eval("echo 'true'").expect("eval"),
+            Value::Str("true".into())
+        );
         assert_eq!(eval("echo true").expect("eval"), Value::Bool(true));
     }
 
@@ -1517,7 +1744,11 @@ mod tests {
                 let mut n = 0i64;
                 loop {
                     n += 1;
-                    if output.send(PipelineData::Value(Value::Int(n))).await.is_err() {
+                    if output
+                        .send(PipelineData::Value(Value::Int(n)))
+                        .await
+                        .is_err()
+                    {
                         sent.set(n - 1); // the last send failed: head closed us
                         return Ok(());
                     }
@@ -1543,12 +1774,15 @@ mod tests {
         };
         let out = parse("counter | head 3");
         assert!(out.errors.is_empty(), "{:?}", out.errors);
-        let (mut results, error) =
-            block_on(eval_line(&out.line, &registry, &ctx, &Scope::new()));
+        let (mut results, error) = block_on(eval_line(&out.line, &registry, &ctx, &Scope::new()));
         assert!(error.is_none(), "{:?}", error);
         assert_eq!(
             results.pop().map(PipelineData::into_value),
-            Some(Value::List(vec![Value::Int(1), Value::Int(2), Value::Int(3)]))
+            Some(Value::List(vec![
+                Value::Int(1),
+                Value::Int(2),
+                Value::Int(3)
+            ]))
         );
         // The producer must have stopped, not run away. With STAGE_BUFFER=64
         // it may get a bufferful ahead, but it must be bounded and must have
@@ -1575,12 +1809,15 @@ mod tests {
         // Keep evens, take 3 -> 2,4,6. If filter collected, this hangs.
         let out = parse("counter | filter {|n| $n % 2 == 0} | head 3");
         assert!(out.errors.is_empty(), "{:?}", out.errors);
-        let (mut results, error) =
-            block_on(eval_line(&out.line, &registry, &ctx, &Scope::new()));
+        let (mut results, error) = block_on(eval_line(&out.line, &registry, &ctx, &Scope::new()));
         assert!(error.is_none(), "{:?}", error);
         assert_eq!(
             results.pop().map(PipelineData::into_value),
-            Some(Value::List(vec![Value::Int(2), Value::Int(4), Value::Int(6)]))
+            Some(Value::List(vec![
+                Value::Int(2),
+                Value::Int(4),
+                Value::Int(6)
+            ]))
         );
         assert!(sent.get() < 1000, "producer did not stop: {}", sent.get());
     }

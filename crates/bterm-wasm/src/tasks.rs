@@ -134,8 +134,15 @@ pub fn next_id() -> u64 {
 
 pub fn register(run_id: u64, pane: u32, handle: AbortHandle, controller: web_sys::AbortController) {
     TASKS.with(|t| {
-        t.borrow_mut()
-            .insert(run_id, TaskEntry { pane, handle, controller, probe_timeout: None });
+        t.borrow_mut().insert(
+            run_id,
+            TaskEntry {
+                pane,
+                handle,
+                controller,
+                probe_timeout: None,
+            },
+        );
     });
 }
 
@@ -259,7 +266,11 @@ mod tests {
     /// nothing, and therefore lost unless the run's end drains it.
     fn partial(text: &str) -> Rc<RefCell<OutputBuffer>> {
         let buf = Rc::new(RefCell::new(OutputBuffer::new()));
-        assert_eq!(buf.borrow_mut().write(text), None, "a partial line must stay buffered");
+        assert_eq!(
+            buf.borrow_mut().write(text),
+            None,
+            "a partial line must stay buffered"
+        );
         buf
     }
 
@@ -323,7 +334,10 @@ mod tests {
         register_buffer(7, buf.clone(), sink.clone(), Channel::Log);
 
         flush_buffers(7);
-        assert!(sink.log_lines().is_empty(), "wrote to a sink after dispose()");
+        assert!(
+            sink.log_lines().is_empty(),
+            "wrote to a sink after dispose()"
+        );
         assert_eq!(Rc::strong_count(&buf), 1, "the entry outlived the engine");
     }
 }
