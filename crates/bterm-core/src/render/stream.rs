@@ -29,7 +29,12 @@ struct Committed {
 
 impl StreamRenderer {
     pub fn new(width: u16, probe_rows: usize) -> Self {
-        StreamRenderer { width, probe_rows, probe: Vec::new(), committed: None }
+        StreamRenderer {
+            width,
+            probe_rows,
+            probe: Vec::new(),
+            committed: None,
+        }
     }
 
     /// Feed one record. `None` while probing; on the commit transition the
@@ -71,7 +76,10 @@ impl StreamRenderer {
             // result would render differently here than through
             // run()/the CLI. `widths` stays empty, which `finish` uses to
             // know not to append a bottom border for this case.
-            self.committed = Some(Committed { cols, widths: Vec::new() });
+            self.committed = Some(Committed {
+                cols,
+                widths: Vec::new(),
+            });
             return Some(format!("{DIM}({} empty records){RESET}\n", rows.len()));
         }
         let widths = column_widths(&cols, &rows, self.width);
@@ -130,7 +138,10 @@ mod tests {
         assert_eq!(r.push(rec(1)), None, "still probing");
         let committed = r.push(rec(2)).expect("commit on 2nd row");
         assert!(committed.contains("id"), "header painted: {committed:?}");
-        assert!(committed.contains('1') && committed.contains('2'), "probe rows: {committed:?}");
+        assert!(
+            committed.contains('1') && committed.contains('2'),
+            "probe rows: {committed:?}"
+        );
 
         let third = r.push(rec(3)).expect("streamed row");
         assert!(third.contains('3'));

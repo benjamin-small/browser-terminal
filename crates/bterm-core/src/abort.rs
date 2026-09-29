@@ -45,7 +45,13 @@ pub struct Abortable<F> {
 impl<F: Future> Abortable<F> {
     pub fn wrap(inner: F) -> (Self, AbortHandle) {
         let state = Rc::new(AbortState::default());
-        (Abortable { inner, state: state.clone() }, AbortHandle(state))
+        (
+            Abortable {
+                inner,
+                state: state.clone(),
+            },
+            AbortHandle(state),
+        )
     }
 }
 
@@ -80,7 +86,10 @@ mod tests {
                 raw()
             }
             fn noop(_: *const ()) {}
-            RawWaker::new(std::ptr::null(), &RawWakerVTable::new(clone, noop, noop, noop))
+            RawWaker::new(
+                std::ptr::null(),
+                &RawWakerVTable::new(clone, noop, noop, noop),
+            )
         }
         // SAFETY: all vtable fns are no-ops.
         unsafe { Waker::from_raw(raw()) }

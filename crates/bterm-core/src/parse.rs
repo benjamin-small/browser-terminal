@@ -190,7 +190,10 @@ impl Parser {
         let mut words: Vec<Spanned<String>> = Vec::new();
         while let Some(tok) = self.peek() {
             if let TokenKind::Bareword(w) = &tok.kind {
-                words.push(Spanned { node: w.clone(), span: tok.span });
+                words.push(Spanned {
+                    node: w.clone(),
+                    span: tok.span,
+                });
                 self.next();
             } else {
                 break;
@@ -217,8 +220,10 @@ impl Parser {
                 TokenKind::Pipe | TokenKind::Semi => break,
                 TokenKind::Op(Op::Gt | Op::Lt) if self.redirects => break,
                 TokenKind::Reserved(r) => {
-                    return Err(ShellError::parse(format!("`{r}` is not supported yet"), tok.span)
-                        .with_help("this syntax is reserved for a future version"));
+                    return Err(
+                        ShellError::parse(format!("`{r}` is not supported yet"), tok.span)
+                            .with_help("this syntax is reserved for a future version"),
+                    );
                 }
                 TokenKind::Flag { name, long, has_eq } => {
                     self.next();
@@ -234,7 +239,12 @@ impl Parser {
                         None => tok.span,
                     };
                     span = span.merge(fspan);
-                    args.push(Arg::Flag { name, long, span: fspan, value });
+                    args.push(Arg::Flag {
+                        name,
+                        long,
+                        span: fspan,
+                        value,
+                    });
                 }
                 _ => {
                     let expr = self.parse_expr()?;
@@ -293,9 +303,18 @@ impl Parser {
                 // an empty list is written `{|| …}` and arrives as one token.
                 loop {
                     match self.next() {
-                        Some(Token { kind: TokenKind::Pipe, .. }) => break,
-                        Some(Token { kind: TokenKind::Bareword(name), .. }) => params.push(name),
-                        Some(Token { kind: TokenKind::Var(name), .. }) => params.push(name),
+                        Some(Token {
+                            kind: TokenKind::Pipe,
+                            ..
+                        }) => break,
+                        Some(Token {
+                            kind: TokenKind::Bareword(name),
+                            ..
+                        }) => params.push(name),
+                        Some(Token {
+                            kind: TokenKind::Var(name),
+                            ..
+                        }) => params.push(name),
                         Some(tok) => {
                             return Err(ShellError::parse(
                                 format!("expected a parameter name, found {}", describe(&tok.kind)),
@@ -315,22 +334,27 @@ impl Parser {
                 self.next(); // `||` — no parameters
             }
             _ => {
-                return Err(ShellError::parse(
-                    "a closure needs parameters: `{|x| …}`",
-                    open,
+                return Err(
+                    ShellError::parse("a closure needs parameters: `{|x| …}`", open)
+                        .with_help("use `{|| …}` for a closure that takes nothing"),
                 )
-                .with_help("use `{|| …}` for a closure that takes nothing"))
             }
         }
 
         let body = self.parse_operator_expr(0)?;
         match self.next() {
-            Some(Token { kind: TokenKind::Op(Op::RBrace), span }) => Ok(Expr::Closure(
+            Some(Token {
+                kind: TokenKind::Op(Op::RBrace),
+                span,
+            }) => Ok(Expr::Closure(
                 Box::new(Closure { params, body }),
                 open.merge(span),
             )),
             Some(tok) => Err(ShellError::parse(
-                format!("expected `}}` to close the closure, found {}", describe(&tok.kind)),
+                format!(
+                    "expected `}}` to close the closure, found {}",
+                    describe(&tok.kind)
+                ),
                 tok.span,
             )),
             None => Err(ShellError::parse(
@@ -354,7 +378,12 @@ impl Parser {
             // Left-associative: the right side must bind strictly tighter.
             let rhs = self.parse_operator_expr(bp + 1)?;
             let span = lhs.span().merge(rhs.span());
-            lhs = Expr::Binary { op: bin, lhs: Box::new(lhs), rhs: Box::new(rhs), span };
+            lhs = Expr::Binary {
+                op: bin,
+                lhs: Box::new(lhs),
+                rhs: Box::new(rhs),
+                span,
+            };
         }
         Ok(lhs)
     }
@@ -370,7 +399,11 @@ impl Parser {
                 self.next();
                 let operand = self.parse_unary()?;
                 let span = tok.span.merge(operand.span());
-                return Ok(Expr::Unary { op, operand: Box::new(operand), span });
+                return Ok(Expr::Unary {
+                    op,
+                    operand: Box::new(operand),
+                    span,
+                });
             }
         }
         self.parse_postfix()
@@ -381,7 +414,11 @@ impl Parser {
         let mut expr = self.parse_primary()?;
         // The lexer already folds `.` into barewords, so `$x.a.b` arrives as
         // Var("x") followed by Bareword(".a.b").
-        while let Some(Token { kind: TokenKind::Bareword(w), span }) = self.peek().cloned() {
+        while let Some(Token {
+            kind: TokenKind::Bareword(w),
+            span,
+        }) = self.peek().cloned()
+        {
             if !w.starts_with('.') {
                 break;
             }
@@ -396,7 +433,11 @@ impl Parser {
                 return Err(ShellError::parse("expected a field name after `.`", span));
             }
             let full = expr.span().merge(span);
-            expr = Expr::Field { base: Box::new(expr), path, span: full };
+            expr = Expr::Field {
+                base: Box::new(expr),
+                path,
+                span: full,
+            };
         }
         Ok(expr)
     }
@@ -420,7 +461,10 @@ impl Parser {
             TokenKind::Op(Op::LParen) => {
                 let inner = self.parse_operator_expr(0)?;
                 match self.next() {
-                    Some(Token { kind: TokenKind::Op(Op::RParen), .. }) => Ok(inner),
+                    Some(Token {
+                        kind: TokenKind::Op(Op::RParen),
+                        ..
+                    }) => Ok(inner),
                     Some(t) => Err(ShellError::parse(
                         format!("expected `)`, found {}", describe(&t.kind)),
                         t.span,
@@ -428,11 +472,10 @@ impl Parser {
                     None => Err(ShellError::parse("expected `)`", tok.span)),
                 }
             }
-            TokenKind::Op(Op::Assign) => Err(ShellError::parse(
-                "`=` is not an operator here",
-                tok.span,
-            )
-            .with_help("use `==` to compare")),
+            TokenKind::Op(Op::Assign) => {
+                Err(ShellError::parse("`=` is not an operator here", tok.span)
+                    .with_help("use `==` to compare"))
+            }
             other => Err(ShellError::parse(
                 format!("expected a value, found {}", describe(&other)),
                 tok.span,
@@ -515,7 +558,10 @@ mod tests {
         let line = ok("str upcase hello");
         let call = &line.pipelines[0].calls[0];
         assert_eq!(
-            call.words.iter().map(|w| w.node.as_str()).collect::<Vec<_>>(),
+            call.words
+                .iter()
+                .map(|w| w.node.as_str())
+                .collect::<Vec<_>>(),
             vec!["str", "upcase", "hello"]
         );
     }
@@ -532,7 +578,11 @@ mod tests {
         let line = ok("links --limit=20");
         let call = &line.pipelines[0].calls[0];
         match &call.args[0] {
-            Arg::Flag { name, value: Some(Expr::Literal(Value::Int(20), _)), .. } => {
+            Arg::Flag {
+                name,
+                value: Some(Expr::Literal(Value::Int(20), _)),
+                ..
+            } => {
                 assert_eq!(name, "limit");
             }
             other => panic!("unexpected arg: {other:?}"),
@@ -545,7 +595,11 @@ mod tests {
         // tells you where operators *do* work rather than saying "reserved".
         let out = parse("echo (1 + 2)");
         assert_eq!(out.errors.len(), 1);
-        assert!(out.errors[0].msg.contains("only be used inside a closure"), "{}", out.errors[0].msg);
+        assert!(
+            out.errors[0].msg.contains("only be used inside a closure"),
+            "{}",
+            out.errors[0].msg
+        );
         assert!(out.errors[0].help.as_deref().unwrap_or("").contains("{|x|"));
     }
 

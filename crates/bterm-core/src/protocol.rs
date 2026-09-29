@@ -10,19 +10,34 @@ use serde::{Deserialize, Serialize};
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum EngineEvent {
     /// Bytes to write to a pane's terminal (already `\r\n`-converted).
-    PaneOutput { pane: u32, data: String },
+    PaneOutput {
+        pane: u32,
+        data: String,
+    },
     /// The pane/window/session arrangement changed; reconcile from the
     /// snapshot.
-    LayoutChanged { snapshot: LayoutSnapshot },
-    PaneOpened { pane: u32 },
-    PaneClosed { pane: u32 },
-    SessionClosed { session: u32 },
+    LayoutChanged {
+        snapshot: LayoutSnapshot,
+    },
+    PaneOpened {
+        pane: u32,
+    },
+    PaneClosed {
+        pane: u32,
+    },
+    SessionClosed {
+        session: u32,
+    },
     /// Prefix armed/disarmed — drive the PREFIX status cell and pane outline.
-    PrefixState { active: bool },
+    PrefixState {
+        active: bool,
+    },
     /// `mux hide` (prefix-d): the host should hide the panel.
     HidePanel,
     /// The engine hit a non-recoverable state; the wrapper should disable input.
-    Fatal { message: String },
+    Fatal {
+        message: String,
+    },
 }
 
 /// Host → engine control messages (`dispatch`).

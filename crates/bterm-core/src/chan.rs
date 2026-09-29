@@ -42,7 +42,10 @@ struct Inner {
 }
 
 pub fn channel(capacity: usize) -> (Sender, Receiver) {
-    debug_assert!(capacity > 0, "a zero-capacity channel can never accept an item");
+    debug_assert!(
+        capacity > 0,
+        "a zero-capacity channel can never accept an item"
+    );
     let inner = Rc::new(RefCell::new(Inner {
         buffer: VecDeque::new(),
         capacity,
@@ -52,7 +55,12 @@ pub fn channel(capacity: usize) -> (Sender, Receiver) {
         send_waker: None,
         batched: Rc::new(Cell::new(false)),
     }));
-    (Sender { inner: inner.clone() }, Receiver { inner })
+    (
+        Sender {
+            inner: inner.clone(),
+        },
+        Receiver { inner },
+    )
 }
 
 pub struct Sender {
@@ -241,7 +249,10 @@ mod tests {
                     raw()
                 }
                 fn noop(_: *const ()) {}
-                RawWaker::new(std::ptr::null(), &RawWakerVTable::new(clone, noop, noop, noop))
+                RawWaker::new(
+                    std::ptr::null(),
+                    &RawWakerVTable::new(clone, noop, noop, noop),
+                )
             }
             // SAFETY: every vtable entry is a no-op over a null pointer.
             unsafe { Waker::from_raw(raw()) }

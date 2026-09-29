@@ -81,11 +81,24 @@ pub enum Expr {
     /// `$var`
     Var(String, Span),
     /// `$x.field.nested` — field access on any expression.
-    Field { base: Box<Expr>, path: Vec<String>, span: Span },
+    Field {
+        base: Box<Expr>,
+        path: Vec<String>,
+        span: Span,
+    },
     /// `a + b`, `a > b`, `a && b`, …
-    Binary { op: BinOp, lhs: Box<Expr>, rhs: Box<Expr>, span: Span },
+    Binary {
+        op: BinOp,
+        lhs: Box<Expr>,
+        rhs: Box<Expr>,
+        span: Span,
+    },
     /// `-a`, `!a`
-    Unary { op: UnOp, operand: Box<Expr>, span: Span },
+    Unary {
+        op: UnOp,
+        operand: Box<Expr>,
+        span: Span,
+    },
     /// `{|x| expr}` — a closure literal. Only valid where a signature
     /// declares `Shape::Callable`; bind turns it into a callable.
     Closure(Box<Closure>, Span),

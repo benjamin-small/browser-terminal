@@ -238,7 +238,10 @@ fn render_list(items: &[Value]) -> String {
     let idx_width = (items.len() - 1).to_string().len();
     let mut out = String::new();
     for (i, item) in items.iter().enumerate() {
-        out.push_str(&format!("{DIM}{i:>idx_width$}{RESET}  {}\n", colored_scalar(item)));
+        out.push_str(&format!(
+            "{DIM}{i:>idx_width$}{RESET}  {}\n",
+            colored_scalar(item)
+        ));
     }
     out
 }
@@ -248,7 +251,11 @@ fn render_record(map: &indexmap::IndexMap<String, Value>) -> String {
         return format!("{DIM}(empty record){RESET}\n");
     }
     let keys: Vec<String> = map.keys().map(|k| cell_text(k)).collect();
-    let key_width = keys.iter().map(|k| UnicodeWidthStr::width(k.as_str())).max().unwrap_or(0);
+    let key_width = keys
+        .iter()
+        .map(|k| UnicodeWidthStr::width(k.as_str()))
+        .max()
+        .unwrap_or(0);
     let mut out = String::new();
     for (k, v) in keys.iter().zip(map.values()) {
         let pad = " ".repeat(key_width - UnicodeWidthStr::width(k.as_str()));
@@ -276,7 +283,10 @@ pub(crate) fn table_columns(rows: &[Value]) -> Vec<String> {
 fn cell(row: &Value, col: &str) -> (String, bool) {
     match row {
         Value::Record(map) => match map.get(col) {
-            Some(v) => (cell_text(&plain(v)), matches!(v, Value::Int(_) | Value::Float(_))),
+            Some(v) => (
+                cell_text(&plain(v)),
+                matches!(v, Value::Int(_) | Value::Float(_)),
+            ),
             None => (String::new(), false),
         },
         _ => (String::new(), false),
@@ -456,10 +466,7 @@ mod tests {
         let out = strip_ansi(&render(&table_fixture(), 24));
         assert!(out.contains('…'), "expected truncation:\n{out}");
         for line in out.lines() {
-            assert!(
-                UnicodeWidthStr::width(line) <= 26,
-                "line too wide: {line}"
-            );
+            assert!(UnicodeWidthStr::width(line) <= 26, "line too wide: {line}");
         }
     }
 
@@ -531,7 +538,10 @@ mod tests {
         // These string-type escapes take an arbitrary-length body (e.g. a
         // Sixel image in a DCS). The old generic two-char-escape branch only
         // ate the introducer, leaving the payload as visible garbage.
-        let v = Value::Str("a\x1bPsixel-junk\x1b\\b\x1b_apc-junk\x07c\x1b^pm-junk\x1b\\d\x1bXsos-junk\x1b\\e".into());
+        let v = Value::Str(
+            "a\x1bPsixel-junk\x1b\\b\x1b_apc-junk\x07c\x1b^pm-junk\x1b\\d\x1bXsos-junk\x1b\\e"
+                .into(),
+        );
         let out = strip_ansi(&render(&v, 80));
         assert_eq!(out, "abcde\n", "got {out:?}");
     }
@@ -539,14 +549,12 @@ mod tests {
     #[test]
     fn escapes_in_table_cells_do_not_skew_column_width() {
         // A colored cell must not count its escape bytes as visible width.
-        let v = Value::List(vec![Value::record([
-            ("a".to_string(), Value::Str("\x1b[31mred\x1b[0m".into())),
-        ])]);
+        let v = Value::List(vec![Value::record([(
+            "a".to_string(),
+            Value::Str("\x1b[31mred\x1b[0m".into()),
+        )])]);
         let out = strip_ansi(&render(&v, 80));
-        let widths: Vec<usize> = out
-            .lines()
-            .map(UnicodeWidthStr::width)
-            .collect();
+        let widths: Vec<usize> = out.lines().map(UnicodeWidthStr::width).collect();
         assert!(
             widths.windows(2).all(|w| w[0] == w[1]),
             "table rows must line up: {widths:?}\n{out}"
@@ -640,6 +648,9 @@ mod tests {
         // An unterminated string escape swallows its body (no litter).
         assert_eq!(writer_text("a\x1b]0;never-ends"), "a");
         // An SGR with a huge/odd param list is still just styling.
-        assert_eq!(writer_text("\x1b[1;38;5;196mx\x1b[0m"), "\x1b[1;38;5;196mx\x1b[0m");
+        assert_eq!(
+            writer_text("\x1b[1;38;5;196mx\x1b[0m"),
+            "\x1b[1;38;5;196mx\x1b[0m"
+        );
     }
 }

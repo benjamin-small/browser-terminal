@@ -17,8 +17,8 @@
 mod convert;
 mod js_command;
 mod js_fn;
-mod js_regex;
 mod js_redirect;
+mod js_regex;
 mod tasks;
 
 use bterm_core::abort::Abortable;
@@ -128,8 +128,16 @@ fn js_error(msg: impl AsRef<str>) -> JsValue {
 /// with no check would silently continue.
 fn run_rejection(msg: &str, sink: &bterm_core::sink::CollectingSink) -> JsValue {
     let e = js_sys::Error::new(msg);
-    let _ = js_sys::Reflect::set(&e, &JsValue::from_str("log"), &string_array(&sink.log_lines()));
-    let _ = js_sys::Reflect::set(&e, &JsValue::from_str("err"), &string_array(&sink.err_lines()));
+    let _ = js_sys::Reflect::set(
+        &e,
+        &JsValue::from_str("log"),
+        &string_array(&sink.log_lines()),
+    );
+    let _ = js_sys::Reflect::set(
+        &e,
+        &JsValue::from_str("err"),
+        &string_array(&sink.err_lines()),
+    );
     e.into()
 }
 
@@ -248,9 +256,7 @@ fn var_target(opts: &JsValue) -> Result<VarTarget, JsValue> {
                 .ok()
                 .and_then(|v| v.as_f64())
                 .ok_or_else(|| {
-                    js_error(
-                        "{ scope: 'session' } needs a `session` id from snapshot.sessions",
-                    )
+                    js_error("{ scope: 'session' } needs a `session` id from snapshot.sessions")
                 })?;
             Ok(VarTarget::Session(id as u32))
         }
@@ -307,7 +313,9 @@ impl BtermCore {
         let json = js_sys::JSON::stringify(&msg)
             .map_err(|_| js_error("invalid HostMsg: not JSON-serializable"))?;
         let msg: bterm_core::protocol::HostMsg = serde_json::from_str(
-            &json.as_string().ok_or_else(|| js_error("invalid HostMsg"))?,
+            &json
+                .as_string()
+                .ok_or_else(|| js_error("invalid HostMsg"))?,
         )
         .map_err(|e| js_error(format!("invalid HostMsg: {e}")))?;
 
@@ -725,9 +733,7 @@ impl BtermCore {
     /// same tick rejects it with `aborted`.
     pub fn run(&self, pane: u32, line: String) -> js_sys::Promise {
         if !engine_alive() {
-            return js_sys::Promise::reject(&js_error(
-                "browser-terminal: engine is disposed",
-            ));
+            return js_sys::Promise::reject(&js_error("browser-terminal: engine is disposed"));
         }
         let run_id = tasks::next_id();
         let Ok(controller) = web_sys::AbortController::new() else {

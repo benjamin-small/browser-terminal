@@ -213,13 +213,22 @@ impl CommandRegistry {
     pub fn register_builtin(&mut self, command: Rc<dyn Command>) {
         let name = command.signature().name.clone();
         debug_assert!(!self.map.contains_key(&name), "duplicate builtin `{name}`");
-        self.map.insert(name, Entry { command, origin: CmdOrigin::Builtin });
+        self.map.insert(
+            name,
+            Entry {
+                command,
+                origin: CmdOrigin::Builtin,
+            },
+        );
     }
 
     /// Register an external (TS) command. Errors if the name is owned by a
     /// builtin. Replacing a previous external registration is allowed (the
     /// deliberate HMR behavior) and reported via `Replaced`.
-    pub fn register_external(&mut self, command: Rc<dyn Command>) -> Result<RegisterOutcome, ShellError> {
+    pub fn register_external(
+        &mut self,
+        command: Rc<dyn Command>,
+    ) -> Result<RegisterOutcome, ShellError> {
         let name = command.signature().name.clone();
         match self.map.get(&name) {
             Some(e) if e.origin == CmdOrigin::Builtin => Err(ShellError::new(
@@ -227,11 +236,23 @@ impl CommandRegistry {
                 format!("cannot register `{name}`: it is a built-in command"),
             )),
             Some(_) => {
-                self.map.insert(name, Entry { command, origin: CmdOrigin::External });
+                self.map.insert(
+                    name,
+                    Entry {
+                        command,
+                        origin: CmdOrigin::External,
+                    },
+                );
                 Ok(RegisterOutcome::Replaced)
             }
             None => {
-                self.map.insert(name, Entry { command, origin: CmdOrigin::External });
+                self.map.insert(
+                    name,
+                    Entry {
+                        command,
+                        origin: CmdOrigin::External,
+                    },
+                );
                 Ok(RegisterOutcome::Added)
             }
         }
@@ -348,9 +369,12 @@ impl CommandRegistry {
             }
         }
         let word = &words[0];
-        ShellError::new(ErrorKind::UnknownCommand, format!("unknown command `{}`", word.node))
-            .with_span(word.span)
-            .with_help("run `help` to list commands")
+        ShellError::new(
+            ErrorKind::UnknownCommand,
+            format!("unknown command `{}`", word.node),
+        )
+        .with_span(word.span)
+        .with_help("run `help` to list commands")
     }
 }
 

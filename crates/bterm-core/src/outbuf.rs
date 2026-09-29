@@ -162,7 +162,11 @@ impl OutputBuffer {
     fn emit_through(&mut self, text: &str) -> Option<String> {
         if self.buf.is_empty() {
             self.scanned = 0;
-            return if text.is_empty() { None } else { Some(text.to_string()) };
+            return if text.is_empty() {
+                None
+            } else {
+                Some(text.to_string())
+            };
         }
         let mut out = std::mem::take(&mut self.buf);
         out.push_str(text);
@@ -198,7 +202,10 @@ mod tests {
     fn line_mode_flushes_on_the_delimiter() {
         let mut b = OutputBuffer::new();
         assert_eq!(b.write("no newline yet"), None);
-        assert_eq!(b.write(" then\none"), Some("no newline yet then\n".to_string()));
+        assert_eq!(
+            b.write(" then\none"),
+            Some("no newline yet then\n".to_string())
+        );
         // The remainder stays buffered until the next delimiter or the end.
         assert_eq!(b.finish(), Some("one".to_string()));
     }
@@ -217,7 +224,11 @@ mod tests {
         // Null-delimited framing, the `find -print0` idiom.
         let mut b = OutputBuffer::new();
         b.set_mode(Mode::Line, Some("\0".to_string()));
-        assert_eq!(b.write("a\nstill buffered"), None, "\\n is not the delimiter now");
+        assert_eq!(
+            b.write("a\nstill buffered"),
+            None,
+            "\\n is not the delimiter now"
+        );
         assert_eq!(b.write("\0rest"), Some("a\nstill buffered\0".to_string()));
     }
 
@@ -234,7 +245,11 @@ mod tests {
     fn block_mode_holds_until_flushed() {
         let mut b = OutputBuffer::new();
         b.set_mode(Mode::Block, None);
-        assert_eq!(b.write("a\nb\nc\n"), None, "newlines do not flush in block mode");
+        assert_eq!(
+            b.write("a\nb\nc\n"),
+            None,
+            "newlines do not flush in block mode"
+        );
         assert_eq!(b.flush(), Some("a\nb\nc\n".to_string()));
         assert_eq!(b.flush(), None, "nothing left to flush");
     }
@@ -246,7 +261,11 @@ mod tests {
         b.set_mode(Mode::Block, None);
         let big = "x".repeat(BLOCK_LIMIT + 10);
         let flushed = b.write(&big).expect("a full buffer flushes itself");
-        assert_eq!(flushed.len(), big.len(), "everything buffered so far is flushed");
+        assert_eq!(
+            flushed.len(),
+            big.len(),
+            "everything buffered so far is flushed"
+        );
     }
 
     #[test]
@@ -296,7 +315,11 @@ mod tests {
         for _ in 0..writes {
             if let Some(out) = b.write(&chunk) {
                 emitted += out.len();
-                assert!(out.len() <= 2 * BLOCK_LIMIT, "a single flush ran away: {}", out.len());
+                assert!(
+                    out.len() <= 2 * BLOCK_LIMIT,
+                    "a single flush ran away: {}",
+                    out.len()
+                );
             }
         }
         let held = b.finish().map(|s| s.len()).unwrap_or(0);
@@ -304,7 +327,11 @@ mod tests {
             held < BLOCK_LIMIT,
             "{held} bytes still held with no delimiter in sight; the bound is {BLOCK_LIMIT}"
         );
-        assert_eq!(emitted + held, writes * chunk.len(), "output was lost, not just bounded");
+        assert_eq!(
+            emitted + held,
+            writes * chunk.len(),
+            "output was lost, not just bounded"
+        );
     }
 
     #[test]
@@ -316,7 +343,9 @@ mod tests {
         // mode would normally hold.
         let mut b = OutputBuffer::new();
         let big = format!("{}\ntail", "x".repeat(BLOCK_LIMIT));
-        let out = b.write(&big).expect("an oversized write flushes straight through");
+        let out = b
+            .write(&big)
+            .expect("an oversized write flushes straight through");
         assert_eq!(out.len(), big.len(), "the whole write was emitted");
         assert_eq!(b.finish(), None, "none of it was retained");
     }

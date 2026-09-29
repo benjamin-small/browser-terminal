@@ -458,7 +458,11 @@ mod tests {
         ed.feed("ac");
         ed.feed("\x1b[D");
         let fx = ed.feed("b");
-        assert!(fx.echo.contains("abc"), "redraw shows full line: {:?}", fx.echo);
+        assert!(
+            fx.echo.contains("abc"),
+            "redraw shows full line: {:?}",
+            fx.echo
+        );
         let fx = ed.feed("\r");
         assert_eq!(fx.submitted, vec!["abc".to_string()]);
     }

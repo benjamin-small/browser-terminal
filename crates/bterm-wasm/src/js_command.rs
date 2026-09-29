@@ -138,19 +138,20 @@ impl Command for JsCommand {
 
             // ctx.log.mode(m, opts?)
             let buf_d = log_buf.clone();
-            let log_mode = Closure::<dyn Fn(String, JsValue)>::new(move |m: String, opts: JsValue| {
-                let mode = match m.as_str() {
-                    "byte" => Mode::Byte,
-                    "block" => Mode::Block,
-                    _ => Mode::Line,
-                };
-                // A single-argument call passes `undefined`; Reflect::get on
-                // it fails, and `.ok()` turns that into "no delimiter given".
-                let delim = js_sys::Reflect::get(&opts, &JsValue::from_str("delimiter"))
-                    .ok()
-                    .and_then(|v| v.as_string());
-                buf_d.borrow_mut().set_mode(mode, delim);
-            });
+            let log_mode =
+                Closure::<dyn Fn(String, JsValue)>::new(move |m: String, opts: JsValue| {
+                    let mode = match m.as_str() {
+                        "byte" => Mode::Byte,
+                        "block" => Mode::Block,
+                        _ => Mode::Line,
+                    };
+                    // A single-argument call passes `undefined`; Reflect::get on
+                    // it fails, and `.ok()` turns that into "no delimiter given".
+                    let delim = js_sys::Reflect::get(&opts, &JsValue::from_str("delimiter"))
+                        .ok()
+                        .and_then(|v| v.as_string());
+                    buf_d.borrow_mut().set_mode(mode, delim);
+                });
 
             let log_fn = js_sys::Function::from(log_call.as_ref().clone());
             let _ = js_sys::Reflect::set(&log_fn, &JsValue::from_str("write"), log_write.as_ref());
@@ -194,17 +195,18 @@ impl Command for JsCommand {
             });
 
             let buf_h = err_buf.clone();
-            let err_mode = Closure::<dyn Fn(String, JsValue)>::new(move |m: String, opts: JsValue| {
-                let mode = match m.as_str() {
-                    "byte" => Mode::Byte,
-                    "block" => Mode::Block,
-                    _ => Mode::Line,
-                };
-                let delim = js_sys::Reflect::get(&opts, &JsValue::from_str("delimiter"))
-                    .ok()
-                    .and_then(|v| v.as_string());
-                buf_h.borrow_mut().set_mode(mode, delim);
-            });
+            let err_mode =
+                Closure::<dyn Fn(String, JsValue)>::new(move |m: String, opts: JsValue| {
+                    let mode = match m.as_str() {
+                        "byte" => Mode::Byte,
+                        "block" => Mode::Block,
+                        _ => Mode::Line,
+                    };
+                    let delim = js_sys::Reflect::get(&opts, &JsValue::from_str("delimiter"))
+                        .ok()
+                        .and_then(|v| v.as_string());
+                    buf_h.borrow_mut().set_mode(mode, delim);
+                });
 
             let err_fn = js_sys::Function::from(err_call.as_ref().clone());
             let _ = js_sys::Reflect::set(&err_fn, &JsValue::from_str("write"), err_write.as_ref());
@@ -215,9 +217,10 @@ impl Command for JsCommand {
             let returned = func
                 .call3(&JsValue::NULL, &args, &input_js, &ctx_obj)
                 .map_err(|e| js_error_to_shell(&e, span, &name))?;
-            let resolved = wasm_bindgen_futures::JsFuture::from(js_sys::Promise::resolve(&returned))
-                .await
-                .map_err(|e| js_error_to_shell(&e, span, &name))?;
+            let resolved =
+                wasm_bindgen_futures::JsFuture::from(js_sys::Promise::resolve(&returned))
+                    .await
+                    .map_err(|e| js_error_to_shell(&e, span, &name))?;
 
             // Streaming: an async iterable (async generator) yields items over
             // time. `head` closing the channel makes us call the iterator's
@@ -243,9 +246,10 @@ impl Command for JsCommand {
                     let next_call = next_fn
                         .call0(&iterator)
                         .map_err(|e| js_error_to_shell(&e, span, &name))?;
-                    let step = wasm_bindgen_futures::JsFuture::from(js_sys::Promise::resolve(&next_call))
-                        .await
-                        .map_err(|e| js_error_to_shell(&e, span, &name))?;
+                    let step =
+                        wasm_bindgen_futures::JsFuture::from(js_sys::Promise::resolve(&next_call))
+                            .await
+                            .map_err(|e| js_error_to_shell(&e, span, &name))?;
                     let done = js_sys::Reflect::get(&step, &JsValue::from_str("done"))
                         .map(|v| v.is_truthy())
                         .unwrap_or(true);
@@ -254,8 +258,9 @@ impl Command for JsCommand {
                     }
                     let value_js = js_sys::Reflect::get(&step, &JsValue::from_str("value"))
                         .map_err(|e| js_error_to_shell(&e, span, &name))?;
-                    let value = js_to_value(&value_js)
-                        .map_err(|msg| ShellError::runtime(format!("`{name}`: {msg}")).with_span(span))?;
+                    let value = js_to_value(&value_js).map_err(|msg| {
+                        ShellError::runtime(format!("`{name}`: {msg}")).with_span(span)
+                    })?;
                     // Downstream closed (e.g. `head`): stop the generator so its
                     // finally runs (listeners/resources released).
                     //
@@ -266,7 +271,10 @@ impl Command for JsCommand {
                     // channel, only by Ctrl-C. Known, documented limitation; the
                     // generator's `finally` (via `return()`) is the cleanup path
                     // for downstream close.
-                    if bterm_core::stream::flatten(PipelineData::Value(value), &output).await.is_err() {
+                    if bterm_core::stream::flatten(PipelineData::Value(value), &output)
+                        .await
+                        .is_err()
+                    {
                         stop_iterator(&iterator).await;
                         break;
                     }
@@ -341,8 +349,9 @@ impl Command for JsCommand {
             let pd = if resolved.is_undefined() {
                 PipelineData::Empty
             } else {
-                let value = js_to_value(&resolved)
-                    .map_err(|msg| ShellError::runtime(format!("`{name}`: {msg}")).with_span(span))?;
+                let value = js_to_value(&resolved).map_err(|msg| {
+                    ShellError::runtime(format!("`{name}`: {msg}")).with_span(span)
+                })?;
                 PipelineData::Value(value)
             };
             let _ = bterm_core::stream::flatten(pd, &output).await;
@@ -425,8 +434,11 @@ pub(crate) fn js_error_to_shell(e: &JsValue, span: Span, cmd: &str) -> ShellErro
             return err;
         }
     }
-    let text = e
-        .as_string()
-        .unwrap_or_else(|| js_sys::JSON::stringify(e).ok().and_then(|s| s.as_string()).unwrap_or_else(|| "unknown error".into()));
+    let text = e.as_string().unwrap_or_else(|| {
+        js_sys::JSON::stringify(e)
+            .ok()
+            .and_then(|s| s.as_string())
+            .unwrap_or_else(|| "unknown error".into())
+    });
     ShellError::runtime(format!("`{cmd}`: {text}")).with_span(span)
 }

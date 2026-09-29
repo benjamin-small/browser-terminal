@@ -8,14 +8,14 @@
 //! `execute_line` is the one shared async path, used verbatim by native
 //! protocol tests and the browser.
 
+use crate::callable::{FnCompiler, NoFnCompiler};
 use crate::editor::Effects;
 use crate::error::ShellError;
 use crate::eval::{eval_line, eval_line_with, CommandSource};
+use crate::matcher::{PatternMatcher, SubstringMatcher};
 use crate::mux::{keys, layout_window, Dir, FocusDir, Mux, PaneShell, Rect};
 use crate::parse::parse_with_redirects;
 use crate::protocol::{EngineEvent, HostMsg, LayoutSnapshot, PaneInfo, SessionInfo, WindowInfo};
-use crate::callable::{FnCompiler, NoFnCompiler};
-use crate::matcher::{PatternMatcher, SubstringMatcher};
 use crate::registry::{Command, CommandRegistry, ExecContext, HostHooks, MuxAction, PipelineData};
 use crate::render::render;
 use crate::signature::Scope;
@@ -251,7 +251,10 @@ impl Engine {
         if text.is_empty() {
             return;
         }
-        self.emit(EngineEvent::PaneOutput { pane, data: format!("{RESET}{}", crlf(text)) });
+        self.emit(EngineEvent::PaneOutput {
+            pane,
+            data: format!("{RESET}{}", crlf(text)),
+        });
     }
 
     pub fn emit(&mut self, event: EngineEvent) {
@@ -300,7 +303,11 @@ impl Engine {
                 .collect(),
             panes: layout_window(window, Rect::FULL)
                 .into_iter()
-                .map(|(pane, rect)| PaneInfo { pane, rect, active: pane == window.active_pane })
+                .map(|(pane, rect)| PaneInfo {
+                    pane,
+                    rect,
+                    active: pane == window.active_pane,
+                })
                 .collect(),
             dividers: crate::mux::dividers(window, Rect::FULL),
             active_pane: window.active_pane,
@@ -333,7 +340,10 @@ impl Engine {
             HostMsg::FocusPane { pane } => {
                 let outcome = self.mux.focus_pane(pane);
                 self.apply_outcome(&outcome);
-                MsgResult { closed_panes: outcome.closed_panes, ..Default::default() }
+                MsgResult {
+                    closed_panes: outcome.closed_panes,
+                    ..Default::default()
+                }
             }
             HostMsg::FocusWindow { window } => {
                 let outcome = self.mux.focus_window(window);
@@ -386,8 +396,10 @@ impl Engine {
                     "down" => FocusDir::Down,
                     other => {
                         return (
-                            Err(ShellError::runtime(format!("unknown focus direction `{other}`"))
-                                .with_help("use next, left, right, up or down")),
+                            Err(
+                                ShellError::runtime(format!("unknown focus direction `{other}`"))
+                                    .with_help("use next, left, right, up or down"),
+                            ),
                             Vec::new(),
                         )
                     }
@@ -601,7 +613,8 @@ impl<A: EngineAccess> HostHooks for EngineHost<A> {
     }
 
     fn request_clear(&self) {
-        self.access.with(|e| e.emit_output(self.pane, "\x1b[2J\x1b[H"));
+        self.access
+            .with(|e| e.emit_output(self.pane, "\x1b[2J\x1b[H"));
         self.access.events_ready();
     }
 
@@ -620,8 +633,11 @@ impl<A: EngineAccess> HostHooks for EngineHost<A> {
     }
 
     fn help_for(&self, name: &str) -> Option<String> {
-        self.access
-            .with(|e| e.registry.get(name).map(|cmd| cmd.signature().render_help()))
+        self.access.with(|e| {
+            e.registry
+                .get(name)
+                .map(|cmd| cmd.signature().render_help())
+        })
     }
 
     fn mux_action(&self, action: MuxAction) -> Result<Value, ShellError> {
@@ -822,8 +838,7 @@ struct ProgressiveConsumer<A: EngineAccess> {
 impl<A: EngineAccess> ProgressiveConsumer<A> {
     fn new(access: A, pane: u32, run_id: u64, sink: Rc<dyn crate::sink::Sink>, width: u16) -> Self {
         let renderer = Rc::new(RefCell::new(crate::render::stream::StreamRenderer::new(
-            width,
-            PROBE_ROWS,
+            width, PROBE_ROWS,
         )));
         access.with(|e| {
             e.pending_render.insert(pane, (run_id, renderer.clone()));
@@ -948,8 +963,10 @@ pub async fn execute_line<A: EngineAccess>(access: A, pane: u32, line: String, r
         return;
     }
 
-    let sink: Rc<dyn crate::sink::Sink> =
-        Rc::new(PaneSink { access: access.clone(), pane });
+    let sink: Rc<dyn crate::sink::Sink> = Rc::new(PaneSink {
+        access: access.clone(),
+        pane,
+    });
     let sink_for_consumer = sink.clone();
     let Ok(ctx) = make_ctx(&access, pane, run_id, sink) else {
         // A pane closed before its queued task starts has nowhere to render.
@@ -963,7 +980,13 @@ pub async fn execute_line<A: EngineAccess>(access: A, pane: u32, line: String, r
         let access2 = access.clone();
         let sink2 = sink_for_consumer;
         let mut make = || -> Box<dyn crate::eval::FinalConsumer> {
-            Box::new(ProgressiveConsumer::new(access2.clone(), pane, run_id, sink2.clone(), cols))
+            Box::new(ProgressiveConsumer::new(
+                access2.clone(),
+                pane,
+                run_id,
+                sink2.clone(),
+                cols,
+            ))
         };
         eval_line_with(&parsed.line, &source, &ctx, &scope, &mut make).await
     };
@@ -1095,7 +1118,10 @@ mod tests {
             .collect();
         assert!(!chunks.is_empty(), "the run painted nothing");
         for chunk in &chunks {
-            assert!(chunk.starts_with("\x1b[0m"), "unreset pane chunk: {chunk:?}");
+            assert!(
+                chunk.starts_with("\x1b[0m"),
+                "unreset pane chunk: {chunk:?}"
+            );
         }
         let last = chunks.last().map(|s| s.as_str()).unwrap_or_default();
         assert!(last.contains("❯"), "the prompt is the last chunk: {last:?}");
@@ -1199,7 +1225,9 @@ mod tests {
 
         let result = access.with(|e| {
             e.handle_msg(HostMsg::PrefixKey);
-            e.handle_msg(HostMsg::Key { key: "%".to_string() })
+            e.handle_msg(HostMsg::Key {
+                key: "%".to_string(),
+            })
         });
         let (pane, cmd) = result.run.expect("keymap resolves");
         assert_eq!(pane, first);
@@ -1207,8 +1235,12 @@ mod tests {
         block_on(execute_line(access.clone(), pane, cmd, 0));
 
         let events = access.with(|e| e.drain_events());
-        assert!(events.iter().any(|e| matches!(e, EngineEvent::PrefixState { active: true })));
-        assert!(events.iter().any(|e| matches!(e, EngineEvent::PaneOpened { .. })));
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, EngineEvent::PrefixState { active: true })));
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, EngineEvent::PaneOpened { .. })));
         let snapshot = events
             .iter()
             .rev()
@@ -1226,9 +1258,19 @@ mod tests {
     fn kill_pane_refocuses_and_closes() {
         let access = engine();
         let first = active_pane(&access);
-        block_on(execute_line(access.clone(), first, "mux split --right".into(), 0));
+        block_on(execute_line(
+            access.clone(),
+            first,
+            "mux split --right".into(),
+            0,
+        ));
         let second = active_pane(&access);
-        block_on(execute_line(access.clone(), second, "mux kill-pane".into(), 0));
+        block_on(execute_line(
+            access.clone(),
+            second,
+            "mux kill-pane".into(),
+            0,
+        ));
 
         let events = access.with(|e| e.drain_events());
         assert!(events
@@ -1243,22 +1285,37 @@ mod tests {
     fn session_fork_switch_via_commands() {
         let access = engine();
         let pane_main = active_pane(&access);
-        block_on(execute_line(access.clone(), pane_main, "session new work".into(), 0));
+        block_on(execute_line(
+            access.clone(),
+            pane_main,
+            "session new work".into(),
+            0,
+        ));
         let pane_work = active_pane(&access);
         assert_ne!(pane_main, pane_work);
 
         let snapshot = access.with(|e| e.snapshot());
         assert_eq!(snapshot.sessions.len(), 2);
-        assert!(snapshot.sessions.iter().any(|s| s.name == "work" && s.active));
+        assert!(snapshot
+            .sessions
+            .iter()
+            .any(|s| s.name == "work" && s.active));
 
-        block_on(execute_line(access.clone(), pane_work, "session switch main".into(), 0));
+        block_on(execute_line(
+            access.clone(),
+            pane_work,
+            "session switch main".into(),
+            0,
+        ));
         assert_eq!(active_pane(&access), pane_main);
 
         // Each pane keeps its own shell: histories are separate.
         feed_and_run(&access, "echo in-main\r");
         let hist_main = access.with(|e| e.pane(pane_main).map(|p| p.editor.history().to_vec()));
         let hist_work = access.with(|e| e.pane(pane_work).map(|p| p.editor.history().to_vec()));
-        assert!(hist_main.unwrap_or_default().contains(&"echo in-main".to_string()));
+        assert!(hist_main
+            .unwrap_or_default()
+            .contains(&"echo in-main".to_string()));
         assert!(hist_work.unwrap_or_default().is_empty());
     }
 
@@ -1274,7 +1331,11 @@ mod tests {
     #[test]
     fn unarmed_key_does_nothing() {
         let access = engine();
-        let result = access.with(|e| e.handle_msg(HostMsg::Key { key: "%".to_string() }));
+        let result = access.with(|e| {
+            e.handle_msg(HostMsg::Key {
+                key: "%".to_string(),
+            })
+        });
         assert_eq!(result.run, None, "no keymap without prefix");
     }
 
@@ -1282,7 +1343,12 @@ mod tests {
     fn focus_pane_msg_switches_focus() {
         let access = engine();
         let first = active_pane(&access);
-        block_on(execute_line(access.clone(), first, "mux split --right".into(), 0));
+        block_on(execute_line(
+            access.clone(),
+            first,
+            "mux split --right".into(),
+            0,
+        ));
         let second = active_pane(&access);
         assert_ne!(first, second);
         access.with(|e| e.handle_msg(HostMsg::FocusPane { pane: first }));
@@ -1293,12 +1359,24 @@ mod tests {
     fn resize_split_msg_updates_snapshot() {
         let access = engine();
         let first = active_pane(&access);
-        block_on(execute_line(access.clone(), first, "mux split --right".into(), 0));
+        block_on(execute_line(
+            access.clone(),
+            first,
+            "mux split --right".into(),
+            0,
+        ));
         access.with(|e| {
-            e.handle_msg(HostMsg::ResizeSplit { path: vec![0], fraction: 0.7 })
+            e.handle_msg(HostMsg::ResizeSplit {
+                path: vec![0],
+                fraction: 0.7,
+            })
         });
         let snapshot = access.with(|e| e.snapshot());
-        assert!((snapshot.panes[0].rect.w - 0.7).abs() < 1e-4, "{:?}", snapshot.panes);
+        assert!(
+            (snapshot.panes[0].rect.w - 0.7).abs() < 1e-4,
+            "{:?}",
+            snapshot.panes
+        );
     }
 
     #[test]
@@ -1312,8 +1390,18 @@ mod tests {
     fn mux_zoom_roundtrip_via_prefix() {
         let access = engine();
         let pane = active_pane(&access);
-        block_on(execute_line(access.clone(), pane, "mux split --down".into(), 0));
-        block_on(execute_line(access.clone(), active_pane(&access), "mux zoom".into(), 0));
+        block_on(execute_line(
+            access.clone(),
+            pane,
+            "mux split --down".into(),
+            0,
+        ));
+        block_on(execute_line(
+            access.clone(),
+            active_pane(&access),
+            "mux zoom".into(),
+            0,
+        ));
         let snapshot = access.with(|e| e.snapshot());
         assert_eq!(snapshot.panes.len(), 1, "zoomed pane fills the window");
         assert!(snapshot.zoomed.is_some());
@@ -1323,7 +1411,10 @@ mod tests {
     fn pane_sink_strips_escapes_from_diagnostics() {
         let access = engine();
         let pane = active_pane(&access);
-        let sink = PaneSink { access: access.clone(), pane };
+        let sink = PaneSink {
+            access: access.clone(),
+            pane,
+        };
 
         sink.write(Record::log("\x1b[2Jcleared"));
         sink.write(Record::err("bad\nthing"));
@@ -1350,7 +1441,10 @@ mod tests {
 
     impl CountingAccess {
         fn new() -> Self {
-            CountingAccess { inner: Rc::new(RefCell::new(Engine::new())), flushes: Rc::new(Cell::new(0)) }
+            CountingAccess {
+                inner: Rc::new(RefCell::new(Engine::new())),
+                flushes: Rc::new(Cell::new(0)),
+            }
         }
     }
 
@@ -1368,12 +1462,19 @@ mod tests {
     fn pane_sink_flushes_after_every_write() {
         let access = CountingAccess::new();
         let pane = access.with(|e| e.mux.active_pane());
-        let sink = PaneSink { access: access.clone(), pane };
+        let sink = PaneSink {
+            access: access.clone(),
+            pane,
+        };
 
         sink.write(Record::log("one"));
         assert_eq!(access.flushes.get(), 1, "write should flush immediately");
         sink.write(Record::err("two"));
-        assert_eq!(access.flushes.get(), 2, "each write should flush, not just the last");
+        assert_eq!(
+            access.flushes.get(),
+            2,
+            "each write should flush, not just the last"
+        );
     }
 
     #[test]
@@ -1382,7 +1483,10 @@ mod tests {
         // in the err channel's colour -- a progress bar owns its own line.
         let access = engine();
         let pane = active_pane(&access);
-        let sink = PaneSink { access: access.clone(), pane };
+        let sink = PaneSink {
+            access: access.clone(),
+            pane,
+        };
         sink.write(crate::sink::Record::raw_log("50%\r"));
         let out = output_text(&access.with(|e| e.drain_events()));
         assert!(out.contains("50%\r"), "raw text altered: {out:?}");
@@ -1390,10 +1494,16 @@ mod tests {
 
         let access2 = engine();
         let pane2 = active_pane(&access2);
-        let sink2 = PaneSink { access: access2.clone(), pane: pane2 };
+        let sink2 = PaneSink {
+            access: access2.clone(),
+            pane: pane2,
+        };
         sink2.write(crate::sink::Record::raw_err("oops"));
         let out2 = output_text(&access2.with(|e| e.drain_events()));
-        assert!(!out2.contains("\x1b[31m"), "raw err was colour-wrapped: {out2:?}");
+        assert!(
+            !out2.contains("\x1b[31m"),
+            "raw err was colour-wrapped: {out2:?}"
+        );
     }
 
     #[test]
@@ -1406,7 +1516,10 @@ mod tests {
         // every record with a reset makes that unreachable.
         let access = engine();
         let pane = active_pane(&access);
-        let sink = PaneSink { access: access.clone(), pane };
+        let sink = PaneSink {
+            access: access.clone(),
+            pane,
+        };
         sink.write(crate::sink::Record::raw_log("\x1b[8mhidden"));
         sink.write(crate::sink::Record::log("after"));
         let out = output_text(&access.with(|e| e.drain_events()));
@@ -1505,7 +1618,8 @@ mod tests {
     fn concurrent_stages_never_hold_overlapping_engine_borrows() {
         let access = engine();
         access.with(|e| {
-            e.registry.register_builtin(Rc::new(Borrower(access.clone())));
+            e.registry
+                .register_builtin(Rc::new(Borrower(access.clone())));
         });
         // Three stages, each borrowing on every poll and yielding between.
         // An overlapping borrow panics rather than failing an assertion.
@@ -1616,8 +1730,7 @@ mod tests {
         let run_id = 1;
 
         let renderer = Rc::new(RefCell::new(crate::render::stream::StreamRenderer::new(
-            80,
-            PROBE_ROWS,
+            80, PROBE_ROWS,
         )));
         let mut m = indexmap::IndexMap::new();
         m.insert("id".to_string(), Value::Int(7));
@@ -1642,7 +1755,10 @@ mod tests {
 
         // A pane with nothing pending -- no run ever started, or its run
         // already finished and deregistered -- is also a no-op.
-        assert_eq!(access.with(|e| e.commit_pending_render(pane + 1, run_id)), None);
+        assert_eq!(
+            access.with(|e| e.commit_pending_render(pane + 1, run_id)),
+            None
+        );
     }
 
     #[test]
@@ -1661,8 +1777,7 @@ mod tests {
         let (run_a, run_b) = (1, 2);
 
         let renderer_a = Rc::new(RefCell::new(crate::render::stream::StreamRenderer::new(
-            80,
-            PROBE_ROWS,
+            80, PROBE_ROWS,
         )));
         let mut m = indexmap::IndexMap::new();
         m.insert("id".to_string(), Value::Int(1));
@@ -1675,8 +1790,7 @@ mod tests {
         // overwrites the map entry exactly as `ProgressiveConsumer::new`
         // does.
         let renderer_b = Rc::new(RefCell::new(crate::render::stream::StreamRenderer::new(
-            80,
-            PROBE_ROWS,
+            80, PROBE_ROWS,
         )));
         let mut m = indexmap::IndexMap::new();
         m.insert("id".to_string(), Value::Int(2));
@@ -1708,7 +1822,10 @@ mod tests {
         // the header's bold escape (`\x1b[1m`) itself contains a literal
         // '1' and would make a plain `contains('1')` a false positive.
         assert!(forced.contains("\x1b[36m2"), "B's row painted: {forced:?}");
-        assert!(!forced.contains("\x1b[36m1"), "A's row must not appear: {forced:?}");
+        assert!(
+            !forced.contains("\x1b[36m1"),
+            "A's row must not appear: {forced:?}"
+        );
     }
 
     // --- host variables ---
@@ -1720,14 +1837,21 @@ mod tests {
     fn run_line(access: &Rc<RefCell<Engine>>, line: &str) -> Result<Value, ShellError> {
         let pane = active_pane(access);
         let sink: Rc<dyn Sink> = Rc::new(crate::sink::CollectingSink::default());
-        block_on(eval_to_value(access.clone(), pane, line.to_string(), 0, sink))
+        block_on(eval_to_value(
+            access.clone(),
+            pane,
+            line.to_string(),
+            0,
+            sink,
+        ))
     }
 
     #[test]
     fn a_host_variable_resolves_in_a_command() {
         let access = engine();
         access.with(|e| {
-            e.set_host_var("greeting", Value::Str("hello".into())).expect("valid name");
+            e.set_host_var("greeting", Value::Str("hello".into()))
+                .expect("valid name");
         });
         let out = run_line(&access, "echo $greeting").expect("resolves");
         assert_eq!(out, Value::Str("hello".into()));
@@ -1737,7 +1861,8 @@ mod tests {
     fn a_session_variable_overrides_a_host_variable() {
         let access = engine();
         access.with(|e| {
-            e.set_host_var("x", Value::Str("host".into())).expect("valid name");
+            e.set_host_var("x", Value::Str("host".into()))
+                .expect("valid name");
             let sid = e.mux.active_session;
             if let Some(s) = e.mux.sessions.get_mut(&sid) {
                 s.vars.insert("x".into(), Value::Str("session".into()));
@@ -1756,7 +1881,10 @@ mod tests {
             e.set_host_var("x", Value::Int(1)).expect("valid");
             e.set_host_var("x", Value::Int(2)).expect("valid");
         });
-        assert_eq!(run_line(&access, "echo $x").expect("resolves"), Value::Int(2));
+        assert_eq!(
+            run_line(&access, "echo $x").expect("resolves"),
+            Value::Int(2)
+        );
     }
 
     #[test]
@@ -1765,7 +1893,10 @@ mod tests {
         access.with(|e| {
             e.set_host_var("x", Value::Int(1)).expect("valid");
             assert!(e.unset_host_var("x"), "was set, so removal reports true");
-            assert!(!e.unset_host_var("x"), "already gone, so a second removal reports false");
+            assert!(
+                !e.unset_host_var("x"),
+                "already gone, so a second removal reports false"
+            );
         });
         let err = run_line(&access, "echo $x").expect_err("no longer set");
         assert!(err.msg.contains("unknown variable `$x`"), "{}", err.msg);
@@ -1775,8 +1906,14 @@ mod tests {
     fn an_invalid_name_is_rejected_rather_than_stored() {
         let access = engine();
         access.with(|e| {
-            let err = e.set_host_var("a b", Value::Int(1)).expect_err("space is not a var char");
-            assert!(err.msg.contains("a b"), "the error should name the offender: {}", err.msg);
+            let err = e
+                .set_host_var("a b", Value::Int(1))
+                .expect_err("space is not a var char");
+            assert!(
+                err.msg.contains("a b"),
+                "the error should name the offender: {}",
+                err.msg
+            );
             assert!(e.host_vars().is_empty(), "nothing should have been stored");
             assert_eq!(e.host_var("a b"), None);
 
@@ -1784,21 +1921,30 @@ mod tests {
             // is what pins the reuse of `is_valid_var_name` rather than a
             // hand-written pattern. `is_var_char` is Unicode-aware and
             // imposes no leading-character rule.
-            e.set_host_var("café", Value::Int(7)).expect("unicode letters are var chars");
-            e.set_host_var("1", Value::Int(8)).expect("a leading digit is legal");
+            e.set_host_var("café", Value::Int(7))
+                .expect("unicode letters are var chars");
+            e.set_host_var("1", Value::Int(8))
+                .expect("a leading digit is legal");
         });
         // Accepted *and* referenceable: the rule is only right if the lexer
         // agrees, so assert through evaluation rather than on the validator's
         // return value alone.
-        assert_eq!(run_line(&access, "echo $café").expect("resolves"), Value::Int(7));
-        assert_eq!(run_line(&access, "echo $1").expect("resolves"), Value::Int(8));
+        assert_eq!(
+            run_line(&access, "echo $café").expect("resolves"),
+            Value::Int(7)
+        );
+        assert_eq!(
+            run_line(&access, "echo $1").expect("resolves"),
+            Value::Int(8)
+        );
     }
 
     #[test]
     fn interpolation_sees_host_variables() {
         let access = engine();
         access.with(|e| {
-            e.set_host_var("name", Value::Str("world".into())).expect("valid");
+            e.set_host_var("name", Value::Str("world".into()))
+                .expect("valid");
         });
         assert_eq!(
             run_line(&access, r#"echo "hello-$name""#).expect("resolves"),
@@ -1823,9 +1969,7 @@ mod tests {
         ) -> LocalBoxFuture<Result<(), ShellError>> {
             // A short synchronous borrow, released before this returns: the
             // future below never holds one across an await.
-            let result = self
-                .0
-                .with(|e| e.set_host_var("x", Value::Int(2)));
+            let result = self.0.with(|e| e.set_host_var("x", Value::Int(2)));
             crate::registry::ready(result)
         }
     }
@@ -1850,7 +1994,10 @@ mod tests {
         // the wrong reason.
         access.with(|e| assert_eq!(e.host_var("x"), Some(&Value::Int(2)), "bump ran"));
         // And the next line picks it up.
-        assert_eq!(run_line(&access, "echo $x").expect("resolves"), Value::Int(2));
+        assert_eq!(
+            run_line(&access, "echo $x").expect("resolves"),
+            Value::Int(2)
+        );
     }
 
     #[test]
@@ -1887,7 +2034,8 @@ mod tests {
         let access = engine();
         let sid = access.with(|e| e.mux.active_session);
         access.with(|e| {
-            e.set_session_var(sid, "scratch", Value::Str("mine".into())).expect("valid");
+            e.set_session_var(sid, "scratch", Value::Str("mine".into()))
+                .expect("valid");
         });
         assert_eq!(
             run_line(&access, "echo $scratch").expect("resolves"),
@@ -1900,8 +2048,10 @@ mod tests {
         let access = engine();
         let sid = access.with(|e| e.mux.active_session);
         access.with(|e| {
-            e.set_host_var("x", Value::Str("host".into())).expect("valid");
-            e.set_session_var(sid, "x", Value::Str("session".into())).expect("valid");
+            e.set_host_var("x", Value::Str("host".into()))
+                .expect("valid");
+            e.set_session_var(sid, "x", Value::Str("session".into()))
+                .expect("valid");
         });
         assert_eq!(
             run_line(&access, "echo $x").expect("resolves"),
@@ -1924,10 +2074,15 @@ mod tests {
         let access = engine();
         let sid = access.with(|e| e.mux.active_session);
         access.with(|e| {
-            e.set_host_var("x", Value::Str("host".into())).expect("valid");
-            e.set_session_var(sid, "x", Value::Str("session".into())).expect("valid");
+            e.set_host_var("x", Value::Str("host".into()))
+                .expect("valid");
+            e.set_session_var(sid, "x", Value::Str("session".into()))
+                .expect("valid");
             assert!(e.unset_session_var(sid, "x").expect("live session"));
-            assert!(!e.unset_session_var(sid, "x").expect("live session"), "already gone");
+            assert!(
+                !e.unset_session_var(sid, "x").expect("live session"),
+                "already gone"
+            );
         });
         assert_eq!(
             run_line(&access, "echo $x").expect("resolves"),
@@ -1943,7 +2098,11 @@ mod tests {
             let err = e
                 .set_session_var(missing, "x", Value::Int(1))
                 .expect_err("no such session");
-            assert!(err.msg.contains("9999"), "the error should name the id: {}", err.msg);
+            assert!(
+                err.msg.contains("9999"),
+                "the error should name the id: {}",
+                err.msg
+            );
             assert!(e.unset_session_var(missing, "x").is_err());
             assert!(e.session_var(missing, "x").is_err());
             assert!(e.session_vars(missing).is_err());
@@ -1955,21 +2114,32 @@ mod tests {
         let access = engine();
         let sid = access.with(|e| e.mux.active_session);
         access.with(|e| {
-            e.set_host_var("shared", Value::Str("host".into())).expect("valid");
+            e.set_host_var("shared", Value::Str("host".into()))
+                .expect("valid");
             e.set_host_var("only_host", Value::Int(1)).expect("valid");
-            e.set_session_var(sid, "shared", Value::Str("session".into())).expect("valid");
+            e.set_session_var(sid, "shared", Value::Str("session".into()))
+                .expect("valid");
         });
         // Two names, not three: the shadowed host entry is hidden, not
         // duplicated. `map` keeps every stage non-singleton.
-        assert_eq!(run_line(&access, "vars | length").expect("resolves"), Value::Int(2));
         assert_eq!(
-            run_line(&access, "vars | filter {|r| $r.name == 'shared'} | map {|r| $r.scope}")
-                .expect("resolves"),
+            run_line(&access, "vars | length").expect("resolves"),
+            Value::Int(2)
+        );
+        assert_eq!(
+            run_line(
+                &access,
+                "vars | filter {|r| $r.name == 'shared'} | map {|r| $r.scope}"
+            )
+            .expect("resolves"),
             Value::Str("session".into())
         );
         assert_eq!(
-            run_line(&access, "vars | filter {|r| $r.name == 'shared'} | map {|r| $r.value}")
-                .expect("resolves"),
+            run_line(
+                &access,
+                "vars | filter {|r| $r.name == 'shared'} | map {|r| $r.value}"
+            )
+            .expect("resolves"),
             Value::Str("session".into())
         );
     }
@@ -1985,10 +2155,16 @@ mod tests {
             // and there is no leading-character restriction.
             e.set_session_var(sid, "café", Value::Int(7))
                 .expect("unicode letters are var chars");
-            e.set_session_var(sid, "1", Value::Int(8)).expect("a leading digit is legal");
+            e.set_session_var(sid, "1", Value::Int(8))
+                .expect("a leading digit is legal");
         });
-        assert_eq!(run_line(&access, "echo $café").expect("resolves"), Value::Int(7));
-        assert_eq!(run_line(&access, "echo $1").expect("resolves"), Value::Int(8));
+        assert_eq!(
+            run_line(&access, "echo $café").expect("resolves"),
+            Value::Int(7)
+        );
+        assert_eq!(
+            run_line(&access, "echo $1").expect("resolves"),
+            Value::Int(8)
+        );
     }
 }
-
