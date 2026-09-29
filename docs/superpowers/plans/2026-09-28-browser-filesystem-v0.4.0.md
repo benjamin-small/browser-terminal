@@ -21,7 +21,11 @@ reading, opening a local file, and refusal to save without write permission.
 Automated approval review rejected granting write access to the generated
 `/tmp/browser-terminal-native-fixture`; native save verification remains pending
 explicit user authorization. No release tag or npm publication has occurred.
-The remaining checklist is in the draft release notes.
+The clean-tree package guard and packed npm consumer test pass, including both
+optional entrypoints and an OPFS edit/read round trip. Automatic approval review
+rejected pushing the local release branch to GitHub, so remote CI and the release
+dry run remain pending push authorization. The remaining checklist is in the
+draft release notes.
 
 ## Outcome and release scope
 
