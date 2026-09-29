@@ -1,6 +1,7 @@
 # Browser filesystem and editing: v0.4.0 implementation plan
 
-Status: implemented release candidate, with final release gates pending.
+Status: implementation complete; release validation and publication tracked in
+the [release notes](../../release-notes/v0.4.0.md).
 Target and repository version: v0.4.0. Planning date: 2026-09-28.
 Tracking: [issue #25](https://github.com/benjamin-small/browser-terminal/issues/25).
 
