@@ -22,6 +22,22 @@ Works out of the box with Vite and webpack 5 — the `.wasm` loads via
 
 ## Quickstart
 
+`BrowserTerminal.create()` automatically mounts the origin's OPFS at writable
+`/scratch` and starts there. It loads `pwd`, `cd`, `ls`, `cat`, `read-bytes`,
+and `edit`, the text editor, path completion, and file redirection. No custom
+commands or folder picker are needed: `echo hello > hello.txt; cat hello.txt`
+works immediately. The prompt follows the working directory.
+
+If OPFS is missing or access fails, creation still succeeds with the core
+shell. A warning appears in the terminal and through `console.warn`; filesystem
+commands are not installed. `bt.filesystem` exposes the default adapter, or
+`null` when unavailable or disabled. Files belong to this origin and browser
+profile and may be removed by clearing site data or browser eviction.
+
+Use `create({ filesystem: false })` to disable automatic storage access and
+warnings when installing your own adapter. Importing alone does not initialize
+the terminal or access storage.
+
 ```ts
 import { BrowserTerminal } from '@benjamin-small/browser-terminal';
 
@@ -77,6 +93,7 @@ the same two arrays, because a failed run is when its log matters most.
 
 ```ts
 await BrowserTerminal.create({
+  filesystem,    // boolean — automatic writable OPFS at /scratch, default true
   mount,          // HTMLElement — your own container; skips the panel chrome
   wasmUrl,        // string | URL — custom .wasm location (CDN, no bundler)
   wasmBinary,     // BufferSource — pre-loaded bytes; beats wasmUrl, enables
@@ -153,14 +170,18 @@ bt.registerCommand({ name: 'consume-bytes' }, (_args, input) => {
 });
 const result = await bt.run('read-bytes | consume-bytes'); // Uint8Array in result.value
 await bt.run('read-bytes | length');  // 3
-await bt.run('read-bytes | to json'); // JSON string: "0080ff"
+await bt.run('read-bytes | to-json'); // JSON string: "0080ff"
 ```
 
 At the terminal boundary bytes display as `<3 bytes>` (including in table
 cells), without interpreting their contents as text or terminal escapes.
-`length` counts bytes; closures can also read `$value.length`. `to json`
+`length` counts bytes; closures can also read `$value.length`. `to-json`
 encodes byte values as lowercase hex strings, including nested values.
-JSON has no binary type: `from json` keeps these as strings, and ordinary
+The spaced names `to json`, `from json`, `str upcase`, and `str downcase`
+remain compatibility aliases. Help and command-name completion use `to-json`,
+`from-json`, `str-upcase`, and `str-downcase`.
+
+JSON has no binary type: `from-json` keeps these as strings, and ordinary
 arrays of numbers remain lists. Convert an `ArrayBuffer` with
 `new Uint8Array(buffer)`. For another typed-array view, use
 `new Uint8Array(view.buffer, view.byteOffset, view.byteLength)` to preserve
@@ -190,9 +211,10 @@ line call bypasses the buffer.
 
 ## Structured redirection
 
-Install both `read` and `write` hooks to enable `<`, `>`, and `>>`. The host
-decides what target names mean and how values are stored. There is no built-in
-filesystem or automatic conversion to text or bytes. Hooks may return promises.
+The default OPFS setup installs filesystem hooks for `<`, `>`, and `>>`.
+For host-managed storage, use `create({ filesystem: false })` and install both
+`read` and `write` hooks. The host decides what targets mean and how values are
+stored; the core does not convert values to text or bytes. Hooks may return promises.
 
 ```ts
 const values = new Map<string, Value>(); // import type { Value } from the package
@@ -213,7 +235,7 @@ bt.setRedirectHandler({
   },
 });
 await bt.run('echo hello > greeting; echo world >> greeting');
-await bt.run('str upcase < greeting'); // HELLOWORLD
+await bt.run('str-upcase < greeting'); // HELLOWORLD
 bt.setRedirectHandler(null); // future lines no longer accept redirect syntax
 ```
 
@@ -409,9 +431,13 @@ because its `boolean` has nowhere to put an error. So `undefined` from
 
 Apache-2.0
 
-## Optional browser filesystem and editor
+## Browser filesystem and editor
 
-Import `installFilesystem` from
+The default filesystem and editor are ready after `create()` resolves when
+OPFS is available. Use `bt.filesystem` to mount additional directories.
+Additional mounts remain read-only unless explicitly enabled.
+
+For a custom setup, first use `create({ filesystem: false })`. Import `installFilesystem` from
 `@benjamin-small/browser-terminal/filesystem` to connect directory handles to
 `pwd`, `cd`, structured `ls`, `cat`, `read-bytes`, and `edit`. The optional
 `@benjamin-small/browser-terminal/filesystem/editor` export supplies a small

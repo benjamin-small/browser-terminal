@@ -99,7 +99,7 @@ import { createTextEditor } from '${PKG}/filesystem/editor';
 
 const spec: CommandSpec = { name: 'headings', summary: 'List headings' };
 
-const bt = await BrowserTerminal.create({ dock: 'right' });
+const bt = await BrowserTerminal.create({ dock: 'right', filesystem: false });
 bt.registerCommand(spec, () =>
   [...document.querySelectorAll('h1,h2')].map((h) => ({
     tag: h.tagName.toLowerCase(),
@@ -117,10 +117,20 @@ await bt.run('edit /scratch/consumer.txt');
 if (![...document.querySelectorAll('section')].some(el => el.shadowRoot?.querySelector('textarea'))) throw new Error('Packed editor failed');
 editor.dispose();
 
-const upper = await bt.run('echo hi | str upcase');
+const upper = await bt.run('echo hi | str-upcase');
 const count = await bt.run('headings | length');
 // The single-match case: it regressed once and errored instead of counting.
 const one = await bt.run('headings | grep second --on text | length');
+
+bt.dispose();
+const defaultTerminal = await BrowserTerminal.create();
+if (!defaultTerminal.filesystem) throw new Error('Packed default filesystem was not mounted');
+if ((await defaultTerminal.run('pwd')).value !== '/scratch') throw new Error('Packed default cwd failed');
+await defaultTerminal.run('echo automatic > automatic.txt');
+if ((await defaultTerminal.run('cat automatic.txt')).value !== 'automatic') throw new Error('Packed default filesystem round trip failed');
+await defaultTerminal.run('edit automatic.txt');
+if (![...document.querySelectorAll('section')].some(el => el.shadowRoot?.querySelector('textarea'))) throw new Error('Packed default editor failed');
+defaultTerminal.dispose();
 
 (window as unknown as Record<string, unknown>).__probe = {
   upper: upper.value,

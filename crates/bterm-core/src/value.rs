@@ -130,7 +130,7 @@ impl Value {
     }
 
     /// Any NaN/Infinity anywhere in this value? (JSON cannot represent
-    /// them; `to json` refuses instead of silently writing `null`.)
+    /// them; `to-json` refuses instead of silently writing `null`.)
     pub fn has_non_finite(&self) -> bool {
         match self {
             Value::Float(f) => !f.is_finite(),

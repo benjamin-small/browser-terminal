@@ -5,9 +5,9 @@ Run `just demo`, open http://localhost:5173, then walk through:
 ## Shell basics
 - [ ] Banner + green `❯` prompt appear in the floating panel
 - [ ] `help` lists commands as a table; `help where` shows usage
-- [ ] `echo a b c | str upcase` renders an indexed list
+- [ ] `echo a b c | str-upcase` renders an indexed list
 - [ ] `links --limit 20 | filter {|o| $o.text != ''} | head 5` renders a box table
-- [ ] `sort-by`, `get`, `to json --pretty`, `from json` behave
+- [ ] `sort-by`, `get`, `to-json --pretty`, `from-json` behave
 - [ ] `links | grep 'rust|xterm' -i` filters by real regex (alternation works)
 - [ ] `links | grep '^https' --on href` restricts to one field; `-v` inverts
 - [ ] `links | map '(o) => o.text'` projects; `map '(o) => ({a: o.text})'` reshapes
@@ -22,7 +22,7 @@ Run `just demo`, open http://localhost:5173, then walk through:
 - [ ] The same closure lines work in `cargo run -p bterm-cli` (no JS there)
 - [ ] `links | grep '('` shows a clean "invalid regex pattern" error, engine survives
 - [ ] Bad input: `sort-by n --reverze` → red caret + "did you mean `--reverse`?"
-- [ ] Unknown command `nop 5` → caret + help; `str upcsae` suggests `str upcase`
+- [ ] Unknown command `nop 5` → caret + help; `str-upcsae` suggests `str-upcase`
 - [ ] Prompt turns red after a failure, green after success
 
 ## Line editor
@@ -64,6 +64,8 @@ Run `just demo`, open http://localhost:5173, then walk through:
 - [ ] Prompt shows cwd after `cd`, session switches, pane splits, and unmount
 - [ ] Startup uses `/scratch`; `ls`, editing, saving, and redirects need no permissions
 - [ ] On HTTPS/localhost in Chrome and Edge, Connect local folder requests read access and mounts even when write permission is missing
+- [ ] Each connected folder has an Enable writes button; granting access allows redirects to create files (including in existing subdirectories) and editor saves on that mount
+- [ ] Denying or failing a write request preserves read access and existing file contents; the button allows retry and other mounts retain independent permissions
 - [ ] Cancelling the picker leaves mounts and cwd unchanged
 - [ ] Pending selection disables duplicate attempts; cancellation and browser errors show a useful status and re-enable connection
 - [ ] A rejected selection reports the original error; AbortError is not presented as proof of cancellation

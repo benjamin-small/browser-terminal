@@ -441,13 +441,7 @@ impl BtermCore {
         if !engine_alive() {
             return JsValue::NULL;
         }
-        let specs = WasmAccess.with(|e| {
-            e.registry
-                .names()
-                .iter()
-                .filter_map(|name| e.registry.get(name).map(|c| c.signature().clone()))
-                .collect::<Vec<_>>()
-        });
+        let specs = WasmAccess.with(|e| e.registry.signatures());
         to_js(&specs)
     }
 

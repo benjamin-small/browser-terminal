@@ -1144,7 +1144,7 @@ mod tests {
     #[test]
     fn pipeline_renders_to_pane_events() {
         let access = engine();
-        let events = feed_and_run(&access, "echo a b c | str upcase\r");
+        let events = feed_and_run(&access, "echo a b c | str-upcase\r");
         let out = output_text(&events);
         assert!(out.contains("A"), "output: {out:?}");
         assert!(out.contains("\r\n"), "CRLF conversion applied");

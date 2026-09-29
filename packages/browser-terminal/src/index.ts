@@ -13,6 +13,8 @@ import type { ITheme } from '@xterm/xterm';
 import { PanelHost, type PanelMode } from './panels.js';
 import type { Effects, EngineEvent, HostMsg, LayoutSnapshot } from './events.js';
 import { argumentTarget, completionEdit, type CompletionProvider } from './completion.js';
+import { BrowserFilesystem } from './filesystem/index.js';
+import { createTextEditor } from './filesystem/editor.js';
 export type { CompletionProvider, CompletionItem, ArgumentCompletionContext } from './completion.js';
 import type {
   CommandFn,
@@ -57,6 +59,8 @@ export type {
 } from './types.js';
 
 export interface CreateOptions {
+  /** Mount writable OPFS at /scratch by default. Disable for a host-managed filesystem. */
+  filesystem?: boolean;
   /**
    * Element to mount panes into. When provided, the floating panel chrome
    * is skipped — you own the container. Omit for the default draggable
@@ -92,6 +96,9 @@ export interface CreateOptions {
 let instanceLive = false;
 
 export class BrowserTerminal {
+  private defaultFilesystem: BrowserFilesystem | null = null;
+  /** Automatically mounted filesystem, or null when disabled or unavailable. */
+  get filesystem(): BrowserFilesystem | null { return this.defaultFilesystem; }
   private lastSnapshot: LayoutSnapshot | null = null;
   private promptProvider: ((context: { session: number; pane: number }) => string) | null = null;
   private readonly completionProviders = new Set<CompletionProvider>();
@@ -125,6 +132,7 @@ export class BrowserTerminal {
 
     let core!: BtermCore;
     let self!: BrowserTerminal;
+    let ready = false;
 
     let panel: PanelHost | null = null;
     let mount = opts.mount;
@@ -148,6 +156,7 @@ export class BrowserTerminal {
       mount,
       {
         feed: (pane, data) => {
+          if (!ready) return null;
           self.completionRequests.get(pane)?.abort();
           const effects = core.feed(pane, data) as Effects | null;
           if (effects?.completion) void self.completeArguments(pane, effects.completion);
@@ -201,7 +210,49 @@ export class BrowserTerminal {
       panel?.applySnapshot(snapshot);
       paneManager.applySnapshot(snapshot);
     }
+    try {
+      if (opts.filesystem !== false) await self.initializeFilesystem();
+    } catch (error) {
+      self.dispose();
+      throw error;
+    }
+    ready = true;
     return self;
+  }
+
+  private async initializeFilesystem(): Promise<void> {
+    const editor = createTextEditor();
+    const filesystem = new BrowserFilesystem({
+      initialDirectory: '/scratch',
+      editor: editor.open,
+      onDirectoryChange: () => this.refreshPrompt(),
+    });
+    try {
+      // Acquire storage before registering commands: unavailable storage leaves
+      // the ordinary shell intact, without a partially installed adapter.
+      await filesystem.mountScratch('scratch', { writable: true });
+    } catch (error) {
+      filesystem.dispose();
+      editor.dispose();
+      const warning = 'browser-terminal: OPFS is unavailable; the default filesystem and file commands were not loaded.';
+      console.warn(warning, error);
+      this.paneManager.handleEvent({
+        type: 'paneOutput', pane: this.paneManager.active,
+        data: `\r\x1b[K\x1b[33mWarning: ${warning}\x1b[0m\r\n\x1b[32m❯\x1b[0m `,
+      });
+      return;
+    }
+    try {
+      filesystem.install(this);
+      this.setRedirectHandler(filesystem.createRedirectHandler());
+      this.defaultFilesystem = filesystem;
+      this.setPrompt(({ session }) => `${filesystem.pwd(session)} `);
+      this.onLifecycle(event => { if (event.type === 'dispose') editor.dispose(); });
+    } catch (error) {
+      filesystem.dispose();
+      editor.dispose();
+      throw error;
+    }
   }
 
   /**

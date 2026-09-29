@@ -50,6 +50,12 @@ prerequisites from the root README and run `just test-wasm` and
 
 ## Filesystem coverage
 
+`packages/demo/tests/default-filesystem.spec.ts` checks automatic writable OPFS
+startup without host commands, file reads and redirects, editor cleanup,
+session working directories, persistence across terminal recreation, warnings
+in both the terminal and console for missing or rejected storage, and the
+`filesystem: false` opt-out.
+
 `just test-filesystem` builds the package and runs deterministic Node contract
 checks against a memory filesystem, including failure injection, path handling,
 permissions, cancellation, transaction rollback, overlapping mounts, editor

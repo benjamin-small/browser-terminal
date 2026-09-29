@@ -26,6 +26,7 @@ const inlinedWasm = (globalThis as { __BTERM_WASM__?: BufferSource }).__BTERM_WA
 
 async function main(): Promise<void> {
   const bt = await BrowserTerminal.create({
+    filesystem: false, // The demo supplies its own persistent directory and devices.
     globalToggle: true,
     wasmBinary: inlinedWasm,
   });
