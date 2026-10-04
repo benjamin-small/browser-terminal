@@ -275,6 +275,51 @@ impl Engine {
         self.events.drain(..).collect()
     }
 
+    /// Write host text (one or more lines) above a pane's prompt, then redraw
+    /// the prompt with its half-typed input and cursor. Returns `false` for an
+    /// unknown pane.
+    ///
+    /// The text goes through the same allowlist as `ctx.log.write`: styling
+    /// survives, nothing can clear the screen or climb above the line.
+    ///
+    /// `busy` says a task that writes to this pane is in flight. The host
+    /// decides, not `PaneShell::running`: that flag goes false while a
+    /// prefix-key command or a second pasted line is still running. A busy
+    /// pane queues the text -- erasing the current line would corrupt that
+    /// task's output -- and the host calls `flush_pending_print` once the
+    /// pane's last task ends.
+    pub fn print(&mut self, pane: u32, text: &str, busy: bool) -> bool {
+        let mut body = crate::render::writer_text(&text.replace("\r\n", "\n"));
+        if !body.ends_with('\n') {
+            body.push('\n');
+        }
+        let Some(p) = self.mux.pane_mut(pane) else {
+            return false;
+        };
+        // Always through the queue: after Ctrl-C the pane is idle before the
+        // aborted task's own flush runs, and a print in that gap must not
+        // jump ahead of lines queued earlier.
+        p.pending_print.push_str(&body);
+        if !busy {
+            self.flush_pending_print(pane);
+        }
+        true
+    }
+
+    /// Write any queued host prints above the prompt and redraw it. Paints
+    /// nothing when the queue is empty.
+    pub fn flush_pending_print(&mut self, pane: u32) {
+        let Some(p) = self.mux.pane_mut(pane) else {
+            return;
+        };
+        let lines = std::mem::take(&mut p.pending_print);
+        if lines.is_empty() {
+            return;
+        }
+        let prompt = p.editor.prompt_line();
+        self.emit_output(pane, &format!("\r\x1b[K{lines}{RESET}{prompt}"));
+    }
+
     /// Set every pane's prefix, returning whether the visible text changed.
     pub fn set_prompt_prefix(&mut self, prefix: &str) -> bool {
         self.mux.set_prompt_prefix(prefix)
@@ -1182,6 +1227,93 @@ mod tests {
         for pane in e.mux.panes.keys() {
             assert!(!e.prompt_line(*pane).contains("/home"));
         }
+    }
+
+    #[test]
+    fn print_on_an_idle_pane_writes_above_the_prompt_and_restores_partial_input() {
+        let mut e = Engine::new();
+        let pane = e.mux.active_pane();
+        // Half-typed `lin`, cursor moved back one cell.
+        e.feed(pane, "lin\x1b[D");
+        e.drain_events();
+
+        assert!(e.print(pane, "hello\nworld", false));
+
+        let out = output_text(&e.drain_events());
+        let prompt = e.prompt_line(pane);
+        assert!(prompt.contains("lin"), "partial input survives: {prompt:?}");
+        assert!(prompt.ends_with("\x1b[1D"), "cursor restored: {prompt:?}");
+        assert_eq!(
+            out,
+            format!("{RESET}\r\x1b[Khello\r\nworld\r\n{RESET}{}", crlf(&prompt)),
+        );
+    }
+
+    #[test]
+    fn print_keeps_styling_but_not_screen_control() {
+        let mut e = Engine::new();
+        let pane = e.mux.active_pane();
+        e.drain_events();
+        e.print(pane, "\x1b[2J\x1b[H\x1b[33mbanner\x1b[0m", false);
+        let out = output_text(&e.drain_events());
+        assert!(out.contains("\x1b[33mbanner\x1b[0m"), "{out:?}");
+        assert!(
+            !out.contains("\x1b[2J") && !out.contains("\x1b[H"),
+            "{out:?}"
+        );
+    }
+
+    #[test]
+    fn print_to_an_unknown_pane_reports_false() {
+        let mut e = Engine::new();
+        e.drain_events();
+        assert!(!e.print(9999, "nowhere", false));
+        assert!(e.drain_events().is_empty());
+    }
+
+    #[test]
+    fn print_to_a_busy_pane_is_queued_until_flushed() {
+        let mut e = Engine::new();
+        let pane = e.mux.active_pane();
+        e.drain_events();
+
+        e.print(pane, "first", true);
+        e.print(pane, "second\n", true);
+        assert!(
+            e.drain_events().is_empty(),
+            "nothing may erase a line a running task can still write to"
+        );
+
+        e.flush_pending_print(pane);
+        let out = output_text(&e.drain_events());
+        let banner = out
+            .find("first\r\nsecond\r\n")
+            .expect("queued lines flushed");
+        let prompt = out.rfind('❯').expect("prompt drawn");
+        assert!(
+            banner < prompt,
+            "queued lines land above the prompt: {out:?}"
+        );
+
+        // Flushed exactly once; an empty queue paints nothing.
+        e.flush_pending_print(pane);
+        assert!(e.drain_events().is_empty());
+    }
+
+    #[test]
+    fn an_idle_print_goes_below_lines_queued_earlier() {
+        // After Ctrl-C the pane is idle a tick before the aborted task's own
+        // flush runs. A print in between must not overtake the queue.
+        let mut e = Engine::new();
+        let pane = e.mux.active_pane();
+        e.print(pane, "older", true);
+        e.drain_events();
+
+        e.print(pane, "newer", false);
+        let out = output_text(&e.drain_events());
+        assert!(out.contains("older\r\nnewer\r\n"), "{out:?}");
+        e.flush_pending_print(pane);
+        assert!(e.drain_events().is_empty(), "queue already drained");
     }
 
     #[test]

@@ -24,6 +24,9 @@ struct TaskEntry {
     /// the run's `ProgressiveConsumer` is gone and force a commit on
     /// whatever the pane happens to be running next.
     probe_timeout: Option<i32>,
+    /// Submitted at the prompt or by a prefix key, so it writes to the pane
+    /// and ends with a prompt. Programmatic `run()` calls do neither.
+    interactive: bool,
 }
 
 /// Cancel an armed probe-deadline timer. Never fails loudly: a missing
@@ -132,7 +135,13 @@ pub fn next_id() -> u64 {
     })
 }
 
-pub fn register(run_id: u64, pane: u32, handle: AbortHandle, controller: web_sys::AbortController) {
+pub fn register(
+    run_id: u64,
+    pane: u32,
+    handle: AbortHandle,
+    controller: web_sys::AbortController,
+    interactive: bool,
+) {
     TASKS.with(|t| {
         t.borrow_mut().insert(
             run_id,
@@ -141,6 +150,7 @@ pub fn register(run_id: u64, pane: u32, handle: AbortHandle, controller: web_sys
                 handle,
                 controller,
                 probe_timeout: None,
+                interactive,
             },
         );
     });
@@ -172,6 +182,13 @@ pub fn finish(run_id: u64) {
 /// Any other run still in flight for this pane?
 pub fn pane_busy(pane: u32) -> bool {
     TASKS.with(|t| t.borrow().values().any(|e| e.pane == pane))
+}
+
+/// A run that writes to this pane still in flight? Unlike `pane_busy`, a
+/// programmatic `run()` does not count: it never writes to the pane or
+/// redraws its prompt, so nothing would flush a print it held back.
+pub fn pane_interactive_busy(pane: u32) -> bool {
+    TASKS.with(|t| t.borrow().values().any(|e| e.pane == pane && e.interactive))
 }
 
 pub fn signal_for(run_id: u64) -> Option<web_sys::AbortSignal> {

@@ -4,6 +4,15 @@ browser-terminal uses semantic versioning when it publishes versioned artifacts.
 User-visible changes are summarized in release notes, including upgrade steps
 and breaking changes.
 
+## Unreleased
+
+- `bt.print(text, { pane? })` writes host lines above a pane's prompt and
+  redraws the prompt with any half-typed input. Text printed while a command
+  runs is queued until its prompt returns. Hosts that wrote to the private
+  pane manager to show banners can switch to this call.
+- The OPFS-unavailable warning now uses `print()`, so it redraws the real prompt
+  (status colour, any host prefix, typed input) instead of a hard-coded one.
+
 ## v0.5.0 — Browser filesystem by default
 
 - Automatically mount writable OPFS at `/scratch` with filesystem commands,
