@@ -274,10 +274,7 @@ export class BrowserTerminal {
       editor.dispose();
       const warning = 'browser-terminal: OPFS is unavailable; the default filesystem and file commands were not loaded.';
       this.logs.log('warn', warning, error);
-      this.paneManager.handleEvent({
-        type: 'paneOutput', pane: this.paneManager.active,
-        data: `\r\x1b[K\x1b[33mWarning: ${warning}\x1b[0m\r\n\x1b[32m❯\x1b[0m `,
-      });
+      if (!this.disposed) this.print(`\x1b[33mWarning: ${warning}\x1b[0m`);
       return;
     }
     try {
@@ -533,6 +530,25 @@ export class BrowserTerminal {
     this.promptProvider = typeof prefix === 'function' ? prefix : null;
     if (typeof prefix === 'string') this.core.set_prompt(prefix);
     else this.refreshPrompt();
+  }
+
+  /**
+   * Print host text (one or more lines) above the prompt of `pane`, defaulting
+   * to the active pane, then redraw the prompt with any half-typed input and
+   * its cursor. Styling (SGR) is kept; sequences that clear the screen or move
+   * the cursor off the line are removed. While a command runs in the pane the
+   * text is queued and appears above the prompt when the command finishes.
+   * Empty text prints a blank line. Throws a RangeError for an unknown pane,
+   * and an Error after disposal.
+   */
+  print(text: string, opts: { pane?: number } = {}): void {
+    this.assertLive();
+    const { pane } = opts;
+    // wasm-bindgen coerces with `>>> 0`: 1.5 would reach pane 1, NaN pane 0.
+    if (pane !== undefined && !(Number.isInteger(pane) && pane >= 0)) {
+      throw new RangeError(`browser-terminal: no pane ${String(pane)}`);
+    }
+    this.core.print(pane, String(text));
   }
 
   /** The current level for the library's own console output. */

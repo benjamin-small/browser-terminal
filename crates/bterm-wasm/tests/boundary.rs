@@ -291,6 +291,171 @@ async fn a_replaced_registration_is_a_warn_log_event() {
 }
 
 #[wasm_bindgen_test]
+async fn print_writes_above_the_prompt_and_keeps_partial_input() {
+    let core = make_core();
+    core.feed(0, "lin\x1b[D");
+    let before = events().length();
+    core.print(None, "-- ext tab: /dev/hda is ext3 --")
+        .expect("print to the active pane");
+    let output = prompt_outputs_since(before);
+    assert_eq!(output.len(), 1, "{output:?}");
+    let banner = output[0]
+        .find("\r\x1b[K-- ext tab: /dev/hda is ext3 --\r\n")
+        .expect("line cleared, banner written");
+    let prompt = output[0]
+        .find("\x1b[32m❯\x1b[0m lin\x1b[1D")
+        .expect("prompt, input and cursor restored");
+    assert!(banner < prompt, "{output:?}");
+
+    let err = core.print(Some(999), "nowhere").expect_err("unknown pane");
+    assert!(err.is_instance_of::<js_sys::RangeError>());
+
+    core.dispose();
+    assert!(core
+        .print(None, "gone")
+        .expect_err("disposed")
+        .is_instance_of::<js_sys::Error>());
+}
+
+#[wasm_bindgen_test]
+async fn print_waits_for_a_running_command_then_lands_above_its_prompt() {
+    let core = make_core();
+    command(
+        &core,
+        "held",
+        "return new Promise(resolve => { globalThis.__releasePrintRun = resolve; });",
+    );
+    core.feed(0, "held\r");
+    tick().await;
+    let before = events().length();
+    core.print(Some(0), "queued").expect("print while busy");
+    assert!(
+        prompt_outputs_since(before).is_empty(),
+        "do not erase the running command's line"
+    );
+    let release: Function = Reflect::get(&js_sys::global(), &"__releasePrintRun".into())
+        .expect("release")
+        .dyn_into()
+        .expect("function");
+    release.call0(&JsValue::NULL).expect("finish command");
+    tick().await;
+    let out = prompt_outputs_since(before).concat();
+    let line = out
+        .find("queued\r\n")
+        .expect("flushed when the prompt returns");
+    assert!(line < out.rfind('❯').expect("prompt"), "{out:?}");
+    let _ = Reflect::delete_property(&js_sys::global(), &"__releasePrintRun".into());
+    core.dispose();
+}
+
+#[wasm_bindgen_test]
+async fn print_queued_before_ctrl_c_is_flushed_by_the_abort() {
+    let core = make_core();
+    command(
+        &core,
+        "hangs",
+        "return new Promise((res, rej) => { ctx.signal.addEventListener('abort', () => rej(new Error('interrupted'))); });",
+    );
+    core.feed(0, "hangs\r");
+    tick().await;
+    let before = events().length();
+    core.print(None, "queued before ^C")
+        .expect("print while busy");
+    core.feed(0, "\x03");
+    tick().await;
+    let out = prompt_outputs_since(before).concat();
+    assert!(out.contains("queued before ^C\r\n"), "{out:?}");
+    core.dispose();
+}
+
+/// A command that never settles on its own: Ctrl-C rejects it.
+fn hanging_command(core: &BtermCore) {
+    command(
+        core,
+        "hang",
+        "ctx.log.write('50%'); return new Promise((res, rej) => { ctx.signal.addEventListener('abort', () => rej(new Error('interrupted'))); });",
+    );
+}
+
+fn dispatch(core: &BtermCore, json: &str) {
+    core.dispatch(js_sys::JSON::parse(json).expect("HostMsg"))
+        .expect("dispatched");
+}
+
+/// Print while `hang` still runs must not paint; Ctrl-C must then flush it.
+async fn assert_print_held_until_ctrl_c(core: &BtermCore, case: &str) {
+    let before = events().length();
+    core.print(Some(0), "held line").expect("print");
+    assert!(
+        prompt_outputs_since(before).is_empty(),
+        "{case}: printed over a running command's line"
+    );
+    core.feed(0, "\x03");
+    tick().await;
+    let out = prompt_outputs_since(before).concat();
+    assert!(
+        out.contains("held line\r\n"),
+        "{case}: never flushed: {out:?}"
+    );
+}
+
+#[wasm_bindgen_test]
+async fn print_waits_for_a_command_outliving_a_prefix_key_command() {
+    // The prefix-key command's own prompt clears `running` while `hang`
+    // still writes to the pane.
+    let core = make_core();
+    hanging_command(&core);
+    core.feed(0, "hang\r");
+    tick().await;
+    dispatch(&core, r#"{"type":"prefixKey"}"#);
+    dispatch(&core, r#"{"type":"key","key":"n"}"#);
+    tick().await;
+    assert_print_held_until_ctrl_c(&core, "prefix key").await;
+    core.dispose();
+}
+
+#[wasm_bindgen_test]
+async fn print_waits_for_a_command_started_in_the_ctrl_c_chunk() {
+    // The aborted run settles a tick later, while the new `hang` is live.
+    let core = make_core();
+    hanging_command(&core);
+    core.feed(0, "hang\r");
+    tick().await;
+    core.feed(0, "\x03hang\r");
+    tick().await;
+    assert_print_held_until_ctrl_c(&core, "ctrl-c chunk").await;
+    core.dispose();
+}
+
+#[wasm_bindgen_test]
+async fn print_waits_for_the_last_of_several_pasted_lines() {
+    let core = make_core();
+    hanging_command(&core);
+    core.feed(0, "echo fast\rhang\r");
+    tick().await;
+    assert_print_held_until_ctrl_c(&core, "pasted lines").await;
+    core.dispose();
+}
+
+#[wasm_bindgen_test]
+async fn a_programmatic_run_does_not_hold_prints_back() {
+    // `run()` never writes to the pane or draws a prompt, so nothing would
+    // ever flush a print it queued.
+    let core = make_core();
+    hanging_command(&core);
+    let pending = core.run(0, "hang".to_string());
+    tick().await;
+    let before = events().length();
+    core.print(Some(0), "not held").expect("print");
+    assert!(prompt_outputs_since(before)
+        .concat()
+        .contains("not held\r\n"));
+    core.feed(0, "\x03");
+    let _ = JsFuture::from(pending).await;
+    core.dispose();
+}
+
+#[wasm_bindgen_test]
 async fn a_partial_write_survives_a_throw_in_the_default_line_mode() {
     // The headline case. `line` is the DEFAULT mode, so a write with no
     // delimiter in it is still sitting in the buffer when the command

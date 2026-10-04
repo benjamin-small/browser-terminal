@@ -328,6 +328,23 @@ print a prompt. The prefix is plain text: escape sequences and controls are
 removed, and newlines, tabs, and carriage returns become spaces. `setPrompt()`
 throws after disposal.
 
+To tell the user something that is not the output of a command, such as a
+change in host context, print it above the prompt:
+
+```ts
+bt.print('-- ext tab: /dev/hda is ext3 --');
+bt.print('saved', { pane: 2 });
+```
+
+The text may span several lines. It goes to the active pane unless `pane` names
+another, and the prompt is redrawn afterwards with any half-typed input and the
+cursor where it was. Styling (SGR) is kept; sequences that clear the screen or
+move the cursor off the line are removed. While a command is running in the pane
+the text is queued, and appears above the prompt when the command finishes or
+is interrupted; programmatic `run()` calls do not hold it back. Empty text
+prints a blank line. `print()` throws a `RangeError` for an unknown pane and an
+`Error` after disposal.
+
 For a directory-aware prompt, supply a synchronous callback:
 
 ```ts

@@ -44,6 +44,11 @@ Use `setPrompt('/mnt ')` to place plain text before every pane's status marker.
 Include any spacing; `setPrompt('')` clears it. Idle panes redraw immediately,
 and panes with running tasks update at their next prompt.
 
+Use `print(text, { pane? })` to write host lines above a pane's prompt without
+running a command; see the package README's
+[host state](../packages/browser-terminal/README.md#host-state-as-shell-variables)
+section.
+
 ## Development and demo settings
 
 No `.env` file is required for development. The native `bterm` CLI optionally

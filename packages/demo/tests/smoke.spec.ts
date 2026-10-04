@@ -335,6 +335,37 @@ test('host prompt prefix redraws input and follows new panes', async ({ page }) 
   }
 });
 
+test('host print lands above the prompt and keeps partial input', async ({ page }) => {
+  await page.goto('/');
+  await waitForTerminal(page);
+  const root = page.locator('[data-browser-terminal]');
+  const input = root.locator('[data-active="true"] .xterm-helper-textarea');
+  await expect(input).toBeFocused();
+  await input.pressSequentially('echo hi');
+  await input.press('ArrowLeft');
+  await page.evaluate(() => window.bt.print('-- ext tab: /dev/hda is ext3 --'));
+
+  const rows = root.locator('[data-active="true"] .xterm-rows');
+  await expect(rows).toContainText('-- ext tab: /dev/hda is ext3 --');
+  const lines = await rows.locator(':scope > div').allInnerTexts();
+  const banner = lines.findIndex(line => line.includes('-- ext tab'));
+  const prompt = lines.findIndex(line => /❯\s+echo hi/.test(line));
+  expect(prompt, lines.join('\n')).toBe(banner + 1);
+
+  // The cursor came back where it was: typing lands before the final `i`.
+  await input.pressSequentially('X');
+  await input.press('Enter');
+  await expect(rows).toContainText('hXi');
+
+  // Non-integer ids are rejected rather than coerced onto some real pane.
+  const errors = await page.evaluate(() =>
+    [1.5, NaN, -1, 999].map((pane) => {
+      try { window.bt.print('x', { pane }); return 'printed'; } catch (e) { return (e as Error).name; }
+    }),
+  );
+  expect(errors).toEqual(['RangeError', 'RangeError', 'RangeError', 'RangeError']);
+});
+
 test('prefix chord splits the pane', async ({ page }) => {
   await page.goto('/');
   await waitForTerminal(page);

@@ -143,6 +143,7 @@ bt.panelMode;                  // current mode
 bt.setTheme({ background: '#ffffff', foreground: '#222222' }); // all current/future panes
 bt.focus(); bt.blur();          // keyboard focus for the active pane
 bt.setPrompt('/mnt ');          // plain-text prefix before every pane's status marker
+bt.print('-- tab changed --'); // host line above the prompt; { pane } targets one
 bt.setLogLevel('debug');       // library console output: silent|error|warn (default)|info|debug
 bt.show(); bt.hide(); bt.toggle(); bt.dispose();
 ```
@@ -152,6 +153,11 @@ Include any desired spacing; `bt.setPrompt('')` restores the default prompt.
 The prefix applies to existing and future panes. Idle panes redraw immediately
 without losing input; busy panes display it at their next prompt. Escape sequences
 and control characters are stripped, with line breaks and tabs converted to spaces.
+
+To tell the user something that is not command output, call `bt.print(text)`.
+The text (one or more lines) appears above the active pane's prompt, or the pane
+given as `{ pane }`, and the prompt is redrawn with any half-typed input. While a
+command runs in that pane the text is queued until its prompt returns.
 
 ## The shell language
 
