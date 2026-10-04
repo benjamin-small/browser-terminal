@@ -415,7 +415,7 @@ async fn yield_once() {
 
 /// Map a thrown/rejected JS value to a ShellError. `Error` instances and
 /// plain `{ message, help? }` objects keep their message and help; stacks go
-/// to the browser console.
+/// to the host's logger at `debug` -- the pane already shows the error.
 pub(crate) fn js_error_to_shell(e: &JsValue, span: Span, cmd: &str) -> ShellError {
     if e.is_object() {
         let get_str = |key: &str| {
@@ -425,7 +425,7 @@ pub(crate) fn js_error_to_shell(e: &JsValue, span: Span, cmd: &str) -> ShellErro
         };
         if let Some(msg) = get_str("message") {
             if let Some(stack) = get_str("stack") {
-                web_sys::console::error_1(&JsValue::from_str(&stack));
+                crate::host_log("debug", stack);
             }
             let mut err = ShellError::runtime(format!("`{cmd}`: {msg}")).with_span(span);
             if let Some(help) = get_str("help") {

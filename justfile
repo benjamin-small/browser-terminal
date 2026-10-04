@@ -26,7 +26,8 @@ build: wasm
 test:
     cargo test --workspace
 
-# Pure adapter contract tests against a deterministic filesystem.
+# Pure adapter contract tests against a deterministic filesystem, plus the
+# log-level filter.
 test-filesystem: build
     npm --prefix packages/browser-terminal run test:filesystem
 

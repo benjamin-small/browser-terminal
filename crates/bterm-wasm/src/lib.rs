@@ -34,6 +34,41 @@ use wasm_bindgen_futures::{future_to_promise, spawn_local};
 thread_local! {
     static ENGINE: RefCell<Option<Engine>> = const { RefCell::new(None) };
     static ON_EVENT: RefCell<Option<js_sys::Function>> = const { RefCell::new(None) };
+    /// Library log lines not yet handed to the host, as `(level, message)`.
+    static LOGS: RefCell<Vec<(&'static str, String)>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Send a library log line to the host as a `{ type: 'log', level, message }`
+/// event. The core never writes to the console itself: the TS wrapper
+/// filters by the host's log level and sends what passes to its logger.
+///
+/// Levels: `error` for library faults, `warn` for API misuse, `debug` for
+/// detail the pane already shows the user (a host command's stack).
+///
+/// Delivered at once when no engine borrow is held, since the host logger is
+/// JS. Inside a borrow it waits for the next `flush_events`.
+pub(crate) fn host_log(level: &'static str, message: impl Into<String>) {
+    LOGS.with(|l| l.borrow_mut().push((level, message.into())));
+    if ENGINE.with(|c| c.try_borrow_mut().is_ok()) {
+        deliver_logs();
+    }
+}
+
+fn deliver_logs() {
+    let logs = LOGS.with(|l| std::mem::take(&mut *l.borrow_mut()));
+    if logs.is_empty() {
+        return;
+    }
+    let Some(cb) = ON_EVENT.with(|c| c.borrow().clone()) else {
+        return;
+    };
+    for (level, message) in logs {
+        let event = js_sys::Object::new();
+        let _ = js_sys::Reflect::set(&event, &"type".into(), &"log".into());
+        let _ = js_sys::Reflect::set(&event, &"level".into(), &level.into());
+        let _ = js_sys::Reflect::set(&event, &"message".into(), &message.into());
+        let _ = cb.call1(&JsValue::NULL, &event);
+    }
 }
 
 fn engine_alive() -> bool {
@@ -75,6 +110,7 @@ impl EngineAccess for WasmAccess {
 /// its own events recursively.
 fn flush_events() {
     loop {
+        deliver_logs();
         let events = ENGINE.with(|c| {
             c.borrow_mut()
                 .as_mut()
@@ -507,7 +543,7 @@ impl BtermCore {
 
     /// Register a TS command. Errors if the name collides with a builtin;
     /// re-registering a TS command replaces it (the HMR behavior) with a
-    /// console warning.
+    /// `warn` log event.
     pub fn register_command(&self, sig: JsValue, f: js_sys::Function) -> Result<(), JsValue> {
         if !engine_alive() {
             return Err(js_error("browser-terminal: engine is disposed"));
@@ -534,9 +570,12 @@ impl BtermCore {
         });
         match outcome {
             Ok(bterm_core::registry::RegisterOutcome::Replaced) => {
-                web_sys::console::warn_1(&JsValue::from_str(&format!(
-                    "browser-terminal: command `{name}` re-registered (replacing the previous registration)"
-                )));
+                host_log(
+                    "warn",
+                    format!(
+                        "browser-terminal: command `{name}` re-registered (replacing the previous registration)"
+                    ),
+                );
                 Ok(())
             }
             Ok(_) => Ok(()),
@@ -893,5 +932,6 @@ pub fn dispose_engine() {
     tasks::abort_all();
     js_fn::clear();
     ON_EVENT.with(|c| *c.borrow_mut() = None);
+    LOGS.with(|l| l.borrow_mut().clear());
     ENGINE.with(|c| *c.borrow_mut() = None);
 }

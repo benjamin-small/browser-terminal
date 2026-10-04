@@ -62,6 +62,12 @@ permissions, cancellation, transaction rollback, overlapping mounts, editor
 conflicts, and experimental devices. After an existing build, run
 `npm --prefix packages/browser-terminal run test:filesystem` directly.
 
+The same command runs the log-level filter's Node tests. The wasm boundary
+suite checks that the core sends its log lines to the host as `log` events
+rather than writing to the console, and the smoke suite covers the default,
+`'silent'`, `'debug'`, custom-logger, cleanup-failure, and wrong-MIME-type
+behaviour in a browser.
+
 `packages/demo/tests/filesystem.spec.ts` exercises real OPFS through the WASM
 shell and editor in Chromium. The CI and release workflows now require these
 checks and the complete browser suite, alongside fmt, Clippy, native tests,

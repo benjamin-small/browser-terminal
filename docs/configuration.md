@@ -24,7 +24,11 @@ The supported options are:
 - `globalToggle`: install the opt-in `Ctrl+\`` window shortcut;
 - `dock`: choose `right`, `left`, or `float` panel placement;
 - `dockWidth`: set the initial docked width in pixels;
-- `dockTarget`: choose the element whose padding is adjusted while docked.
+- `dockTarget`: choose the element whose padding is adjusted while docked;
+- `logLevel`: which library console lines to emit — `silent`, `error`, `warn`
+  (default), `info`, or `debug`; change it later with `setLogLevel()`;
+- `logger`: an object with `error`, `warn`, `info`, and `debug` methods that
+  receives those lines instead of `console`.
 
 `wasmBinary` takes precedence over `wasmUrl`. Without either option, the
 package loads its bundled WebAssembly module. Call `dispose()` before creating

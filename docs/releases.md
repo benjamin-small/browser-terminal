@@ -12,6 +12,16 @@ and breaking changes.
   pane manager to show banners can switch to this call.
 - The OPFS-unavailable warning now uses `print()`, so it redraws the real prompt
   (status colour, any host prefix, typed input) instead of a hard-coded one.
+- `logLevel` (`'silent' | 'error' | 'warn' | 'info' | 'debug'`) and an optional
+  `logger` on `CreateOptions`, plus `bt.setLogLevel()` / `bt.logLevel`. All of the
+  library's console output goes through them.
+- **Changed default:** when a host command or redirect handler throws, its
+  stack is no longer sent to `console.error`; it is logged at `'debug'`. The
+  pane still shows the error, and `run()` still rejects with its message. Use
+  `logLevel: 'debug'` to restore the stack. Other output is unchanged at the
+  default `'warn'`.
+- A `.wasm` served without the `application/wasm` MIME type now warns through
+  the logger, not through wasm-bindgen's own `console.warn`.
 
 ## v0.5.0 — Browser filesystem by default
 

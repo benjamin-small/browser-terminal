@@ -207,6 +207,89 @@ async fn prompt_prefix_waits_for_a_running_command_to_finish() {
     core.dispose();
 }
 
+/// Replace `console.<method>` with a recorder; returns the restore function.
+fn spy_console(method: &str) -> Function {
+    Function::new_no_args(&format!(
+        "const c = globalThis.console, orig = c.{method}; globalThis.__consoleCalls = []; \
+         c.{method} = (...a) => globalThis.__consoleCalls.push(a.join(' ')); \
+         return () => {{ c.{method} = orig; }};"
+    ))
+    .call0(&JsValue::NULL)
+    .expect("spy installed")
+    .dyn_into()
+    .expect("restore fn")
+}
+
+fn console_calls() -> Vec<String> {
+    strings(&Reflect::get(&js_sys::global(), &"__consoleCalls".into()).expect("calls"))
+}
+
+/// `(level, message)` for each `log` event since `start`.
+fn logs_since(start: u32) -> Vec<(String, String)> {
+    events()
+        .iter()
+        .skip(start as usize)
+        .filter_map(|event| {
+            let kind = Reflect::get(&event, &"type".into()).ok()?.as_string()?;
+            if kind != "log" {
+                return None;
+            }
+            Some((
+                Reflect::get(&event, &"level".into()).ok()?.as_string()?,
+                Reflect::get(&event, &"message".into()).ok()?.as_string()?,
+            ))
+        })
+        .collect()
+}
+
+#[wasm_bindgen_test]
+async fn a_throwing_command_logs_its_stack_at_debug_instead_of_console_error() {
+    // The pane already shows the error; the stack is detail for whoever
+    // turned debug logging on, and the host decides where it goes.
+    let core = make_core();
+    command(&core, "boom", "throw new Error('kaboom');");
+    let restore = spy_console("error");
+    let before = events().length();
+    let failed = run_line(&core, "boom").await;
+    core.feed(0, "boom\r");
+    tick().await;
+    restore.call0(&JsValue::NULL).expect("restored");
+
+    assert!(failed.is_err());
+    assert!(
+        console_calls().is_empty(),
+        "the core must not write to the console itself: {:?}",
+        console_calls()
+    );
+    let logs = logs_since(before);
+    assert_eq!(
+        logs.len(),
+        2,
+        "one per failure, run() and pane alike: {logs:?}"
+    );
+    assert!(logs
+        .iter()
+        .all(|(level, message)| level == "debug" && message.contains("kaboom")));
+    core.dispose();
+}
+
+#[wasm_bindgen_test]
+async fn a_replaced_registration_is_a_warn_log_event() {
+    let core = make_core();
+    command(&core, "twice", "return 1;");
+    let restore = spy_console("warn");
+    let before = events().length();
+    command(&core, "twice", "return 2;");
+    restore.call0(&JsValue::NULL).expect("restored");
+
+    assert!(console_calls().is_empty(), "{:?}", console_calls());
+    let logs = logs_since(before);
+    assert_eq!(logs.len(), 1, "{logs:?}");
+    assert_eq!(logs[0].0, "warn");
+    assert!(logs[0].1.contains("`twice` re-registered"), "{logs:?}");
+    core.dispose();
+}
+
 #[wasm_bindgen_test]
 async fn print_writes_above_the_prompt_and_keeps_partial_input() {
     let core = make_core();
