@@ -4,7 +4,7 @@ browser-terminal uses semantic versioning when it publishes versioned artifacts.
 User-visible changes are summarized in release notes, including upgrade steps
 and breaking changes.
 
-## Unreleased
+## v0.6.0 — Host messages and quieter consoles
 
 - `bt.print(text, { pane? })` writes host lines above a pane's prompt and
   redraws the prompt with any half-typed input. Text printed while a command
@@ -22,6 +22,8 @@ and breaking changes.
   default `'warn'`.
 - A `.wasm` served without the `application/wasm` MIME type now warns through
   the logger, not through wasm-bindgen's own `console.warn`.
+
+See the [release notes](release-notes/v0.6.0.md) for upgrade guidance and coverage.
 
 ## v0.5.0 — Browser filesystem by default
 
