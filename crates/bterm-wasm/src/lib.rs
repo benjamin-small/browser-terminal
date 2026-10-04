@@ -210,7 +210,7 @@ fn spawn_pipeline(pane: u32, line: String) {
         return;
     };
     let (fut, handle) = Abortable::wrap(execute_line(WasmAccess, pane, line, run_id));
-    tasks::register(run_id, pane, handle, controller);
+    tasks::register(run_id, pane, handle, controller, true);
     arm_probe_deadline(run_id, pane);
     spawn_local(async move {
         let result = fut.await;
@@ -223,6 +223,14 @@ fn spawn_pipeline(pane: u32, line: String) {
                     p.editor.set_last_status(false);
                 }
             });
+        }
+        // Host prints queued while the pane was busy go above the prompt once
+        // its last interactive run ends -- not at this run's `finish_pane`,
+        // which a prefix-key command or a second pasted line can reach while
+        // another run is still writing to the pane.
+        if engine_alive() && !tasks::pane_interactive_busy(pane) {
+            WasmAccess.with(|e| e.flush_pending_print(pane));
+            flush_events();
         }
     });
 }
@@ -393,6 +401,26 @@ impl BtermCore {
         });
         flush_events();
         Ok(())
+    }
+
+    /// Write host text above a pane's prompt (the active pane when `pane` is
+    /// absent), then redraw the prompt with any half-typed input. A pane
+    /// running a command queues the text until its prompt returns.
+    /// Programmatic `run()` calls never write to the pane, so they don't
+    /// hold prints back.
+    pub fn print(&self, pane: Option<u32>, text: &str) -> Result<(), JsValue> {
+        if !engine_alive() {
+            return Err(js_error("browser-terminal: engine is disposed"));
+        }
+        let printed = WasmAccess.with(|e| {
+            let pane = pane.unwrap_or_else(|| e.mux.active_pane());
+            let busy = tasks::pane_interactive_busy(pane);
+            e.print(pane, text, busy).then_some(()).ok_or(pane)
+        });
+        flush_events();
+        printed.map_err(|pane| {
+            js_sys::RangeError::new(&format!("browser-terminal: no pane {pane}")).into()
+        })
     }
 
     /// Current layout snapshot (sessions, windows, pane rects).
@@ -810,7 +838,7 @@ impl BtermCore {
         let sink = Rc::new(bterm_core::sink::CollectingSink::new());
         let (fut, handle) =
             Abortable::wrap(eval_to_value(WasmAccess, pane, line, run_id, sink.clone()));
-        tasks::register(run_id, pane, handle, controller);
+        tasks::register(run_id, pane, handle, controller, false);
         future_to_promise(async move {
             let result = fut.await;
             tasks::finish(run_id);

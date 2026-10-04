@@ -60,6 +60,9 @@ pub struct PaneShell {
     pub rows: u16,
     /// A pipeline task is in flight. (The abort handle lives host-side.)
     pub running: bool,
+    /// Host lines from `Engine::print` held while `running`, written above
+    /// the prompt when the pane next draws it. Dropped with the pane.
+    pub pending_print: String,
 }
 
 impl PaneShell {
@@ -69,6 +72,7 @@ impl PaneShell {
             cols: 80,
             rows: 24,
             running: false,
+            pending_print: String::new(),
         }
     }
 }
