@@ -15,6 +15,8 @@ import type { Effects, EngineEvent, HostMsg, LayoutSnapshot } from './events.js'
 import { argumentTarget, completionEdit, type CompletionProvider } from './completion.js';
 import { BrowserFilesystem } from './filesystem/index.js';
 import { createTextEditor } from './filesystem/editor.js';
+import { LogFilter, type LogLevel, type Logger } from './log.js';
+export type { LogLevel, Logger } from './log.js';
 export type { CompletionProvider, CompletionItem, ArgumentCompletionContext } from './completion.js';
 import type {
   CommandFn,
@@ -91,9 +93,41 @@ export interface CreateOptions {
   dockWidth?: number;
   /** Element padded to make room when docked. Defaults to `document.body`. */
   dockTarget?: HTMLElement;
+  /**
+   * Which of the library's own console lines to emit (default `'warn'`).
+   * A host command error the pane already shows is `'debug'`; library
+   * faults are `'error'`. `'silent'` emits nothing. See `setLogLevel()`.
+   */
+  logLevel?: LogLevel;
+  /**
+   * Where the library's log lines go (default: the global `console`). It may
+   * be called synchronously from inside a running command, so it must not
+   * call `dispose()`.
+   */
+  logger?: Logger;
 }
 
 let instanceLive = false;
+/** The wasm module instantiates once per page; later `init()` calls return it. */
+let wasmLoaded = false;
+
+/**
+ * What to hand wasm-bindgen's `init()`. For a URL, fetch it here: when the
+ * server sends the wrong MIME type, the generated loader falls back with a
+ * bare `console.warn` no log level can reach. Doing that check here routes
+ * the warning through the host's filter and passes plain bytes instead.
+ */
+async function wasmSource(opts: CreateOptions, logs: LogFilter): Promise<BufferSource | Response | undefined> {
+  if (opts.wasmBinary) return opts.wasmBinary;
+  if (wasmLoaded) return undefined;
+  const response = await fetch(opts.wasmUrl ?? new URL('./wasm/bterm_wasm_bg.wasm', import.meta.url));
+  if (!response.ok || response.headers.get('Content-Type') === 'application/wasm') return response;
+  logs.log(
+    'warn',
+    'browser-terminal: the server does not serve .wasm as application/wasm; using the slower non-streaming load.',
+  );
+  return response.arrayBuffer();
+}
 
 export class BrowserTerminal {
   private defaultFilesystem: BrowserFilesystem | null = null;
@@ -110,6 +144,7 @@ export class BrowserTerminal {
   private readonly lifecycleListeners = new Set<(event: { type: 'dispose' } | { type: 'sessionClosed'; session: number }) => void>();
 
   private constructor(
+    private readonly logs: LogFilter,
     private readonly core: BtermCore,
     private readonly paneManager: PaneManager,
     private readonly panel: PanelHost | null,
@@ -123,12 +158,11 @@ export class BrowserTerminal {
         'browser-terminal: one instance per page in v1; call dispose() first.',
       );
     }
-    await init({
-      module_or_path:
-        opts.wasmBinary ??
-        opts.wasmUrl ??
-        new URL('./wasm/bterm_wasm_bg.wasm', import.meta.url),
-    });
+    // Before any async work, so a bad level fails fast.
+    const logs = new LogFilter(opts.logLevel, opts.logger);
+    const source = await wasmSource(opts, logs);
+    await init(source === undefined ? undefined : { module_or_path: source });
+    wasmLoaded = true;
 
     let core!: BtermCore;
     let self!: BrowserTerminal;
@@ -169,6 +203,10 @@ export class BrowserTerminal {
     );
 
     core = new BtermCore((event: EngineEvent) => {
+      if (event.type === 'log') {
+        logs.log(event.level, event.message);
+        return;
+      }
       switch (event.type) {
         case 'layoutChanged':
           self.lastSnapshot = event.snapshot;
@@ -190,7 +228,7 @@ export class BrowserTerminal {
     resizeObserver.observe(mount);
 
     instanceLive = true;
-    self = new BrowserTerminal(core, paneManager, panel, resizeObserver, mount);
+    self = new BrowserTerminal(logs, core, paneManager, panel, resizeObserver, mount);
 
     if (opts.globalToggle) {
       self.globalToggleHandler = (ev: KeyboardEvent) => {
@@ -235,7 +273,7 @@ export class BrowserTerminal {
       filesystem.dispose();
       editor.dispose();
       const warning = 'browser-terminal: OPFS is unavailable; the default filesystem and file commands were not loaded.';
-      console.warn(warning, error);
+      this.logs.log('warn', warning, error);
       this.paneManager.handleEvent({
         type: 'paneOutput', pane: this.paneManager.active,
         data: `\r\x1b[K\x1b[33mWarning: ${warning}\x1b[0m\r\n\x1b[32m❯\x1b[0m `,
@@ -289,7 +327,7 @@ export class BrowserTerminal {
 
   private notifyLifecycle(event: { type: 'dispose' } | { type: 'sessionClosed'; session: number }): void {
     for (const listener of [...this.lifecycleListeners]) {
-      try { listener(event); } catch (error) { console.error('Terminal cleanup failed', error); }
+      try { listener(event); } catch (error) { this.logs.log('error', 'Terminal cleanup failed', error); }
     }
   }
 
@@ -495,6 +533,20 @@ export class BrowserTerminal {
     this.promptProvider = typeof prefix === 'function' ? prefix : null;
     if (typeof prefix === 'string') this.core.set_prompt(prefix);
     else this.refreshPrompt();
+  }
+
+  /** The current level for the library's own console output. */
+  get logLevel(): LogLevel {
+    return this.logs.level;
+  }
+
+  /**
+   * Change which of the library's console lines are emitted. Throws a
+   * RangeError for an unknown level, and an Error after disposal.
+   */
+  setLogLevel(level: LogLevel): void {
+    this.assertLive();
+    this.logs.level = level;
   }
 
   /** Recompute a dynamic prompt after host state changes. Layout changes do this automatically. */

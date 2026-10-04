@@ -4,6 +4,19 @@ browser-terminal uses semantic versioning when it publishes versioned artifacts.
 User-visible changes are summarized in release notes, including upgrade steps
 and breaking changes.
 
+## Unreleased
+
+- `logLevel` (`'silent' | 'error' | 'warn' | 'info' | 'debug'`) and an optional
+  `logger` on `CreateOptions`, plus `bt.setLogLevel()` / `bt.logLevel`. All of the
+  library's console output goes through them.
+- **Changed default:** when a host command or redirect handler throws, its
+  stack is no longer sent to `console.error`; it is logged at `'debug'`. The
+  pane still shows the error, and `run()` still rejects with its message. Use
+  `logLevel: 'debug'` to restore the stack. Other output is unchanged at the
+  default `'warn'`.
+- A `.wasm` served without the `application/wasm` MIME type now warns through
+  the logger, not through wasm-bindgen's own `console.warn`.
+
 ## v0.5.0 — Browser filesystem by default
 
 - Automatically mount writable OPFS at `/scratch` with filesystem commands,

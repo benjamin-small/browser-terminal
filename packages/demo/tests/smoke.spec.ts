@@ -993,3 +993,104 @@ test('a running pipeline keeps the variable values its line started with', async
   expect(result.finished).toBe('original');
   expect(result.next).toBe('changed');
 });
+
+test('a throwing host command shows in the pane and stays out of the console by default', async ({ page }) => {
+  const consoleLines: string[] = [];
+  page.on('console', message => {
+    if (['error', 'warning'].includes(message.type())) consoleLines.push(message.text());
+  });
+  await page.goto('/');
+  await waitForTerminal(page);
+  await page.evaluate(() => {
+    window.bt.registerCommand({ name: 'cd-missing' }, () => { throw new Error('no such file or directory'); });
+  });
+  const root = page.locator('[data-browser-terminal]');
+  const input = root.locator('[data-active="true"] .xterm-helper-textarea');
+  await input.pressSequentially('cd-missing');
+  await input.press('Enter');
+  await expect(root.locator('.xterm-rows')).toContainText('no such file or directory');
+  expect(await page.evaluate(() => window.bt.logLevel)).toBe('warn');
+  expect(consoleLines).toEqual([]);
+});
+
+test('logLevel and logger route, filter and silence the library output', async ({ page }) => {
+  const consoleLines: string[] = [];
+  page.on('console', message => {
+    // The dev server logs its own `[vite] connected.` at debug.
+    if (['error', 'warning', 'debug', 'info'].includes(message.type()) && !message.text().startsWith('[vite]')) {
+      consoleLines.push(message.text());
+    }
+  });
+  await page.goto('/');
+  await waitForTerminal(page);
+  const result = await page.evaluate(async () => {
+    const Terminal = window.bt.constructor as typeof BrowserTerminal;
+    window.bt.dispose();
+    const records: [string, string][] = [];
+    const record = (level: string) => (...args: unknown[]) => { records.push([level, args.map(String).join(' ')]); };
+    const bt = window.bt = await Terminal.create({
+      filesystem: false,
+      logLevel: 'debug',
+      logger: { error: record('error'), warn: record('warn'), info: record('info'), debug: record('debug') },
+    });
+    bt.registerCommand({ name: 'boom' }, () => { throw new Error('kaboom'); });
+    await bt.run('boom').catch(() => {});
+    const atDebug = records.splice(0);
+
+    bt.registerCommand({ name: 'boom' }, () => { throw new Error('kaboom'); }); // replaced: a warn
+    bt.setLogLevel('silent');
+    await bt.run('boom').catch(() => {});
+    bt.registerCommand({ name: 'boom' }, () => 1);
+    const whileSilent = records.splice(0);
+
+    let badLevel = '';
+    try { bt.setLogLevel('loud' as never); } catch (error) { badLevel = (error as Error).name; }
+    const level = bt.logLevel;
+
+    // The wrapper's own lines go through the same filter.
+    bt.setLogLevel('error');
+    bt.onLifecycle(event => { if (event.type === 'dispose') throw new Error('listener broke'); });
+    bt.dispose();
+    const cleanup = records.splice(0);
+    return { atDebug, whileSilent, badLevel, level, cleanup };
+  });
+  expect(result.atDebug).toHaveLength(1);
+  expect(result.atDebug[0][0]).toBe('debug');
+  expect(result.atDebug[0][1]).toContain('kaboom');
+  expect(result.whileSilent.map(([level]) => level)).toEqual(['warn']);
+  expect(result.badLevel).toBe('RangeError');
+  expect(result.level).toBe('silent');
+  expect(result.cleanup).toEqual([['error', 'Terminal cleanup failed Error: listener broke']]);
+  expect(consoleLines, 'a custom logger replaces the console entirely').toEqual([]);
+});
+
+test('silent emits nothing even when storage is unavailable', async ({ page }) => {
+  const consoleLines: string[] = [];
+  page.on('console', message => {
+    if (message.type() !== 'log' && !message.text().startsWith('[vite]')) consoleLines.push(message.text());
+  });
+  await page.goto('/');
+  await waitForTerminal(page);
+  await page.evaluate(async () => {
+    const Terminal = window.bt.constructor as typeof BrowserTerminal;
+    window.bt.dispose();
+    Object.defineProperty(navigator.storage, 'getDirectory', { configurable: true, value: undefined });
+    window.bt = await Terminal.create({ logLevel: 'silent' });
+  });
+  await expect(page.locator('[data-browser-terminal] .xterm-screen')).toContainText('OPFS is unavailable');
+  expect(consoleLines).toEqual([]);
+});
+
+test('a wasm file with the wrong MIME type warns once, through the logger', async ({ page }) => {
+  const warnings: string[] = [];
+  page.on('console', message => { if (message.type() === 'warning') warnings.push(message.text()); });
+  await page.route('**/*.wasm', async route => {
+    const response = await route.fetch();
+    await route.fulfill({ response, headers: { ...response.headers(), 'content-type': 'application/octet-stream' } });
+  });
+  await page.goto('/');
+  await waitForTerminal(page);
+  expect(await page.evaluate(() => window.bt.run('echo works').then(r => r.value))).toBe('works');
+  expect(warnings.filter(text => text.includes('instantiateStreaming'))).toEqual([]);
+  expect(warnings.filter(text => text.includes('application/wasm'))).toHaveLength(1);
+});

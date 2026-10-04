@@ -52,7 +52,7 @@
   "scripts": {
     "prepublishOnly": "node scripts/check-publishable.mjs",
     "build": "node scripts/gen-xterm-css.mjs && tsc -p tsconfig.json && rm -rf dist/wasm && cp -R src/wasm dist/wasm && cp ../../LICENSE ./LICENSE",
-    "test:filesystem": "node --test tests/filesystem.test.mjs"
+    "test:filesystem": "node --test tests/filesystem.test.mjs tests/log.test.mjs"
   },
   "dependencies": {
     "@xterm/addon-fit": "^0.11.0",

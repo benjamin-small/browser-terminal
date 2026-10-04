@@ -54,7 +54,8 @@ export type EngineEvent =
   | { type: 'sessionClosed'; session: number }
   | { type: 'prefixState'; active: boolean }
   | { type: 'hidePanel' }
-  | { type: 'fatal'; message: string };
+  | { type: 'fatal'; message: string }
+  | { type: 'log'; level: 'error' | 'warn' | 'info' | 'debug'; message: string };
 
 export type HostMsg =
   | { type: 'prefixKey' }

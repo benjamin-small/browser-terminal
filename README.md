@@ -143,6 +143,7 @@ bt.panelMode;                  // current mode
 bt.setTheme({ background: '#ffffff', foreground: '#222222' }); // all current/future panes
 bt.focus(); bt.blur();          // keyboard focus for the active pane
 bt.setPrompt('/mnt ');          // plain-text prefix before every pane's status marker
+bt.setLogLevel('debug');       // library console output: silent|error|warn (default)|info|debug
 bt.show(); bt.hide(); bt.toggle(); bt.dispose();
 ```
 

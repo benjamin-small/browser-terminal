@@ -29,7 +29,7 @@ commands or folder picker are needed: `echo hello > hello.txt; cat hello.txt`
 works immediately. The prompt follows the working directory.
 
 If OPFS is missing or access fails, creation still succeeds with the core
-shell. A warning appears in the terminal and through `console.warn`; filesystem
+shell. A warning appears in the terminal and as a `warn` log line; filesystem
 commands are not installed. `bt.filesystem` exposes the default adapter, or
 `null` when unavailable or disabled. Files belong to this origin and browser
 profile and may be removed by clearing site data or browser eviction.
@@ -102,8 +102,21 @@ await BrowserTerminal.create({
   dock,           // 'right' (default) | 'left' | 'float'
   dockWidth,      // number — docked width in px, default 480
   dockTarget,     // HTMLElement — what gets padded, default document.body
+  logLevel,       // 'silent' | 'error' | 'warn' (default) | 'info' | 'debug'
+  logger,         // { error, warn, info, debug } — default: the global console
 });
 ```
+
+### Console output
+
+The library's own console lines go through `logLevel`. At the default `'warn'`
+you see library faults (`error`) and misuse such as re-registering a command
+(`warn`). When a host command throws, the pane shows the error and its stack is
+logged at `'debug'`, so an ordinary user mistake does not show up as a red
+console error. `'silent'` emits nothing. Change the level at runtime with
+`bt.setLogLevel('debug')` and read it back from `bt.logLevel`. Pass a `logger`
+to send the lines to your own sink instead of `console`. A logger can be called
+from inside a running command, so it must not call `dispose()`.
 
 Other surface: `registerCommand` / `unregisterCommand`, `registerFn` /
 `unregisterFn` (a named function usable as `@name` in any selector position —
