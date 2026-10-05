@@ -22,9 +22,10 @@ concurrency:
 
 permissions:
   contents: read
-  # Required for npm provenance: npm exchanges this for a Sigstore signature
-  # linking the published tarball to this workflow and commit, so anyone can
-  # verify the package was built here and not uploaded from a laptop.
+  # Required for npm trusted publishing and provenance: npm exchanges this
+  # OIDC token for a short-lived publish credential scoped to this workflow
+  # (no long-lived NPM_TOKEN secret exists to leak), and for a Sigstore
+  # signature linking the published tarball to this workflow and commit.
   id-token: write
 
 jobs:
@@ -75,20 +76,22 @@ jobs:
         with:
           node-version: 20
           cache: npm
-          # Points npm at the public registry and wires NODE_AUTH_TOKEN into
-          # the generated .npmrc, so no token is ever written by hand.
+          # Points npm at the public registry. No token is configured:
+          # publishing authenticates through the npm trusted publisher
+          # registered for this repo and workflow file (release.yml).
           registry-url: https://registry.npmjs.org
 
-      - name: Require npm token for publishing
-        if: ${{ github.event_name == 'push' || !inputs.dry_run }}
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      # Trusted publishing needs npm >= 11.5.1; Node 20 bundles npm 10, which
+      # would fall back to token auth and fail with a confusing 404/ENEEDAUTH
+      # at the very last step. Upgrade and assert before any build work, and
+      # on dry runs too, so the gauntlet exercises the same npm that publishes.
+      - name: Upgrade npm for trusted publishing
         run: |
-          # A whitespace-only secret can pass a simple `-z` check but npm
-          # still treats it as unauthenticated. Validate the token shape too,
-          # without ever printing the credential.
-          if [[ ! "$NODE_AUTH_TOKEN" =~ ^npm_[[:alnum:]_-]+$ ]]; then
-            echo "::error::NPM_TOKEN is missing or malformed; add a granular npm access token with publish rights"
+          npm install -g npm@^11.5.1
+          v=$(npm --version)
+          echo "npm $v"
+          if ! node -e 'const [a,b,c]=process.argv[1].split(".").map(Number); process.exit(a>11||(a===11&&(b>5||(b===5&&c>=1)))?0:1)' "$v"; then
+            echo "::error::npm $v is too old for trusted publishing (need >= 11.5.1)"
             exit 1
           fi
 
@@ -169,8 +172,6 @@ jobs:
 
       - name: Publish
         if: ${{ github.event_name == 'push' || !inputs.dry_run }}
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           # Publishing the exact tarball that was just verified, rather than
           # re-packing from the directory, so what ships is byte-for-byte what

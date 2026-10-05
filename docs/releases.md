@@ -60,4 +60,7 @@ and verify the packed artifact from a clean checkout. Run the release workflow
 with `dry_run: true` before pushing a version tag. Record native folder save and
 manual browser coverage explicitly in the release notes. Tags matching `v*`
 trigger npm publishing through `.github/workflows/release.yml`; pushes to `main`
-deploy the demos to GitHub Pages.
+deploy the demos to GitHub Pages. Publishing authenticates with npm trusted
+publishing (OIDC), not a stored token: the package's trusted publisher on npm
+must name this repository and the workflow file `release.yml`, so renaming that
+file breaks publishing until the npm setting is updated to match.
