@@ -32,7 +32,7 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -72,18 +72,18 @@ jobs:
             exit 1
           fi
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
-          node-version: 20
+          node-version: 24
           cache: npm
           # Points npm at the public registry. No token is configured:
           # publishing authenticates through the npm trusted publisher
           # registered for this repo and workflow file (release.yml).
           registry-url: https://registry.npmjs.org
 
-      # Trusted publishing needs npm >= 11.5.1; Node 20 bundles npm 10, which
-      # would fall back to token auth and fail with a confusing 404/ENEEDAUTH
-      # at the very last step. Upgrade and assert before any build work, and
+      # Trusted publishing needs npm >= 11.5.1; an older npm (whatever the
+      # runner's Node happens to bundle) would fall back to token auth and fail
+      # with a confusing 404/ENEEDAUTH at the very last step. Upgrade and assert before any build work, and
       # on dry runs too, so the gauntlet exercises the same npm that publishes.
       - name: Upgrade npm for trusted publishing
         run: |
@@ -192,7 +192,7 @@ jobs:
 
       # Keeps the verified artifact around whether or not the publish step
       # ran, so a failed release can be inspected rather than reconstructed.
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: npm-tarball
