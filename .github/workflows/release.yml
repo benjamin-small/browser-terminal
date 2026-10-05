@@ -110,11 +110,19 @@ jobs:
 
       # Refuse to republish an existing version rather than letting npm fail
       # halfway through, and make the "already released" case obvious.
+      # On a dry run nothing is published, so an existing version only warns:
+      # that lets the gauntlet run from main between releases.
       - name: Version must not already exist on the registry
+        env:
+          DRY_RUN: ${{ github.event_name != 'push' && inputs.dry_run }}
         run: |
           name=$(node -p "require('./packages/browser-terminal/package.json').name")
           version=$(node -p "require('./packages/browser-terminal/package.json').version")
           if npm view "$name@$version" version >/dev/null 2>&1; then
+            if [ "$DRY_RUN" = "true" ]; then
+              echo "::warning::$name@$version is already published; a real release must bump the version"
+              exit 0
+            fi
             echo "::error::$name@$version is already published; bump the version"
             exit 1
           fi
