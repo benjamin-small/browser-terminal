@@ -388,7 +388,7 @@ that's the better integration point than component state in either framework.
 
 ## Development
 
-Requires Rust stable with the `wasm32-unknown-unknown` target, Node.js 20.0 or
+Requires Rust stable with the `wasm32-unknown-unknown` target, Node.js 24 or
 newer, `just`, `wasm-bindgen-cli` matching the pinned crate version, and
 Binaryen 120 or newer (CI pins version 131).
 
